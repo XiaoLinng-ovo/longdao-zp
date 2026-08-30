@@ -465,7 +465,7 @@ function saveJDDraft(id){
  const j=job(id);const editor=document.getElementById('jd-editor-'+id);if(!j||!editor)return false;
  const value=editor.value.trim();
  if(!value){toast('JD 内容不能为空');return false;}
- j.jd=value;j.jdVersions=Array.isArray(j.jdVersions)?j.jdVersions:[];j.jdVersions.push({version:j.jdVersions.length+1,content:value,createdAt:new Date().toISOString().slice(0,16).replace('T',' '),note:j.published?'人工更新':'保存草稿'});jdEditingJob=null;save();toast(j.published?'JD 已更新并同步至已发布渠道':'JD 内容已保存');render();return true;
+ const wasPublished=!!j.published;j.jd=value;j.jdConfirmed=false;j.jdVersions=Array.isArray(j.jdVersions)?j.jdVersions:[];j.jdVersions.push({version:j.jdVersions.length+1,content:value,createdAt:new Date().toISOString().slice(0,16).replace('T',' '),note:wasPublished?'人工编辑（待确认）':'保存草稿',confirmed:false});if(wasPublished){j.published=false;if(j.status==='sourcing')j.status='spec';}jdEditingJob=null;save();toast(wasPublished?'JD 已更新，请确认后重新发布':'JD 内容已保存，请确认后发布');render();return true;
 }
 
 /* ================== 各视图 ================== */
@@ -634,7 +634,7 @@ function vResume(){
   <td class="num ${sc(c.score)}" style="font-size:17px">${c.score}</td>
   <td>${statusTag(c.status)}</td>
   <td style="white-space:nowrap"><button class="btn btn-o btn-sm" onclick="event.stopPropagation();showCand('${c.id}')">详情</button>
-  ${c.status==='pending'&&c.score>=80?`<button class="btn btn-g btn-sm" style="margin-left:5px" onclick="event.stopPropagation();passCand('${c.id}')">通过复筛</button>`:''}</td></tr>`).join('')}</table>
+  ${c.status==='pending'?`${c.score>=80?`<button class="btn btn-g btn-sm" style="margin-left:5px" onclick="event.stopPropagation();passCand('${c.id}')">通过复筛</button>`:''}<button class="btn btn-danger btn-sm" style="margin-left:5px" onclick="event.stopPropagation();rejectCand('${c.id}')">不通过</button>`:''}</td></tr>`).join('')}</table>
  <div class="hint" style="margin-top:12px">AI 评分维度：硬性条件 / 经验匹配 / 技能匹配 / 潜力素质，百分制，默认 80 分进入复筛。点击「详情」查看评分依据。</div>`
  :'<div class="empty"><div class="e-icon">📭</div>暂无简历。发布职位后，各渠道简历将自动回流入库。</div>'}</div>`;
 }
@@ -647,7 +647,7 @@ function showCand(id){const c=cand(id);
  <div style="display:flex;align-items:center;gap:14px;background:var(--primary-bg);border-radius:10px;padding:14px;margin-bottom:16px">
   <div class="ring" style="width:58px;height:58px;background:#fff;color:var(--primary);font-size:18px;border:3px solid var(--primary)">${c.score}</div>
   <div><b>AI 综合评分 ${c.score} 分</b><div style="font-size:12px;color:var(--muted);margin-top:4px">${c.score>=80?'✅ 达到面试阈值（80分），建议进入复筛':'❌ 未达到面试阈值（80分）'}</div></div>
-  <div style="margin-left:auto">${c.status==='pending'&&c.score>=80?`<button class="btn btn-g" onclick="passCand('${c.id}');closeModal()">✓ 通过复筛</button>`:''}</div></div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${c.status==='pending'&&c.score>=80?`<button class="btn btn-g" onclick="passCand('${c.id}');closeModal()">✓ 通过复筛</button>`:''}${c.status==='pending'?`<button class="btn btn-danger" onclick="rejectCand('${c.id}');closeModal()">✕ 不通过</button>`:''}</div></div>
  <div class="rd-sec"><h4>基本信息</h4><p>${c.name} · ${c.gender} · ${c.age}岁 · ${c.edu} · ${c.school}（${c.major}）· 期望薪资 ${c.expect}</p></div>
  <div class="rd-sec"><h4>工作经历</h4><p>${c.company} · ${c.lastTitle}（近 ${c.stability} 年在职）</p><p style="color:var(--muted)">${c.exp}</p></div>
  <div class="rd-sec"><h4>技能标签</h4><p>${c.skills.map(s=>`<span class="tag t-blue" style="margin:2px">${s}</span>`).join(' ')}</p></div>
@@ -658,6 +658,7 @@ function showCand(id){const c=cand(id);
  · 潜力评估：稳定性 ${c.stability}年/段，${c.dims.potential>=80?'成长轨迹清晰':'成长性一般'}</p></div>
  </div>`);}
 function passCand(id){const c=cand(id);c.status='passed';save();render();scheduleRoute('interview',c.name+' 已通过复筛，自动进入面试中心',{job:c.jobId},1000);}
+function rejectCand(id){const c=cand(id);if(!c||c.status!=='pending')return;c.status='rejected';save();render();toast(c.name+' 未通过复筛，已移入人才库');}
 
 function vChat(){
  const log=state.chatLog;
@@ -709,7 +710,7 @@ function vInterview(){
  ${passed.length?passed.map(c=>`<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #f1f5f9">
   <div class="ring" style="width:42px;height:42px;background:var(--primary-bg);color:var(--primary);font-size:13px">${c.score}</div>
    <div style="flex:1"><a class="link-title" onclick="showCand('${c.id}')">${c.name}</a> <span style="font-size:12px;color:var(--muted)">${c.edu} · ${c.years}年 · ${c.company}</span><div style="font-size:11.5px;color:var(--muted);margin-top:3px">${(()=>{const iv=state.interviews.find(x=>x.candId===c.id);return iv&&iv.stage==='online'&&iv.status==='passed'?'线上初试通过 · 待安排线下复试': '复筛通过 · '+(state.forms[c.id]?'面试表已生成':'待生成面试问题表')})()}</div></div>
-  ${!state.forms[c.id]?`<button class="btn btn-ai btn-sm" onclick="genForm('${c.id}')">⚡ 生成面试表</button>`:`<button class="btn btn-p btn-sm" onclick="openForm('${c.id}')">打开面试表</button>`}
+  ${!state.forms[c.id]?`<button class="btn btn-ai btn-sm" onclick="genForm('${c.id}')">⚡ 生成面试表</button>`:`<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-p btn-sm" onclick="openForm('${c.id}')">打开面试表</button><button class="btn btn-o btn-sm" onclick="curCandForm='${c.id}';arrangeInterview()">📅 ${state.interviews.some(iv=>iv.candId===c.id)?'重新安排':'预约面试'}</button></div>`}
  </div>`).join(''):'<div class="empty" style="padding:28px"><div class="e-icon">✅</div>暂无待面试候选人</div>'}
  </div>
  <div class="card card-pad"><h3>📅 面试安排</h3>
@@ -743,7 +744,7 @@ function renderFormModal(){
   </div></div>`).join('')}
  <div style="display:flex;align-items:center;gap:14px;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
   <div style="flex:1;font-size:13px">本表得分：<b class="num ${sc(sc0||0)}" style="font-size:20px">${sc0!=null?sc0:'—'}</b> / 100　${list.filter(q=>q.lv).length===10?'<span class="tag t-green">✓ 本表已完成</span>':''}</div>
-  ${!state.interviews.some(iv=>iv.candId===curCandForm)?`<button class="btn btn-o" onclick="arrangeInterview()">📅 安排面试</button>`:''}
+  <button class="btn btn-o" onclick="arrangeInterview()">📅 ${state.interviews.some(iv=>iv.candId===curCandForm)?'重新安排面试':'安排面试'}</button>
   <button class="btn btn-p" onclick="submitForm()">提交本表</button>
  </div>
  <div class="hint" style="margin-top:10px">💬 正式版支持对话式调整：如"增加一道考察抗压能力的HR题""前3题改为场景题"。三表全部提交后自动进入加权统计与排序。</div>`);
@@ -763,12 +764,14 @@ function arrangeInterview(){const c=cand(curCandForm);
  <div class="form-row"><label class="fl">面试官（系统按日历自动推荐）</label><input class="f" id="iv-people" value="业务：技术总监 · HR：招聘经理 · BOSS：CTO"></div>
  <div class="hint">提交后模拟发送面试通知，并向面试官生成面试表待办。</div>
  <div style="margin-top:16px"><button class="btn btn-p" onclick="confirmInterview()">✓ 确认安排并发送通知</button></div>`);}
-function confirmInterview(){const c=cand(curCandForm);
- const mode=document.getElementById('iv-mode').value;const stage=document.getElementById('iv-stage')?.value||'online';const time=document.getElementById('iv-time').value;
- const people=document.getElementById('iv-people').value.split('·').map(s=>s.trim().split('：')[0]);
- state.interviews.push({candId:curCandForm,mode,stage,time,interviewers:people,status:'scheduled'});save();
- closeModal();toast('面试已安排：'+time+'，已模拟通知候选人与面试官');go('interview');}
-
+ function confirmInterview(){const c=cand(curCandForm);if(!c)return;
+  const mode=document.getElementById('iv-mode').value;const stage=document.getElementById('iv-stage')?.value||'online';const time=document.getElementById('iv-time').value;
+  const people=document.getElementById('iv-people').value.split('·').map(s=>s.trim().split('：')[0]);
+  const interview={candId:curCandForm,mode,stage,time,interviewers:people,status:'scheduled'};
+  const existing=state.interviews.findIndex(iv=>iv.candId===curCandForm);
+  if(existing>-1)state.interviews[existing]=interview;else state.interviews.push(interview);
+  save();
+  closeModal();toast('面试已安排：'+time+'，已模拟通知候选人与面试官');go('interview');}
 function submitOnlineInterviewScore(id){const c=cand(id);if(!c)return;const iv=state.interviews.find(x=>x.candId===id&&x.stage==='online');openModal('📝 录入线上初试评分',`<div class="detail-hero"><div class="ring rank-1">${c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · 线上初试</div></div></div><div class="score-entry"><label class="fl" for="online-score">初试评分</label><div style="display:flex;align-items:center;gap:12px"><input class="f score-input" id="online-score" type="number" min="0" max="100" value="${iv?.onlineScore??85}"><span style="font-size:14px;color:var(--muted)">/ 100 分</span></div><div class="hint" style="margin-top:10px">评分 ≥ 80 分：通过初试，进入线下复试；低于 80 分：结束本次流程。</div></div><div class="detail-actions"><button class="btn btn-o" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="confirmOnlineInterviewScore('${id}')">保存评分</button></div>`);}
 function confirmOnlineInterviewScore(id){const c=cand(id);if(!c)return;const input=document.getElementById('online-score');const raw=Number(input?.value);if(!Number.isFinite(raw)||raw<0||raw>100){toast('请输入 0-100 的有效分数');return;}const score=Math.round(raw);const iv=state.interviews.find(x=>x.candId===id&&x.stage==='online');if(iv){iv.onlineScore=score;iv.status=score>=80?'passed':'rejected';}if(score>=80){c.status='passed';toast(c.name+' 线上初试通过，已进入线下复试待办');}else{c.status='rejected';toast(c.name+' 线上初试未通过');}save();closeModal();render();}
 function totalScore(id){const s=state.scores[id];if(!s)return null;const b=formScore(s.business),h=formScore(s.hr),o=formScore(s.boss);
@@ -836,7 +839,7 @@ function showJobDetail(id){const j=job(id);if(!j)return;const cs=state.cands.fil
  <div class="detail-actions">${j.status==='dingtalk'?(j.approvalStatus==='pending'?`<button class="btn btn-g" onclick="approveJob('${j.id}');showJobDetail('${j.id}')">✓ 通过审批</button><button class="btn btn-o" onclick="rejectJob('${j.id}');closeModal()">驳回</button>`:j.approvalStatus==='rejected'?`<span class="tag t-gray">已驳回：${(j.approvalHistory||[]).slice(-1)[0]?.note||'请重新提交'}</span>`:`<button class="btn btn-p" onclick="closeModal();importJob('${j.id}')">一键导入需求</button>`):`<button class="btn btn-p" onclick="closeModal();go('job',{job:'${j.id}'})">进入岗位管理</button>`}<button class="btn btn-o" onclick="closeModal();go('resume',{job:'${j.id}'})">查看候选人</button><button class="btn btn-o" onclick="closeModal();go('channel',{job:'${j.id}'})">渠道数据</button></div>`);
  writeRoute(curView,{job:curJob,detail:'job:'+id},true);}
 
-function showInterviewDetail(id){const c=cand(id);const iv=state.interviews.find(x=>x.candId===id);if(!c)return;openModal('面试详情 · '+c.name,`<div class="detail-hero"><div class="ring rank-1">${c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · ${c.company}</div></div>${statusTag(c.status)}</div>${iv?`<div class="detail-kv"><div><small>面试方式</small><b>${iv.mode==='online'?'在线面试（钉钉会议）':'线下面试'}</b></div><div><small>面试时间</small><b>${iv.time}</b></div><div><small>面试官</small><b>${iv.interviewers.join('、')}</b></div><div><small>通知状态</small><b>候选人与面试官均已确认</b></div></div>`:'<div class="hint">尚未安排具体面试时间。</div>'}<div class="detail-actions"><button class="btn btn-p" onclick="closeModal();openForm('${id}')">打开面试表</button><button class="btn btn-o" onclick="closeModal();showCand('${id}')">候选人详情</button></div>`);writeRoute(curView,{job:curJob,detail:'interview:'+id},true);}
+function showInterviewDetail(id){const c=cand(id);const iv=state.interviews.find(x=>x.candId===id);if(!c)return;openModal('面试详情 · '+c.name,`<div class="detail-hero"><div class="ring rank-1">${c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · ${c.company}</div></div>${statusTag(c.status)}</div>${iv?`<div class="detail-kv"><div><small>面试方式</small><b>${iv.mode==='online'?'在线面试（钉钉会议）':'线下面试'}</b></div><div><small>面试时间</small><b>${iv.time}</b></div><div><small>面试官</small><b>${iv.interviewers.join('、')}</b></div><div><small>通知状态</small><b>候选人与面试官均已确认</b></div></div>`:'<div class="hint">尚未安排具体面试时间。</div>'}<div class="detail-actions"><button class="btn btn-p" onclick="closeModal();openForm('${id}')">打开面试表</button><button class="btn btn-o" onclick="curCandForm='${id}';arrangeInterview()">📅 重新安排面试</button><button class="btn btn-o" onclick="closeModal();showCand('${id}')">候选人详情</button></div>`);writeRoute(curView,{job:curJob,detail:'interview:'+id},true);}
 
 function showOfferDetail(id){const c=cand(id);if(!c)return;const of=state.offers[id];const t=totalScore(id);openModal('Offer 与录用详情 · '+c.name,`<div class="detail-hero"><div class="ring rank-1">${t||c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · 期望薪资 ${c.expect}</div></div><span class="tag ${of&&of.accepted?'t-green':of&&of.sent?'t-purple':'t-gold'}" style="margin-left:auto">${of?(of.accepted?'已接受 Offer':of.sent?'Offer 已发送':of.done?'审批通过':'审批中'):'待发起审批'}</span></div>
  ${of?`<div class="flow-line">${of.chain.map((s,i)=>`<span class="fl-node ${s[1]?'ok':!of.chain.slice(0,i).some(x=>!x[1])?'cur':''}">${s[0]} ${s[1]?'✓':'⏳'}</span>${i<of.chain.length-1?'<span class="fl-arrow">→</span>':''}`).join('')}</div>`:'<div class="hint">综合评分达到录用阈值，可发起定薪审批。</div>'}
