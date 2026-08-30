@@ -288,8 +288,8 @@ function load(){
 function normalizeState(s){
   s.forms=s.forms||{};s.scores=s.scores||{};s.interviews=Array.isArray(s.interviews)?s.interviews:[];
   s.offers=s.offers||{};s.onboarding=s.onboarding||{};s.approvalHistory=s.approvalHistory||{};s.talentTags=s.talentTags||{};s.chatLog=s.chatLog||[];s.seq=s.seq||9;
-  (s.cands||[]).forEach(c=>{c.jobIds=Array.isArray(c.jobIds)?c.jobIds:(c.jobId?[c.jobId]:[]);c.tags=Array.isArray(c.tags)?c.tags:(s.talentTags[c.id]||[]);c.skills=Array.isArray(c.skills)?c.skills:(typeof c.skills==='string'?c.skills.split(/[,\\s]+/).filter(Boolean):[]);c.dims=c.dims&&typeof c.dims==='object'?c.dims:{hard:0,exp:0,skill:0,potential:0};s.talentTags[c.id]=c.tags;});
-  (s.jobs||[]).forEach(j=>{j.publishChannels=Array.isArray(j.publishChannels)?j.publishChannels:(typeof j.publishChannels==='string'?j.publishChannels.split(/[,\\s]+/).filter(Boolean):[]);if(j.status==='dingtalk'&&!j.approvalStatus)j.approvalStatus='pending';j.approvalHistory=s.approvalHistory[j.id]||j.approvalHistory||[];if(!j.approvalHistory.length&&j.from){j.approvalHistory=[{node:'用人部门负责人',status:'approved',time:j.createdAt||'2026-08-25',note:'需求已审批通过'}];}s.approvalHistory[j.id]=j.approvalHistory;});
+  (s.cands||[]).forEach(c=>{c.jobIds=Array.isArray(c.jobIds)?c.jobIds:(c.jobId?[c.jobId]:[]);c.tags=Array.isArray(c.tags)?c.tags:(s.talentTags[c.id]||[]);c.skills=Array.isArray(c.skills)?c.skills:(typeof c.skills==='string'?c.skills.split(/[,\s]+/).filter(Boolean):[]);c.dims=c.dims&&typeof c.dims==='object'?c.dims:{hard:0,exp:0,skill:0,potential:0};s.talentTags[c.id]=c.tags;});
+  (s.jobs||[]).forEach(j=>{j.publishChannels=Array.isArray(j.publishChannels)?j.publishChannels:(typeof j.publishChannels==='string'?j.publishChannels.split(/[,\s]+/).filter(Boolean):[]);if(j.status==='dingtalk'&&!j.approvalStatus)j.approvalStatus='pending';j.approvalHistory=s.approvalHistory[j.id]||j.approvalHistory||[];if(!j.approvalHistory.length&&j.from){j.approvalHistory=[{node:'用人部门负责人',status:'approved',time:j.createdAt||'2026-08-25',note:'需求已审批通过'}];}s.approvalHistory[j.id]=j.approvalHistory;});
   return s;
 }
 state=normalizeState(state);
