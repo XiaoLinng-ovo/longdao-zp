@@ -183,6 +183,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 input.f,select.f,textarea.f{width:100%;border:1px solid var(--border);border-radius:8px;padding:8.5px 12px;font-size:13px;font-family:inherit;outline:none;background:#fff}
 input.f:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-bg)}
 label.fl{font-size:12px;color:var(--muted);display:block;margin-bottom:5px}
+.score-input{width:150px!important;max-width:150px;height:44px;padding:6px 10px!important;font-size:22px!important;font-weight:700;text-align:center}
 .form-row{margin-bottom:14px}
 .hint{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.5}
 .ring{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
@@ -222,7 +223,7 @@ const seedJobs=[
   from:'钉钉审批 DD202608200013',createdAt:'2026-08-21',
   spec:null,specConfirmed:false,jd:null,published:true,publishChannels:['BOSS直聘','猎聘','前程无忧'],
   desc:'负责核心交易系统微服务架构设计与高并发性能优化，参与技术选型与团队技术建设。'},
- {id:'J002',title:'销售总监',dept:'销售管理部',headcount:1,salary:'40K-60K×16薪',urgency:'中',status:'dingtalk',
+ {id:'J002',title:'销售总监',dept:'销售管理部',headcount:1,salary:'40K-60K×16薪',urgency:'中',status:'dingtalk',approvalStatus:'pending',approvalHistory:[{node:'用人部门负责人',status:'approved',time:'2026-08-24',note:'部门负责人已提交'}],
   from:'钉钉审批 DD202608240028',createdAt:'2026-08-24',
   spec:null,specConfirmed:false,jd:null,published:false,publishChannels:[],
   desc:'负责华东区销售团队管理与大客户拓展，制定销售策略并达成业绩目标。'}
@@ -282,8 +283,15 @@ let serverSyncReady=false;
 function load(){
   try{const s=JSON.parse(localStorage.getItem(STORE_KEY));if(s&&s.jobs)return s;}catch(e){}
   return {jobs:JSON.parse(JSON.stringify(seedJobs)),cands:JSON.parse(JSON.stringify(seedCands)),
-    forms:{},scores:{},interviews:[],offers:{},chatLog:[],seq:9};
+    forms:{},scores:{},interviews:[],offers:{},onboarding:{},approvalHistory:{},chatLog:[],seq:9};
 }
+function normalizeState(s){
+  s.forms=s.forms||{};s.scores=s.scores||{};s.interviews=Array.isArray(s.interviews)?s.interviews:[];
+  s.offers=s.offers||{};s.onboarding=s.onboarding||{};s.approvalHistory=s.approvalHistory||{};s.chatLog=s.chatLog||[];s.seq=s.seq||9;
+  (s.jobs||[]).forEach(j=>{j.publishChannels=Array.isArray(j.publishChannels)?j.publishChannels:[];j.approvalHistory=s.approvalHistory[j.id]||j.approvalHistory||[];if(!j.approvalHistory.length&&j.from){j.approvalHistory=[{node:'用人部门负责人',status:'approved',time:j.createdAt||'2026-08-25',note:'需求已审批通过'}];}s.approvalHistory[j.id]=j.approvalHistory;});
+  return s;
+}
+state=normalizeState(state);
 function save(){
   const serialized=JSON.stringify(state);
   localStorage.setItem(STORE_KEY,serialized);
@@ -295,7 +303,7 @@ async function bootstrapServerState(){
     const response=await fetch(API_BASE+'/api/state');
     if(response.ok){
       const remote=await response.json();
-      if(remote&&remote.jobs){state=remote;localStorage.setItem(STORE_KEY,JSON.stringify(state));renderNav();render();}
+      if(remote&&remote.jobs){state=normalizeState(remote);localStorage.setItem(STORE_KEY,JSON.stringify(state));renderNav();render();}
     }else if(response.status===404){
       await fetch(API_BASE+'/api/state',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
     }
@@ -438,6 +446,8 @@ function saveSpecDraft(id){
  save();return true;
 }
 function saveSpecDraftOnly(id){if(saveSpecDraft(id)){toast('岗位说明书草稿已保存');render();}}
+function selectJDVersion(id,index){const j=job(id);if(!j)return;j.jdPreviewVersion=Number(index);save();render();}
+function jdVersionsFor(j){if(!Array.isArray(j.jdVersions)||!j.jdVersions.length)return[{version:1,content:j.jd||'',createdAt:'',note:'当前内容'}];return j.jdVersions;}
 function editJD(id){jdEditingJob=id;render();}
 function cancelJDEdit(){jdEditingJob=null;render();}
 function togglePublishChannel(id,channel,checked){
@@ -451,7 +461,7 @@ function saveJDDraft(id){
  const j=job(id);const editor=document.getElementById('jd-editor-'+id);if(!j||!editor)return false;
  const value=editor.value.trim();
  if(!value){toast('JD 内容不能为空');return false;}
- j.jd=value;jdEditingJob=null;save();toast(j.published?'JD 已更新并同步至已发布渠道':'JD 内容已保存');render();return true;
+ j.jd=value;j.jdVersions=Array.isArray(j.jdVersions)?j.jdVersions:[];j.jdVersions.push({version:j.jdVersions.length+1,content:value,createdAt:new Date().toISOString().slice(0,16).replace('T',' '),note:j.published?'人工更新':'保存草稿'});jdEditingJob=null;save();toast(j.published?'JD 已更新并同步至已发布渠道':'JD 内容已保存');render();return true;
 }
 
 /* ================== 各视图 ================== */
@@ -473,6 +483,7 @@ function vDash(){
  state.cands.filter(c=>c.status==='passed').forEach(c=>todo.push({t:`${c.name}：待生成面试问题表并安排面试`,a:'去处理',v:'interview'}));
  Object.keys(state.scores).forEach(id=>{const c=cand(id);if(c&&c.status==='interview'&&!state.offers[id])todo.push({t:`${c.name}：三表评分已提交，综合得分 ${totalScore(id)}，待录用决策`,a:'查看统计',v:'stat'});});
  const hired=state.cands.filter(c=>c.status==='hired').length;
+ state.cands.filter(c=>c.status==='hired'&&state.onboarding[c.id]?.status!=='done').forEach(c=>todo.push({t:`${c.name}：入职任务待完成`,a:'查看任务',v:'offer'}));
  return `
  <div class="grid g4" style="margin-bottom:18px">
   ${[['📋','进行中岗位',jobs.filter(j=>j.status!=='done').length,'个','job'],['📥','待处理简历',state.cands.filter(c=>c.status==='pending').length,'份','resume'],['🎯','面试中候选人',state.cands.filter(c=>c.status==='interview').length,'人','interview'],['✅',hired?'本月入职':'待办事项',hired||todo.length,hired?'人':'项',hired?'offer':'dash']]
@@ -500,7 +511,7 @@ function vDash(){
  </table></div>`;
 }
 function vReq(){
- const pend=state.jobs.filter(j=>j.status==='dingtalk');
+ const pend=state.jobs.filter(j=>j.status==='dingtalk'&&j.approvalStatus!=='rejected');
  return `<div class="card card-pad" style="margin-bottom:18px"><h3>🔗 钉钉审批系统对接 <span class="tag t-green">已连接</span></h3>
  <div style="font-size:13px;color:var(--muted);line-height:1.8">系统通过钉钉开放平台 API 实时订阅「招聘需求申请」审批流。审批通过的表单自动同步至此，HR 一键导入即可生成招聘需求单，无需重复录入。<br>当前对接组织：龙道数据集团 · 审批模板：用人需求申请（DD-HR-001）</div></div>
  <div class="card card-pad"><h3>📥 待导入的审批单（${pend.length}）</h3>
@@ -509,13 +520,16 @@ function vReq(){
    <div style="flex:1"><div style="font-weight:600;font-size:14px">${j.title} × ${j.headcount}人 <span class="tag t-orange">紧急度：${j.urgency}</span></div>
    <div style="font-size:12px;color:var(--muted);margin-top:5px">${j.from} · ${j.dept} · ${j.salary} · 审批通过于 ${j.createdAt} · 发起人：用人部门负责人</div>
    <div style="font-size:12px;color:var(--muted);margin-top:3px">需求描述：${j.desc}</div></div>
-   <div style="display:flex;gap:8px"><button class="btn btn-o" onclick="showJobDetail('${j.id}')">查看详情</button><button class="btn btn-p" onclick="importJob('${j.id}')">⬇ 一键导入</button></div></div>`).join(''):
+   <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-o" onclick="showJobDetail('${j.id}')">查看详情</button>${j.approvalStatus==='approved'||!j.approvalStatus?`<button class="btn btn-p" onclick="importJob('${j.id}')">⬇ 一键导入</button>`:`<button class="btn btn-g" onclick="approveJob('${j.id}')">✓ 通过审批</button><button class="btn btn-o" onclick="rejectJob('${j.id}')">驳回</button>`}</div></div>`).join(''):
   '<div class="empty"><div class="e-icon">📭</div>暂无待导入审批单。演示：点击下方按钮重新载入示例审批单</div><div style="text-align:center;margin-top:10px"><button class="btn btn-o" onclick="mockDingtalk()">模拟钉钉推送一条新审批</button></div>'}
  </div>
  <div class="card card-pad" style="margin-top:18px"><h3>📚 全部招聘需求</h3><table class="tbl"><tr><th>编号</th><th>岗位</th><th>部门</th><th>人数</th><th>紧急度</th><th>状态</th><th>详情</th></tr>
  ${state.jobs.map(j=>`<tr class="clickable" onclick="showJobDetail('${j.id}')"><td>${j.id}</td><td><a class="link-title">${j.title}</a></td><td>${j.dept}</td><td>${j.headcount}</td><td><span class="tag ${j.urgency==='高'?'t-red':'t-gold'}">${j.urgency}</span></td><td>${j.status==='dingtalk'?'<span class="tag t-orange">待导入</span>':'<span class="tag t-green">已入库</span>'}</td><td><button class="btn btn-o btn-sm">详情</button></td></tr>`).join('')}</table></div>`;
 }
-function mockDingtalk(){const j={id:'J'+(++state.seq),title:['产品经理','前端开发工程师','HRBP','数据分析师'][Math.floor(Math.random()*4)],dept:['产品部','技术研发部','人力资源部','数据中心'][Math.floor(Math.random()*4)],headcount:1,salary:'20K-35K×13薪',urgency:'中',status:'dingtalk',from:'钉钉审批 DD202608250'+state.seq,createdAt:'2026-08-25',spec:null,specConfirmed:false,jd:null,published:false,publishChannels:[],desc:'由钉钉审批流模拟推送生成的示例需求单。'};state.jobs.push(j);save();toast('已接收钉钉审批推送：'+j.title);render();}
+function mockDingtalk(){const j={id:'J'+(++state.seq),title:['产品经理','前端开发工程师','HRBP','数据分析师'][Math.floor(Math.random()*4)],dept:['产品部','技术研发部','人力资源部','数据中心'][Math.floor(Math.random()*4)],headcount:1,salary:'20K-35K×13薪',urgency:'中',status:'dingtalk',approvalStatus:'pending',approvalHistory:[{node:'用人部门负责人',status:'approved',time:'2026-08-25',note:'部门负责人已提交'}],from:'钉钉审批 DD202608250'+state.seq,createdAt:'2026-08-25',spec:null,specConfirmed:false,jd:null,published:false,publishChannels:[],desc:'由钉钉审批流模拟推送生成的示例需求单。'};state.jobs.push(j);save();toast('已接收钉钉审批推送：'+j.title);render();}
+function approveJob(id){const j=job(id);if(!j)return;j.approvalStatus='approved';j.approvalHistory=(j.approvalHistory||[]).concat({node:'HR',status:'approved',time:new Date().toISOString().slice(0,10),note:'HR 审批通过'});state.approvalHistory[id]=j.approvalHistory;save();toast('审批已通过，可导入招聘需求');render();renderNav();}
+function rejectJob(id){const j=job(id);if(!j)return;openModal('↩ 驳回招聘需求',`<div class="form-row"><label class="fl" for="reject-reason">驳回原因</label><textarea class="f" id="reject-reason" rows="3">请补充招聘预算与到岗时间</textarea></div><div class="hint">驳回后该审批单会从待办列表移除，审批历史会保留记录。</div><div class="detail-actions"><button class="btn btn-o" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="confirmRejectJob('${id}')">确认驳回</button></div>`);}
+function confirmRejectJob(id){const j=job(id);if(!j)return;const reason=(document.getElementById('reject-reason')?.value||'').trim();if(!reason){toast('请填写驳回原因');return;}j.approvalStatus='rejected';j.approvalHistory=(j.approvalHistory||[]).concat({node:'HR',status:'rejected',time:new Date().toISOString().slice(0,10),note:reason});state.approvalHistory[id]=j.approvalHistory;save();closeModal();toast('审批单已驳回');render();renderNav();}
 function importJob(id){const j=job(id);j.status='spec';save();toast('招聘需求已导入：'+j.title);curJob=id;
  openModal('✅ 需求导入成功',`<div style="line-height:2;font-size:13.5px">
  <div>岗位：<b>${j.title}</b>（${j.dept} · ${j.headcount}人 · ${j.salary}）</div>
@@ -528,7 +542,7 @@ function vJob(){
  const jobs=state.jobs;
  const j=job(curJob)||jobs[0];
  const editing=!!j.spec&&specEditingJob===j.id;
- const jdEditing=!!j.jd&&jdEditingJob===j.id;
+ const jdEditing=!!j.jd&&jdEditingJob===j.id; const jdVersions=jdVersionsFor(j); const jdSelected=Math.min(jdVersions.length-1,Math.max(0,Number(j.jdPreviewVersion)||jdVersions.length-1)); const jdPreview=jdVersions[jdSelected]||{content:j.jd||''};
  const specView=!j.spec?`<div class="empty"><div class="e-icon">🤖</div>AI 尚未生成岗位说明书<div style="margin-top:14px"><button class="btn btn-ai" onclick="genSpec('${j.id}')">⚡ AI 一键生成岗位说明书</button></div></div>`:
  editing?`<div class="spec-editor">
    <div class="hint" style="margin-bottom:12px">AI 已生成初稿，请按实际招聘要求修改；每行一项，保存后再确认。</div>
@@ -559,8 +573,8 @@ function vJob(){
  `<div class="channel-options" aria-label="选择发布渠道">${['BOSS直聘','猎聘','前程无忧','公司官网'].map(ch=>{const selected=Array.isArray(j.publishChannels)&&j.publishChannels.includes(ch);return `<label class="channel-check ${selected?'selected':''}"><input type="checkbox" ${selected?'checked':''} onchange="togglePublishChannel('${j.id}','${ch}',this.checked)"><span>${ch}</span></label>`}).join('')}</div>
   <textarea class="jd-editor" id="jd-editor-${j.id}" aria-label="JD 内容">${escHtml(j.jd)}</textarea>
   <div class="detail-actions"><button class="btn btn-p" onclick="saveJDDraft('${j.id}')">${j.published?'保存并更新已发布内容':'保存 JD 内容'}</button><button class="btn btn-o" onclick="cancelJDEdit()">取消编辑</button></div>`:
- `<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">${['BOSS直聘','猎聘','前程无忧','公司官网'].map(ch=>`<span class="tag ${j.publishChannels.includes(ch)?'t-green':'t-gray'}">${j.publishChannels.includes(ch)?'✓ ':''}${ch}</span>`).join('')}</div>
-  <div style="background:#f8fafc;border-radius:10px;padding:16px;font-size:12.5px;white-space:pre-wrap;line-height:1.8;max-height:260px;overflow-y:auto;border:1px solid var(--border)">${escHtml(j.jd)}</div>
+ `<div class="hint" style="margin-bottom:10px">${jdPreview.createdAt||''} · ${jdPreview.note||'版本'} · 支持 BOSS直聘、猎聘、前程无忧、官网渠道</div><div class="channel-options" aria-label="选择发布渠道">${['BOSS直聘','猎聘','前程无忧','公司官网'].map(ch=>{const selected=Array.isArray(j.publishChannels)&&j.publishChannels.includes(ch);return `<label class="channel-check ${selected?'selected':''}"><input type="checkbox" ${selected?'checked':''} onchange="togglePublishChannel('${j.id}','${ch}',this.checked)"><span>${ch}</span></label>`}).join('')}</div>
+  <div style="background:#f8fafc;border-radius:10px;padding:16px;font-size:12.5px;white-space:pre-wrap;line-height:1.8;max-height:260px;overflow-y:auto;border:1px solid var(--border)">${escHtml(jdPreview.content)}</div>
   <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap"><button class="btn btn-o" onclick="editJD('${j.id}')">✎ 编辑 JD</button>${j.published?'<span class="tag t-green" style="padding:8px 16px">✓ 已发布至勾选渠道，简历自动回流</span>':`<button class="btn btn-p" onclick="publish('${j.id}')">🚀 一键发布到勾选渠道</button>`}${j.published?`<button class="btn btn-o" onclick="go('resume')">查看简历库</button>`:''}</div>`;
  return `<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">${jobs.map(x=>`<span class="if-tab ${x.id===j.id?'active':''}" onclick="jobSel('${x.id}')">${escHtml(x.title)} <span style="font-size:11px">${{dingtalk:'待导入',spec:'说明书中',sourcing:'招聘中',interviewing:'面试中',done:'已完成'}[x.status]}</span></span>`).join('')}</div>
  ${!j||j.status==='dingtalk'?'<div class="card card-pad empty"><div class="e-icon">📥</div>该岗位尚未导入招聘需求<br><br><button class="btn btn-p" onclick="go(\'req\')">前往钉钉审批导入</button></div>':
@@ -579,21 +593,28 @@ function genSpec(id){
  j.jd=null;j.published=false;
  save();toast('AI 岗位说明书已重新生成（第 '+generation+' 版）');render();
 }
-function confirmSpec(id){if(!saveSpecDraft(id))return;const j=job(id);j.specConfirmed=true;specEditingJob=null;save();toast('岗位说明书已确认');openModal('✅ 说明书已确认',`<div style="font-size:13.5px;line-height:2">岗位说明书已获用人部门确认并存入岗位说明书库。<br>下一步可一键生成多渠道 JD 并发布。</div><div style="margin-top:14px"><button class="btn btn-ai" onclick="closeModal();genJD('${id}')">⚡ 立即一键生成 JD</button></div>`);render();}
-function genJD(id){const j=job(id);j.jd=aiJD(j);save();toast('JD 已生成（4 渠道版本）');render();}
+function confirmSpec(id){const j=job(id);if(!j||!j.spec)return;const isEditing=specEditingJob===id;if(isEditing&&!saveSpecDraft(id))return;j.specConfirmed=true;specEditingJob=null;save();toast('岗位说明书已确认');openModal('✅ 说明书已确认',`<div style="font-size:13.5px;line-height:2">岗位说明书已获用人部门确认并存入岗位说明书库。<br>下一步可一键生成多渠道 JD 并发布。</div><div style="margin-top:14px"><button class="btn btn-ai" onclick="closeModal();genJD('${id}')">⚡ 立即一键生成 JD</button></div>`);render();}
+function genJD(id){const j=job(id);if(!j||!j.spec)return;j.jd=aiJD(j);j.jdVersions=Array.isArray(j.jdVersions)?j.jdVersions:[];j.jdVersions.push({version:j.jdVersions.length+1,content:j.jd,createdAt:new Date().toISOString().slice(0,16).replace('T',' '),note:'AI 生成'});save();toast('JD 已生成（4 渠道版本）');render();}
 function publish(id){const j=job(id);if(!j)return;if(!Array.isArray(j.publishChannels)||!j.publishChannels.length){toast('请至少勾选一个发布渠道');return;}if(!j.jd||!j.jd.trim()){toast('请先填写 JD 内容');return;}j.published=true;j.status='sourcing';save();render();scheduleRoute('resume','职位发布成功，自动进入简历库',{job:id},1100);}
 
+function channelCandidates(name){return state.cands.filter(c=>{const j=job(c.jobId);return (c.source===name||(name==='公司官网'&&c.source==='官网投递'))&&j&&j.published&&Array.isArray(j.publishChannels)&&j.publishChannels.includes(name);});}
 function vChannel(){
- const channels=[['BOSS直聘','已连接',state.cands.filter(c=>c.source==='BOSS直聘').length,92,'¥6,800'],['猎聘','已连接',state.cands.filter(c=>c.source==='猎聘').length,89,'¥9,500'],['前程无忧','已连接',state.cands.filter(c=>c.source==='前程无忧').length,66,'¥4,200'],['公司官网','已连接',state.cands.filter(c=>c.source==='官网投递').length,0,'¥0']];
+ const names=['BOSS直聘','猎聘','前程无忧','公司官网']; const channels=names.map(name=>{const cs=channelCandidates(name);const jobs=state.jobs.filter(j=>j.published&&Array.isArray(j.publishChannels)&&j.publishChannels.includes(name));return [name,'已连接',cs.length,cs.length?Math.round(cs.reduce((sum,c)=>sum+c.score,0)/cs.length):0,name==='BOSS直聘'?'¥6,800':name==='猎聘'?'¥9,500':name==='前程无忧'?'¥4,200':'¥0',jobs.length];});
  return `<div class="grid g4" style="margin-bottom:18px">${channels.map((c,i)=>`<div class="card stat clickable" onclick="showChannelDetail('${i}')"><div class="s-icon">${['💼','🎯','📣','🏠'][i]}</div><div class="s-label">${c[0]} · ${c[1]}</div><div class="s-val">${c[2]}<small style="font-size:13px;color:var(--muted);font-weight:400"> 份简历</small></div><div class="s-foot">平均评分 ${c[3]||'—'} · 本月 ${c[4]}</div></div>`).join('')}</div>
- <div class="card card-pad"><h3>📡 渠道发布与回流监控</h3><table class="tbl"><tr><th>渠道</th><th>连接状态</th><th>在招岗位</th><th>简历回流</th><th>平均评分</th><th>预算消耗</th><th>操作</th></tr>${channels.map((c,i)=>`<tr class="clickable" onclick="showChannelDetail('${i}')"><td><a class="link-title">${c[0]}</a></td><td><span class="tag t-green">● ${c[1]}</span></td><td>${state.jobs.filter(j=>j.published&&(j.publishChannels.includes(c[0])||c[0]==='公司官网')).length}</td><td>${c[2]}</td><td>${c[3]||'—'}</td><td>${c[4]}</td><td><button class="btn btn-o btn-sm">查看详情</button></td></tr>`).join('')}</table></div>`;
+ <div class="card card-pad"><h3>📡 渠道发布与回流监控</h3><table class="tbl"><tr><th>渠道</th><th>连接状态</th><th>在招岗位</th><th>简历回流</th><th>平均评分</th><th>预算消耗</th><th>操作</th></tr>${channels.map((c,i)=>`<tr class="clickable" onclick="showChannelDetail('${i}')"><td><a class="link-title">${c[0]}</a></td><td><span class="tag t-green">● ${c[1]}</span></td><td>${c[5]}</td><td>${c[2]}</td><td>${c[3]||'—'}</td><td>${c[4]}</td><td><button class="btn btn-o btn-sm">查看详情</button></td></tr>`).join('')}</table></div>`;
 }
 
+function createDemoResume(){const j=job(curJob)||state.jobs[0];const profiles=[{name:'林浩然',edu:'硕士',school:'浙江大学',major:'计算机科学',years:7,company:'某大型互联网平台',lastTitle:'高级后端工程师',score:92,dims:{hard:94,exp:93,skill:91,potential:89},skills:['Java','分布式架构','高并发','团队协作']},{name:'陈思雨',edu:'本科',school:'华南理工大学',major:'软件工程',years:5,company:'某金融科技公司',lastTitle:'后端开发工程师',score:86,dims:{hard:88,exp:84,skill:87,potential:82},skills:['Java','Spring Cloud','数据库优化','项目管理']}];const p=profiles[state.cands.length%profiles.length];const id='C'+String(++state.seq).padStart(3,'0');const channels=j.publishChannels||[];const source=channels.length?channels[state.cands.length%channels.length]:'模拟导入';const c={id,jobId:j.id,name:p.name,age:26+(state.cands.length%8),gender:'未填写',edu:p.edu,school:p.school,major:p.major,years:p.years,company:p.company,lastTitle:p.lastTitle,expect:j.salary.split('×')[0],skills:p.skills,stability:4,exp:'模拟生成的候选人简历，包含与岗位相关的项目经验和技能实践。',dims:p.dims,score:p.score,status:'pending',source,time:new Date().toISOString().slice(0,10)};state.cands.push(c);save();toast('已生成模拟简历：'+c.name+'（AI 评分 '+c.score+' 分）');render();}
+function simulateChannelResume(){const j=job(curJob)||state.jobs[0];const channels=(j.publishChannels||[]);if(!j.published||!channels.length){toast('请先发布岗位并勾选至少一个渠道');return;}openModal('📡 模拟渠道回流简历',`<div class="form-row"><label class="fl">候选人姓名</label><input class="f" id="return-name" value="渠道候选人"></div><div class="form-row"><label class="fl">回流渠道</label><select class="f" id="return-channel">${channels.map(ch=>`<option>${ch}</option>`).join('')}</select></div><div class="hint">模拟渠道 API 回流、简历解析和 AI 评分，完成后会立即出现在当前岗位简历库。</div><div class="detail-actions"><button class="btn btn-p" onclick="confirmChannelResume()">模拟回流</button></div>`);}
+function confirmChannelResume(){const j=job(curJob)||state.jobs[0];const name=(document.getElementById('return-name')||{}).value||'渠道候选人';const source=(document.getElementById('return-channel')||{}).value||'BOSS直聘';const id='C'+String(++state.seq).padStart(3,'0');closeModal();toast('渠道简历回流中…');setTimeout(()=>{const c={id,jobId:j.id,name,age:28,gender:'未填写',edu:'本科',school:'示例大学',major:'相关专业',years:5,company:'渠道候选人当前公司',lastTitle:j.title,expect:j.salary.split('×')[0],skills:['岗位相关技能','项目经验','协作能力'],stability:3,exp:'模拟渠道 API 回流，已完成结构化解析。',dims:{hard:86,exp:84,skill:83,potential:80},score:83,status:'pending',source,time:new Date().toISOString().slice(0,10)};state.cands.push(c);save();toast(source+' 已回流 1 份简历，AI 评分 83 分');render();},700);}
+function uploadResume(){const j=job(curJob)||state.jobs[0];openModal('📥 模拟上传简历',`<div class="form-row"><label class="fl">候选人姓名</label><input class="f" id="upload-name" value="新候选人"></div><div class="form-row"><label class="fl">简历文件</label><input class="f" id="upload-file" type="file" accept=".pdf,.doc,.docx" onchange="previewResumeFile(this)"><div class="hint" id="upload-file-hint">支持 PDF、DOC、DOCX，单个文件不超过 10MB</div></div><div class="hint">Demo 会读取文件名称和大小，模拟上传、解析和 AI 评分，不读取真实文件正文。</div><div class="detail-actions"><button class="btn btn-p" onclick="confirmUploadResume()">开始上传并解析</button></div>`);}
+function previewResumeFile(input){const file=input?.files?.[0];const hint=document.getElementById('upload-file-hint');if(!file||!hint)return;hint.textContent=`已选择：${file.name} · ${(file.size/1024/1024).toFixed(2)} MB`;hint.style.color=file.size>10*1024*1024?'var(--red)':'var(--green)';}
+function confirmUploadResume(){const j=job(curJob)||state.jobs[0];const name=(document.getElementById('upload-name')||{}).value||'新候选人';const file=document.getElementById('upload-file')?.files?.[0];if(!file){toast('请先选择简历文件');return;}if(!/\.(pdf|docx?)$/i.test(file.name)){toast('仅支持 PDF、DOC、DOCX 文件');return;}if(file.size>10*1024*1024){toast('简历文件不能超过 10MB');return;}const fileName=file.name;const id='C'+String(++state.seq).padStart(3,'0');closeModal();toast('正在上传简历…');setTimeout(()=>{toast('解析完成，AI 正在评分…');setTimeout(()=>{const c={id,jobId:j.id,name,age:27,gender:'未填写',edu:'本科',school:'示例大学',major:'相关专业',years:4,company:'候选人当前公司',lastTitle:j.title,expect:j.salary.split('×')[0],skills:['沟通协作','业务理解','专业技能'],stability:3,exp:'模拟上传简历，已完成结构化解析。',dims:{hard:82,exp:80,skill:84,potential:78},score:81,status:'pending',source:'简历上传',fileName,time:new Date().toISOString().slice(0,10)};state.cands.push(c);save();toast('简历已加入简历库，AI 评分 81 分');render();},700);},500);}
 function vResume(){
  const j=job(curJob)||state.jobs[0];
  const cs=state.cands.filter(c=>c.jobId===j.id).sort((a,b)=>b.score-a.score);
  return `<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">${state.jobs.filter(x=>x.id!=='J002'||x.status!=='dingtalk').map(x=>`<span class="if-tab ${x.id===j.id?'active':''}" onclick="jobSel('${x.id}')">${x.title}</span>`).join('')}</div>
- <div class="card card-pad"><h3>📥 简历库 · AI 自动评分排序 <span class="tag t-blue">${cs.length} 份</span> <span style="margin-left:auto"><button class="btn btn-o btn-sm" onclick="go('chat')">💬 对话式筛选</button></span></h3>
+ <div class="card card-pad"><h3>📥 简历库 · AI 自动评分排序 <span class="tag t-blue">${cs.length} 份</span> <span style="margin-left:auto"><button class="btn btn-p btn-sm" onclick="createDemoResume()">✦ 生成模拟简历</button> <button class="btn btn-o btn-sm" onclick="go('chat')">💬 对话式筛选</button></span></h3>
  ${cs.length?`<table class="tbl"><tr><th>排名</th><th>候选人</th><th>学历/年限</th><th>最近履历</th><th>硬性</th><th>经验</th><th>技能</th><th>潜力</th><th>综合分</th><th>状态</th><th>操作</th></tr>
  ${cs.map((c,i)=>`<tr class="clickable" onclick="showCand('${c.id}')">
   <td>${i<3?`<span class="ring rank-${i+1}" style="width:26px;height:26px;font-size:12px">${i+1}</span>`:i+1}</td>
@@ -678,19 +699,19 @@ function vInterview(){
  <div class="card card-pad"><h3>🎯 待处理：生成面试表并安排面试</h3>
  ${passed.length?passed.map(c=>`<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #f1f5f9">
   <div class="ring" style="width:42px;height:42px;background:var(--primary-bg);color:var(--primary);font-size:13px">${c.score}</div>
-   <div style="flex:1"><a class="link-title" onclick="showCand('${c.id}')">${c.name}</a> <span style="font-size:12px;color:var(--muted)">${c.edu} · ${c.years}年 · ${c.company}</span><div style="font-size:11.5px;color:var(--muted);margin-top:3px">复筛通过 · ${state.forms[c.id]?'面试表已生成':'待生成面试问题表'}</div></div>
+   <div style="flex:1"><a class="link-title" onclick="showCand('${c.id}')">${c.name}</a> <span style="font-size:12px;color:var(--muted)">${c.edu} · ${c.years}年 · ${c.company}</span><div style="font-size:11.5px;color:var(--muted);margin-top:3px">${(()=>{const iv=state.interviews.find(x=>x.candId===c.id);return iv&&iv.stage==='online'&&iv.status==='passed'?'线上初试通过 · 待安排线下复试': '复筛通过 · '+(state.forms[c.id]?'面试表已生成':'待生成面试问题表')})()}</div></div>
   ${!state.forms[c.id]?`<button class="btn btn-ai btn-sm" onclick="genForm('${c.id}')">⚡ 生成面试表</button>`:`<button class="btn btn-p btn-sm" onclick="openForm('${c.id}')">打开面试表</button>`}
  </div>`).join(''):'<div class="empty" style="padding:28px"><div class="e-icon">✅</div>暂无待面试候选人</div>'}
  </div>
  <div class="card card-pad"><h3>📅 面试安排</h3>
  ${state.interviews.length?state.interviews.map(iv=>{const c=cand(iv.candId);return `<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid #f1f5f9">
   <span style="font-size:20px">${iv.mode==='online'?'💻':'🏢'}</span>
-   <div style="flex:1"><a class="link-title" onclick="showInterviewDetail('${iv.candId}')">${c?c.name:''}</a> · ${iv.mode==='online'?'在线面试（钉钉会议）':'线下面试'}<div style="font-size:11.5px;color:var(--muted);margin-top:2px">${iv.time} · 面试官：${iv.interviewers.join('、')} · 通知已发送（${c?c.name:''}已确认）</div></div>
+   <div style="flex:1"><a class="link-title" onclick="showInterviewDetail('${iv.candId}')">${c?c.name:''}</a> · ${iv.mode==='online'?'在线面试（钉钉会议）':'线下面试'}<div style="font-size:11.5px;color:var(--muted);margin-top:2px">${iv.time} · ${iv.stage==='online'?'线上初试':'线下复试'} · 面试官：${iv.interviewers.join('、')} · 通知已发送（${c?c.name:''}已确认）${iv.stage==='online'&&iv.status==='scheduled'?` <button class="btn btn-g btn-sm" onclick="submitOnlineInterviewScore('${iv.candId}')">录入初试评分</button>`:''}</div></div>
    <button class="btn btn-o btn-sm" onclick="showInterviewDetail('${iv.candId}')">详情</button></div>`}).join(''):'<div class="empty" style="padding:28px"><div class="e-icon">📅</div>暂无面试安排<br><div class="hint" style="margin-top:8px">生成面试表后即可一键安排在线/线下面试</div></div>'}
  </div></div>
- ${done.length?`<div class="card card-pad"><h3>✅ 已完成打分的候选人</h3><table class="tbl"><tr><th>候选人</th><th>业务表</th><th>HR表</th><th>BOSS表</th><th>综合得分</th><th>操作</th></tr>
- ${done.map(c=>{const s=state.scores[c.id];const b=formScore(s.business),h=formScore(s.hr),o=formScore(s.boss);
- return `<tr><td><b>${c.name}</b></td><td class="num ${sc(b||0)}">${b||'—'}</td><td class="num ${sc(h||0)}">${h||'—'}</td><td class="num ${sc(o||0)}">${o||'—'}</td><td class="num ${sc(totalScore(c.id)||0)}" style="font-size:16px">${totalScore(c.id)||'—'}</td>
+ ${done.length?`<div class="card card-pad"><h3>✅ 已完成打分的候选人</h3><div class="hint" style="margin-bottom:10px">线上初试分单独记录；综合得分按业务 50% + HR 30% + BOSS 20% 实时计算。</div><table class="tbl"><tr><th>候选人</th><th>线上初试</th><th>业务表</th><th>HR表</th><th>BOSS表</th><th>综合得分</th><th>操作</th></tr>
+ ${done.map(c=>{const s=state.scores[c.id];const iv=state.interviews.find(x=>x.candId===c.id&&x.stage==='online');const b=formScore(s.business),h=formScore(s.hr),o=formScore(s.boss);
+ return `<tr><td><b>${c.name}</b></td><td class="num ${sc(iv?.onlineScore||0)}">${iv?.onlineScore??'—'}</td><td class="num ${sc(b||0)}">${b||'—'}</td><td class="num ${sc(h||0)}">${h||'—'}</td><td class="num ${sc(o||0)}">${o||'—'}</td><td class="num ${sc(totalScore(c.id)||0)}" style="font-size:16px">${totalScore(c.id)||'—'}</td>
  <td><button class="btn btn-o btn-sm" onclick="openForm('${c.id}')">查看/修改</button></td></tr>`}).join('')}</table></div>`:''}`;
 }
 function genForm(id){const c=cand(id);state.forms[id]=aiForms(c,job(c.jobId));c.status='interview';job(c.jobId).status='interviewing';save();toast('已为 '+c.name+' 生成业务/HR/BOSS 三张面试表（各10题）');curCandForm=id;curTab='business';go('interview');}
@@ -719,27 +740,28 @@ function renderFormModal(){
  <div class="hint" style="margin-top:10px">💬 正式版支持对话式调整：如"增加一道考察抗压能力的HR题""前3题改为场景题"。三表全部提交后自动进入加权统计与排序。</div>`);
 }
 function setLv(i,lv){const form=state.scores[curCandForm];const q=form[curTab][i];
- if(q.lv===lv){q.adj=null;q.lv=null;}else{q.lv=lv;q.adj=null;}save();renderFormModal();}
-function adjLv(i){const form=state.scores[curCandForm];const q=form[curTab][i];
- const v=prompt('微调本题得分（0-100）：',q.adj!=null?q.adj:(q.lv==='g'?95:q.lv==='m'?78:55));
- if(v!==null){const n=Math.max(0,Math.min(100,parseInt(v)||0));q.adj=n;save();renderFormModal();}}
+ if(q.lv===lv){q.adj=null;q.lv=null;}else{q.lv=lv;q.adj=null;}save();render();renderFormModal();}
+function adjLv(i){const form=state.scores[curCandForm];const q=form[curTab][i];const current=q.adj!=null?q.adj:(q.lv==='g'?95:q.lv==='m'?78:55);openModal('✎ 微调本题得分',`<div class="detail-hero"><div class="logo-icon">${q.no||i+1}</div><div><b style="font-size:15px">第 ${q.no||i+1} 题</b><div class="hint">${q.dim||'面试评价'} · ${curTab==='business'?'业务面试表':curTab==='hr'?'HR 面试表':'BOSS 面试表'}</div></div></div><div class="score-entry"><label class="fl" for="adjust-score">本题得分</label><div style="display:flex;align-items:center;gap:12px"><input class="f score-input" id="adjust-score" type="number" min="0" max="100" value="${current}"><span style="font-size:14px;color:var(--muted)">/ 100 分</span></div><div class="hint" style="margin-top:10px">可在 AI 建议分数基础上人工微调，保存后会同步更新面试表和综合得分。</div></div><div class="detail-actions"><button class="btn btn-o" onclick="closeModal();renderFormModal()">取消</button><button class="btn btn-p" onclick="saveAdjustedScore(${i})">保存修改</button></div>`);}
+function saveAdjustedScore(i){const form=state.scores[curCandForm];const q=form[curTab][i];const raw=Number(document.getElementById('adjust-score')?.value);if(!Number.isFinite(raw)||raw<0||raw>100){toast('请输入 0-100 的有效分数');return;}q.adj=Math.round(raw);save();closeModal();render();renderFormModal();toast('本题分数已更新');} 
 function submitForm(){save();toast('面试表已提交，得分自动汇总');const c=cand(curCandForm);
- const s=state.scores[curCandForm];const all=['business','hr','boss'].every(k=>formScore(s[k])!=null);
+ const s=state.scores[curCandForm];const all=['business','hr','boss'].every(k=>s[k]&&s[k].length===10&&s[k].every(q=>q.lv));
  if(all){c.status='interview';}
  closeModal();if(all)scheduleRoute('stat','三张面试表已出分，自动进入综合排名',{job:c.jobId},1000);else go('interview',{job:c.jobId});}
 function arrangeInterview(){const c=cand(curCandForm);
  openModal('📅 安排面试 · '+c.name,`
- <div class="form-row"><label class="fl">面试方式</label><select class="f" id="iv-mode"><option value="online">在线面试（自动创建钉钉会议）</option><option value="offline">线下面试（总部会议室）</option></select></div>
+ <div class="form-row"><label class="fl">面试阶段</label><select class="f" id="iv-stage"><option value="online">线上初试</option><option value="offline">线下复试</option></select></div><div class="form-row"><label class="fl">面试方式</label><select class="f" id="iv-mode"><option value="online">在线面试（自动创建钉钉会议）</option><option value="offline">线下面试（总部会议室）</option></select></div>
  <div class="form-row"><label class="fl">面试时间</label><select class="f" id="iv-time"><option>明天 10:00-11:30</option><option>明天 15:00-16:30</option><option>后天 10:00-11:30</option><option>后天 14:00-15:30</option></select></div>
  <div class="form-row"><label class="fl">面试官（系统按日历自动推荐）</label><input class="f" id="iv-people" value="业务：技术总监 · HR：招聘经理 · BOSS：CTO"></div>
  <div class="hint">提交后自动向候选人发送面试通知（钉钉/短信），并向面试官推送面试表待办。</div>
  <div style="margin-top:16px"><button class="btn btn-p" onclick="confirmInterview()">✓ 确认安排并发送通知</button></div>`);}
 function confirmInterview(){const c=cand(curCandForm);
- const mode=document.getElementById('iv-mode').value;const time=document.getElementById('iv-time').value;
+ const mode=document.getElementById('iv-mode').value;const stage=document.getElementById('iv-stage')?.value||'online';const time=document.getElementById('iv-time').value;
  const people=document.getElementById('iv-people').value.split('·').map(s=>s.trim().split('：')[0]);
- state.interviews.push({candId:curCandForm,mode,time,interviewers:people});save();
+ state.interviews.push({candId:curCandForm,mode,stage,time,interviewers:people,status:'scheduled'});save();
  closeModal();toast('面试已安排：'+time+'，通知已发送给候选人与面试官');go('interview');}
 
+function submitOnlineInterviewScore(id){const c=cand(id);if(!c)return;const iv=state.interviews.find(x=>x.candId===id&&x.stage==='online');openModal('📝 录入线上初试评分',`<div class="detail-hero"><div class="ring rank-1">${c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · 线上初试</div></div></div><div class="score-entry"><label class="fl" for="online-score">初试评分</label><div style="display:flex;align-items:center;gap:12px"><input class="f score-input" id="online-score" type="number" min="0" max="100" value="${iv?.onlineScore??85}"><span style="font-size:14px;color:var(--muted)">/ 100 分</span></div><div class="hint" style="margin-top:10px">评分 ≥ 80 分：通过初试，进入线下复试；低于 80 分：结束本次流程。</div></div><div class="detail-actions"><button class="btn btn-o" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="confirmOnlineInterviewScore('${id}')">保存评分</button></div>`);}
+function confirmOnlineInterviewScore(id){const c=cand(id);if(!c)return;const input=document.getElementById('online-score');const raw=Number(input?.value);if(!Number.isFinite(raw)||raw<0||raw>100){toast('请输入 0-100 的有效分数');return;}const score=Math.round(raw);const iv=state.interviews.find(x=>x.candId===id&&x.stage==='online');if(iv){iv.onlineScore=score;iv.status=score>=80?'passed':'rejected';}if(score>=80){c.status='passed';toast(c.name+' 线上初试通过，已进入线下复试待办');}else{c.status='rejected';toast(c.name+' 线上初试未通过');}save();closeModal();render();}
 function totalScore(id){const s=state.scores[id];if(!s)return null;const b=formScore(s.business),h=formScore(s.hr),o=formScore(s.boss);
  if(b==null||h==null||o==null)return null;return Math.round(b*.5+h*.3+o*.2);}
 function vStat(){
@@ -783,7 +805,7 @@ function vOffer(){
  <div class="ring rank-1">${x.t}</div>
   <div style="flex:1"><a class="link-title" onclick="showOfferDetail('${c.id}')">${c.name}</a> · ${c.edu} · ${c.years}年 · 期望 ${c.expect}<div style="font-size:11.5px;color:var(--muted);margin-top:3px">${of?'审批链：'+of.chain.map(s=>s[0]+' '+(s[1]?'✓':'⏳')).join(' → '):'待发起定薪审批'}</div></div>
  ${!of?`<button class="btn btn-p" onclick="startOffer('${c.id}')">发起定薪审批</button>`:
- of.done?(of.accepted?'<span class="tag t-teal">已接受Offer</span>':of.sent?`<span class="tag t-purple">Offer已发送</span> <button class="btn btn-g btn-sm" onclick="acceptOffer('${c.id}')">模拟候选人接受</button>`:'<button class="btn btn-ai btn-sm" onclick="sendOffer(\''+c.id+'\')">一键发送Offer</button>'):
+ of.done?(of.accepted?`<span class="tag t-teal">已接受Offer</span> <button class="btn btn-o btn-sm" onclick="showOnboarding('${c.id}')">入职任务</button>`:of.sent?`<span class="tag t-purple">Offer已发送</span> <button class="btn btn-g btn-sm" onclick="acceptOffer('${c.id}')">模拟候选人接受</button>`:'<button class="btn btn-ai btn-sm" onclick="sendOffer(\''+c.id+'\')">一键发送Offer</button>'):
   `<button class="btn btn-o btn-sm" onclick="approveNext('${c.id}')">审批下一步</button>`}<button class="btn btn-o btn-sm" onclick="showOfferDetail('${c.id}')">详情</button>
  </div>`}).join(''):'<div class="empty"><div class="e-icon">📭</div>暂无达到录用阈值的候选人</div>'}
  </div>
@@ -794,13 +816,15 @@ function vOffer(){
 function startOffer(id){const c=cand(id);state.offers[id]={chain:[['用人部门负责人',false],['HR负责人',false],['董事长',false]],done:false,sent:false,accepted:false,salary:c.expect};save();toast('定薪审批已发起（钉钉审批同步）');render();}
 function approveNext(id){const of=state.offers[id];const i=of.chain.findIndex(s=>!s[1]);if(i>-1){of.chain[i][1]=true;if(i===of.chain.length-1)of.done=true;save();toast(of.done?'审批全部通过，可一键发送 Offer':of.chain[i][0]+' 已通过');render();}}
 function sendOffer(id){const of=state.offers[id];of.sent=true;save();render();toast('Offer 已通过 邮件/钉钉/短信 三通道发送给候选人');setTimeout(()=>showOfferDetail(id),200);}
-function acceptOffer(id){const of=state.offers[id];of.accepted=true;const c=cand(id);c.status='hired';save();scheduleRoute('dash',c.name+' 已接受 Offer，自动回到工作台查看入职状态',{job:c.jobId},1200);}
+function acceptOffer(id){const of=state.offers[id];of.accepted=true;const c=cand(id);c.status='hired';state.onboarding[id]=state.onboarding[id]||{status:'pending',tasks:['填写入职资料','创建员工档案','办理门禁','申请电脑和账号','通知相关部门'].map(name=>({name,done:false}))};save();scheduleRoute('dash',c.name+' 已接受 Offer，自动生成入职待办',{job:c.jobId},1200);}
+function toggleOnboarding(id,index,done){const item=state.onboarding[id]?.tasks?.[index];if(!item)return;item.done=done;const ob=state.onboarding[id];ob.status=ob.tasks.every(t=>t.done)?'done':'pending';save();render();toast(ob.status==='done'?'入职流程已完成':'入职任务已更新');}
+function showOnboarding(id){const c=cand(id),ob=state.onboarding[id];if(!c||!ob)return;openModal('入职任务 · '+c.name,`<div class="hint">Offer 已接受，以下任务由系统自动创建。</div>${ob.tasks.map((t,i)=>`<label style="display:block;padding:12px 0;border-bottom:1px solid var(--border)"><input type="checkbox" ${t.done?'checked':''} onchange="toggleOnboarding('${id}',${i},this.checked)"> ${t.name}</label>`).join('')}<div style="margin-top:14px"><span class="tag ${ob.status==='done'?'t-green':'t-gold'}">${ob.status==='done'?'✓ 全部完成':'进行中'}</span></div>`);}
 
 function showJobDetail(id){const j=job(id);if(!j)return;const cs=state.cands.filter(c=>c.jobId===id);const status={dingtalk:'待导入',spec:'说明书处理中',sourcing:'招聘进行中',interviewing:'面试阶段',done:'已完成'}[j.status]||j.status;
  openModal('招聘需求详情 · '+j.title,`<div class="detail-hero"><div class="logo-icon">${j.id.slice(-2)}</div><div><b style="font-size:17px">${j.title}</b><div class="hint">${j.from} · 创建于 ${j.createdAt}</div></div><span class="tag t-blue" style="margin-left:auto">${status}</span></div>
  <div class="detail-kv"><div><small>用人部门</small><b>${j.dept}</b></div><div><small>招聘人数</small><b>${j.headcount} 人</b></div><div><small>薪资范围</small><b>${j.salary}</b></div><div><small>紧急程度</small><b>${j.urgency}</b></div><div><small>已收简历</small><b>${cs.length} 份</b></div><div><small>通过筛选</small><b>${cs.filter(c=>!['pending','rejected'].includes(c.status)).length} 人</b></div></div>
- <div class="rd-sec"><h4>需求说明</h4><p>${j.desc}</p></div><div class="rd-sec"><h4>发布渠道</h4><p>${j.publishChannels.length?j.publishChannels.map(c=>`<span class="tag t-green" style="margin:2px">${c}</span>`).join(''):'<span class="tag t-gray">尚未发布</span>'}</p></div>
- <div class="detail-actions">${j.status==='dingtalk'?`<button class="btn btn-p" onclick="closeModal();importJob('${j.id}')">一键导入需求</button>`:`<button class="btn btn-p" onclick="closeModal();go('job',{job:'${j.id}'})">进入岗位管理</button>`}<button class="btn btn-o" onclick="closeModal();go('resume',{job:'${j.id}'})">查看候选人</button><button class="btn btn-o" onclick="closeModal();go('channel',{job:'${j.id}'})">渠道数据</button></div>`);
+ <div class="rd-sec"><h4>需求说明</h4><p>${j.desc}</p></div><div class="rd-sec"><h4>审批历史</h4><div class="flow-line">${(j.approvalHistory||[]).map((a,i)=>`<span class="fl-node ${a.status==='approved'?'ok':a.status==='rejected'?'bad':''}">${a.node} ${a.status==='approved'?'✓':a.status==='rejected'?'✕':'⏳'}</span>${i<(j.approvalHistory||[]).length-1?'<span class="fl-arrow">→</span>':''}`).join('')}</div>${(j.approvalHistory||[]).slice(-1).map(a=>`<div class="hint" style="margin-top:6px">${a.time||''} · ${a.note||''}</div>`).join('')}</div><div class="rd-sec"><h4>发布渠道</h4><p>${j.publishChannels.length?j.publishChannels.map(c=>`<span class="tag t-green" style="margin:2px">${c}</span>`).join(''):'<span class="tag t-gray">尚未发布</span>'}</p></div>
+ <div class="detail-actions">${j.status==='dingtalk'?(j.approvalStatus==='pending'?`<button class="btn btn-g" onclick="approveJob('${j.id}');showJobDetail('${j.id}')">✓ 通过审批</button><button class="btn btn-o" onclick="rejectJob('${j.id}');closeModal()">驳回</button>`:j.approvalStatus==='rejected'?`<span class="tag t-gray">已驳回：${(j.approvalHistory||[]).slice(-1)[0]?.note||'请重新提交'}</span>`:`<button class="btn btn-p" onclick="closeModal();importJob('${j.id}')">一键导入需求</button>`):`<button class="btn btn-p" onclick="closeModal();go('job',{job:'${j.id}'})">进入岗位管理</button>`}<button class="btn btn-o" onclick="closeModal();go('resume',{job:'${j.id}'})">查看候选人</button><button class="btn btn-o" onclick="closeModal();go('channel',{job:'${j.id}'})">渠道数据</button></div>`);
  writeRoute(curView,{job:curJob,detail:'job:'+id},true);}
 
 function showInterviewDetail(id){const c=cand(id);const iv=state.interviews.find(x=>x.candId===id);if(!c)return;openModal('面试详情 · '+c.name,`<div class="detail-hero"><div class="ring rank-1">${c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · ${c.company}</div></div>${statusTag(c.status)}</div>${iv?`<div class="detail-kv"><div><small>面试方式</small><b>${iv.mode==='online'?'在线面试（钉钉会议）':'线下面试'}</b></div><div><small>面试时间</small><b>${iv.time}</b></div><div><small>面试官</small><b>${iv.interviewers.join('、')}</b></div><div><small>通知状态</small><b>候选人与面试官均已确认</b></div></div>`:'<div class="hint">尚未安排具体面试时间。</div>'}<div class="detail-actions"><button class="btn btn-p" onclick="closeModal();openForm('${id}')">打开面试表</button><button class="btn btn-o" onclick="closeModal();showCand('${id}')">候选人详情</button></div>`);writeRoute(curView,{job:curJob,detail:'interview:'+id},true);}
@@ -808,9 +832,9 @@ function showInterviewDetail(id){const c=cand(id);const iv=state.interviews.find
 function showOfferDetail(id){const c=cand(id);if(!c)return;const of=state.offers[id];const t=totalScore(id);openModal('Offer 与录用详情 · '+c.name,`<div class="detail-hero"><div class="ring rank-1">${t||c.score}</div><div><b style="font-size:17px">${c.name}</b><div class="hint">${(job(c.jobId)||{}).title||''} · 期望薪资 ${c.expect}</div></div><span class="tag ${of&&of.accepted?'t-green':of&&of.sent?'t-purple':'t-gold'}" style="margin-left:auto">${of?(of.accepted?'已接受 Offer':of.sent?'Offer 已发送':of.done?'审批通过':'审批中'):'待发起审批'}</span></div>
  ${of?`<div class="flow-line">${of.chain.map((s,i)=>`<span class="fl-node ${s[1]?'ok':!of.chain.slice(0,i).some(x=>!x[1])?'cur':''}">${s[0]} ${s[1]?'✓':'⏳'}</span>${i<of.chain.length-1?'<span class="fl-arrow">→</span>':''}`).join('')}</div>`:'<div class="hint">综合评分达到录用阈值，可发起定薪审批。</div>'}
  <div class="letter" style="margin-top:16px"><h2 style="text-align:center;margin-bottom:18px">录用通知书</h2><p>${c.name} 先生/女士：</p><p>您好！经过综合评估，我们诚邀您加入龙道数据集团，担任 <b>${(job(c.jobId)||{}).title||''}</b>。</p><p><b>建议薪资：</b>${of?of.salary:c.expect}　　<b>预计入职：</b>2026-09-15</p><p>正式 Offer 将通过邮件、钉钉及短信发送，候选人确认后自动触发入职材料与试用期跟进流程。</p></div>
- <div class="detail-actions">${!of?`<button class="btn btn-p" onclick="startOffer('${id}');showOfferDetail('${id}')">发起定薪审批</button>`:!of.done?`<button class="btn btn-p" onclick="approveNext('${id}');showOfferDetail('${id}')">审批下一步</button>`:!of.sent?`<button class="btn btn-ai" onclick="sendOffer('${id}')">一键发送 Offer</button>`:!of.accepted?`<button class="btn btn-g" onclick="acceptOffer('${id}')">模拟候选人接受</button>`:'<span class="tag t-green" style="padding:8px 14px">✓ 已触发入职流程</span>'}<button class="btn btn-o" onclick="window.print()">打印 / 保存 PDF</button></div>`);}
+ <div class="detail-actions">${!of?`<button class="btn btn-p" onclick="startOffer('${id}');showOfferDetail('${id}')">发起定薪审批</button>`:!of.done?`<button class="btn btn-p" onclick="approveNext('${id}');showOfferDetail('${id}')">审批下一步</button>`:!of.sent?`<button class="btn btn-ai" onclick="sendOffer('${id}')">一键发送 Offer</button>`:!of.accepted?`<button class="btn btn-g" onclick="acceptOffer('${id}')">模拟候选人接受</button>`:('<span class="tag t-green" style="padding:8px 14px">✓ 已触发入职流程</span> <button class="btn btn-o btn-sm" onclick="showOnboarding(\''+id+'\')">查看入职任务</button>')}<button class="btn btn-o" onclick="window.print()">打印 / 保存 PDF</button></div>`);}
 
-function showChannelDetail(index){const names=['BOSS直聘','猎聘','前程无忧','公司官网'];const name=names[Number(index)]||index;const cs=state.cands.filter(c=>c.source===name||(name==='公司官网'&&c.source==='官网投递'));openModal('渠道详情 · '+name,`<div class="detail-hero"><div class="logo-icon">${name.slice(0,1)}</div><div><b style="font-size:17px">${name}</b><div class="hint">API 已连接 · 简历实时回流 · 自动去重评分</div></div><span class="tag t-green" style="margin-left:auto">运行正常</span></div><div class="detail-kv"><div><small>回流简历</small><b>${cs.length} 份</b></div><div><small>平均评分</small><b>${cs.length?Math.round(cs.reduce((s,c)=>s+c.score,0)/cs.length):'—'}</b></div><div><small>高分简历</small><b>${cs.filter(c=>c.score>=80).length} 份</b></div><div><small>发布岗位</small><b>${state.jobs.filter(j=>j.published).length} 个</b></div></div><div class="rd-sec"><h4>回流候选人</h4>${cs.length?cs.map(c=>`<p><a class="link-title" onclick="closeModal();showCand('${c.id}')">${c.name}</a> · ${c.score}分 · ${c.company}</p>`).join(''):'<p class="hint">暂无候选人回流。</p>'}</div><div class="detail-actions"><button class="btn btn-p" onclick="closeModal();go('resume')">查看简历库</button><button class="btn btn-o" onclick="closeModal();go('board')">查看渠道对比</button></div>`);writeRoute(curView,{job:curJob,detail:'channel:'+index},true);}
+function showChannelDetail(index){const names=['BOSS直聘','猎聘','前程无忧','公司官网'];const name=names[Number(index)]||index;const cs=channelCandidates(name);openModal('渠道详情 · '+name,`<div class="detail-hero"><div class="logo-icon">${name.slice(0,1)}</div><div><b style="font-size:17px">${name}</b><div class="hint">API 已连接 · 简历实时回流 · 自动去重评分</div></div><span class="tag t-green" style="margin-left:auto">运行正常</span></div><div class="detail-kv"><div><small>回流简历</small><b>${cs.length} 份</b></div><div><small>平均评分</small><b>${cs.length?Math.round(cs.reduce((s,c)=>s+c.score,0)/cs.length):'—'}</b></div><div><small>高分简历</small><b>${cs.filter(c=>c.score>=80).length} 份</b></div><div><small>发布岗位</small><b>${state.jobs.filter(j=>j.published).length} 个</b></div></div><div class="rd-sec"><h4>回流候选人</h4>${cs.length?cs.map(c=>`<p><a class="link-title" onclick="closeModal();showCand('${c.id}')">${c.name}</a> · ${c.score}分 · ${c.company}</p>`).join(''):'<p class="hint">暂无候选人回流。</p>'}</div><div class="detail-actions"><button class="btn btn-p" onclick="closeModal();go('resume')">查看简历库</button><button class="btn btn-o" onclick="closeModal();go('board')">查看渠道对比</button></div>`);writeRoute(curView,{job:curJob,detail:'channel:'+index},true);}
 
 function showFunnelDetail(index){const views=['resume','resume','resume','interview','offer'];const labels=['全部入库简历','AI 评分达标候选人','复筛通过候选人','进入面试候选人','已发送 Offer 候选人'];const filters=[c=>true,c=>c.score>=80,c=>!['pending','rejected'].includes(c.status),c=>['interview','offer','hired'].includes(c.status),c=>state.offers[c.id]&&state.offers[c.id].sent];const list=state.cands.filter(filters[Number(index)]||filters[0]);openModal('招聘漏斗详情 · '+(labels[index]||labels[0]),`<div class="hint" style="margin-bottom:12px">共 ${list.length} 人，点击姓名可继续查看候选人完整档案。</div>${list.length?`<table class="tbl"><tr><th>候选人</th><th>岗位</th><th>评分</th><th>状态</th></tr>${list.map(c=>`<tr class="clickable" onclick="showCand('${c.id}')"><td><a class="link-title">${c.name}</a></td><td>${(job(c.jobId)||{}).title||''}</td><td class="num ${sc(c.score)}">${c.score}</td><td>${statusTag(c.status)}</td></tr>`).join('')}</table>`:'<div class="empty">暂无数据</div>'}<div class="detail-actions"><button class="btn btn-p" onclick="closeModal();go('${views[index]||'resume'}')">进入对应环节</button></div>`);writeRoute(curView,{job:curJob,detail:'funnel:'+index},true);}
 
@@ -826,7 +850,7 @@ function vTalent(){
 function vBoard(){
  const cs=state.cands;
  const funnel=[['简历入库',cs.length],['AI评分达标',cs.filter(c=>c.score>=80).length],['复筛通过',cs.filter(c=>c.status!=='pending'&&c.status!=='rejected').length],['进入面试',cs.filter(c=>c.status==='interview'||c.status==='offer'||c.status==='hired').length],['收到Offer',Object.values(state.offers).filter(o=>o.sent).length]];
- const max=funnel[0][1]||1;
+ const max=funnel[0][1]||1; const channelRows=['BOSS直聘','猎聘','前程无忧','公司官网'].map(name=>{const cs=state.cands.filter(c=>c.source===name||(name==='公司官网'&&c.source==='官网投递'));return [name,cs.length,cs.length?Math.round(cs.reduce((sum,c)=>sum+c.score,0)/cs.length):0];});
  return `<div class="grid g4" style="margin-bottom:18px">
  ${[['⏱️','平均招聘周期','23','天（进行中）'],['💰','人均招聘成本','¥3,200','渠道+人力'],['📈','简历转化率',Math.round(funnel[2][1]/(funnel[0][1]||1)*100)+'%','复筛通过/入库'],['🏢','渠道效果','BOSS直聘','简历量第一']]
  .map(s=>`<div class="card stat"><div class="s-icon">${s[0]}</div><div class="s-label">${s[1]}</div><div class="s-val" style="font-size:20px">${s[2]}</div><div class="s-foot">${s[3]}</div></div>`).join('')}</div>
@@ -835,7 +859,7 @@ function vBoard(){
  ${funnel.map((f,i)=>`<div class="bar-row clickable" onclick="showFunnelDetail('${i}')"><span class="bar-label" style="width:82px">${f[0]}</span><div class="bar-track" style="height:16px;border-radius:6px"><div class="bar-fill" style="width:${f[1]/max*100}%"></div></div><span class="bar-val" style="width:26px">${f[1]}</span></div>`).join('')}
  <div class="hint" style="margin-top:10px">从简历到 Offer 的全链路转化一目了然，支持按岗位/渠道/时间下钻。</div></div>
  <div class="card card-pad"><h3>📡 渠道效果对比</h3>
- ${[['BOSS直聘',5,92],['猎聘',1,89],['前程无忧',2,66],['公司官网',1,69]].map((ch,i)=>`<div class="bar-row clickable" onclick="showChannelDetail('${i}')"><span class="bar-label">${ch[0]}</span><div class="bar-track"><div class="bar-fill" style="width:${ch[1]/5*100}%"></div></div><span class="bar-val">${ch[1]}份</span><span class="tag t-blue" style="margin-left:6px">均分${ch[2]}</span></div>`).join('')}
+ ${channelRows.map((ch,i)=>`<div class="bar-row clickable" onclick="showChannelDetail('${i}')"><span class="bar-label">${ch[0]}</span><div class="bar-track"><div class="bar-fill" style="width:${ch[1]/5*100}%"></div></div><span class="bar-val">${ch[1]}份</span><span class="tag t-blue" style="margin-left:6px">均分${ch[2]}</span></div>`).join('')}
  <div class="hint" style="margin-top:10px">按简历量、平均评分、转化率评估渠道 ROI，指导投放预算分配。</div></div>
  </div>`;
 }
