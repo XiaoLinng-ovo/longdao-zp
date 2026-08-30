@@ -1,0 +1,6 @@
+data/state.json
+data/*.tmp
+node_modules
+.git
+.agents
+.codex
