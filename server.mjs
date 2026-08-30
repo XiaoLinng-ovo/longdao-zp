@@ -12,6 +12,7 @@ const INDEX_FILE = path.join(ROOT, 'index.html');
 const MAX_BODY_BYTES = 3 * 1024 * 1024;
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
+let stateWriteQueue = Promise.resolve();
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -31,11 +32,26 @@ function sendText(res, status, body, contentType = 'text/plain; charset=utf-8') 
 async function readState() {
   try {
     const raw = await fs.readFile(STATE_FILE, 'utf8');
-    return JSON.parse(raw);
+    return migrateState(JSON.parse(raw));
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
+}
+
+function migrateState(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (!Array.isArray(value.jobs)) value.jobs = [];
+  if (!Array.isArray(value.cands)) value.cands = [];
+  if (!value.forms || typeof value.forms !== 'object' || Array.isArray(value.forms)) value.forms = {};
+  if (!value.scores || typeof value.scores !== 'object' || Array.isArray(value.scores)) value.scores = {};
+  if (!Array.isArray(value.interviews)) value.interviews = [];
+  if (!value.offers || typeof value.offers !== 'object' || Array.isArray(value.offers)) value.offers = {};
+  if (!value.onboarding || typeof value.onboarding !== 'object' || Array.isArray(value.onboarding)) value.onboarding = {};
+  if (!value.approvalHistory || typeof value.approvalHistory !== 'object' || Array.isArray(value.approvalHistory)) value.approvalHistory = {};
+  if (!Array.isArray(value.chatLog)) value.chatLog = [];
+  if (!Number.isFinite(Number(value.seq))) value.seq = value.cands.length;
+  return value;
 }
 
 function isValidState(value) {
@@ -48,15 +64,20 @@ function isValidState(value) {
 }
 
 async function writeState(state) {
-  if (!isValidState(state)) {
+  const normalized = migrateState(state);
+  if (!isValidState(normalized)) {
     const error = new Error('Invalid state payload');
     error.statusCode = 400;
     throw error;
   }
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tempFile = `${STATE_FILE}.${process.pid}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(state, null, 2), 'utf8');
-  await fs.rename(tempFile, STATE_FILE);
+  const operation = stateWriteQueue.then(async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tempFile = `${STATE_FILE}.${process.pid}.tmp`;
+    await fs.writeFile(tempFile, JSON.stringify(normalized, null, 2), 'utf8');
+    await fs.rename(tempFile, STATE_FILE);
+  });
+  stateWriteQueue = operation.catch(() => {});
+  return operation;
 }
 
 async function readBody(req) {
