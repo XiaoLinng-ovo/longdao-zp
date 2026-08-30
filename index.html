@@ -302,13 +302,16 @@ async function bootstrapServerState(){
   if(!API_BASE)return;
   try{
     const response=await fetch(API_BASE+'/api/state');
-    if(response.ok){
+    if(response.ok && (response.headers.get('content-type')||'').includes('application/json')){
       const remote=await response.json();
       if(remote&&remote.jobs){state=normalizeState(remote);localStorage.setItem(STORE_KEY,JSON.stringify(state));renderNav();render();}
+      serverSyncReady=true;
     }else if(response.status===404){
-      await fetch(API_BASE+'/api/state',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
+      const initialized=await fetch(API_BASE+'/api/state',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
+      serverSyncReady=initialized.ok;
+    }else{
+      serverSyncReady=false;
     }
-    serverSyncReady=true;
   }catch(e){
     serverSyncReady=false;
   }
