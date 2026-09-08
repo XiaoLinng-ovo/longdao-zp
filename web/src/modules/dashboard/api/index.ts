@@ -1,0 +1,1 @@
+import { DemoRecruitingData } from '../../../shared/data/demo-recruiting-data'; export const getDashboardMetrics=()=>DemoRecruitingData.metrics; export const getDashboardPending=()=>DemoRecruitingData.requisitions.filter(x=>x.status==='pending');
