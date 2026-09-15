@@ -1,8 +1,16 @@
 data/state.json
 data/*.tmp
+data/api-state.json
+data/api-state.json.*.tmp
 node_modules/
 
 .env
 .wrangler/
 .pnpm-store/
 web/dist/
+
+# TypeScript build output
+**/dist/
+**/*.tsbuildinfo
+**/dist-test/
+**/coverage/

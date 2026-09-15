@@ -1,0 +1,116 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { actionRequisition, createRequisition, loadRequisitionRows, type RequisitionAction, type RequisitionView } from '../api'
+import { REQ_ACTION_LABEL } from '../workflow'
+import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import PageHeader from '../../../shared/components/PageHeader.vue'
+import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
+import RequisitionTable from '../components/RequisitionTable.vue'
+
+const router = useRouter()
+const rows = ref<RequisitionView[]>([])
+const filter = ref('all')
+const loading = ref(true)
+const error = ref('')
+const feedback = ref('')
+const showCreate = ref(false)
+const saving = ref(false)
+const actingId = ref('')
+const form = ref({ title: '', departmentId: '', headcount: 1, employmentType: 'full_time', workMode: 'hybrid', justification: '' })
+
+const visibleRows = computed(() => rows.value.filter((row) => filter.value === 'all' || row.status === filter.value))
+
+function clearFlags() { error.value = ''; feedback.value = '' }
+
+async function refresh() {
+  loading.value = true
+  clearFlags()
+  try {
+    rows.value = await loadRequisitionRows()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '读取招聘需求失败').message
+  } finally {
+    loading.value = false
+  }
+}
+
+async function submitCreate() {
+  if (saving.value) return
+  if (!form.value.departmentId.trim() || !form.value.justification.trim()) {
+    error.value = '请填写部门与招聘理由'
+    return
+  }
+  saving.value = true
+  clearFlags()
+  try {
+    await createRequisition({ ...form.value, title: form.value.title.trim() })
+    feedback.value = '需求草稿已创建'
+    showCreate.value = false
+    form.value = { title: '', departmentId: '', headcount: 1, employmentType: 'full_time', workMode: 'hybrid', justification: '' }
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '创建需求失败').message
+  } finally {
+    saving.value = false
+  }
+}
+
+async function runAction(row: RequisitionView, action: RequisitionAction, reason?: string) {
+  if (actingId.value) return
+  const id = row.entityId
+  actingId.value = id
+  clearFlags()
+  try {
+    const done = await actionRequisition(id, action, reason)
+    feedback.value = `${row.title}：${REQ_ACTION_LABEL[action]}成功，当前状态 ${done.status}`
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '需求操作失败').message
+  } finally {
+    actingId.value = ''
+  }
+}
+
+function openDetail(row: RequisitionView) {
+  router.push({ name: 'requisition-detail', params: { id: row.entityId } })
+}
+
+onMounted(refresh)
+</script>
+
+<template>
+  <PageHeader title="需求管理 · 审批" description="统一管理部门招聘编制与审批进度">
+    <div class="inline-actions">
+      <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
+      <button class="btn btn-primary" type="button" @click="showCreate = !showCreate">{{ showCreate ? '取消新建' : '新建需求' }}</button>
+    </div>
+    <select v-model="filter" class="filter" aria-label="按状态筛选">
+      <option value="all">全部状态</option>
+      <option value="draft">草稿</option>
+      <option value="pending_approval">待审批</option>
+      <option value="approved">已通过</option>
+      <option value="rejected">已驳回</option>
+    </select>
+  </PageHeader>
+
+  <section v-if="showCreate" class="form-panel">
+    <div class="section-title">新建招聘需求</div>
+    <div class="form-grid">
+      <div class="form-field"><label>岗位名称</label><input v-model="form.title" placeholder="例如：高级后端工程师" /></div>
+      <div class="form-field"><label>部门</label><input v-model="form.departmentId" placeholder="例如：技术中心" /></div>
+      <div class="form-field"><label>招聘人数</label><input v-model.number="form.headcount" type="number" min="1" /></div>
+      <div class="form-field"><label>用工类型</label><select v-model="form.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
+      <div class="form-field"><label>工作模式</label><select v-model="form.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>
+      <div class="form-field"><label>招聘理由</label><input v-model="form.justification" placeholder="说明招聘背景" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top:14px">
+      <button class="btn btn-primary" type="button" :disabled="saving" @click="submitCreate">{{ saving ? '保存中...' : '保存草稿' }}</button>
+      <button class="btn btn-ghost" type="button" :disabled="saving" @click="showCreate = false">取消</button>
+    </div>
+  </section>
+
+  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
+  <div v-if="loading" class="loading-note">正在读取招聘需求...</div>
+  <RequisitionTable v-else :rows="visibleRows" :acting-id="actingId" @action="runAction" @open="openDetail" />
+</template>

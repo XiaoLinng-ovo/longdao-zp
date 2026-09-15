@@ -1,0 +1,11 @@
+[8acdd3b5-8620-4909-af7b-af86afdab8e7] unhandled request error Error: SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string
+    at D:\work\智能招聘平台\20260829-招聘\20260829-招聘\apps\api\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async PostgresRecruitingStore.read (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/recruiting/postgres-store.js:29:24)
+    at async RecruitingService.listCandidateTags (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/recruiting/service.js:272:23)
+    at async routeMiddleware (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/routes.js:173:34)
+    at async dispatch (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/http.js:23:13)
+    at async authMiddleware (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/server.js:10:5)
+    at async dispatch (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/http.js:23:13)
+    at async requestIdMiddleware (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/middleware.js:9:5)
+    at async dispatch (file:///D:/work/%E6%99%BA%E8%83%BD%E6%8B%9B%E8%81%98%E5%B9%B3%E5%8F%B0/20260829-%E6%8B%9B%E8%81%98/20260829-%E6%8B%9B%E8%81%98/apps/api/dist/src/http.js:23:13)

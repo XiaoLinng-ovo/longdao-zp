@@ -1,0 +1,131 @@
+import { DemoRecruitingData } from '../../../shared/data/demo-recruiting-data'
+import { apiClient } from '../../../shared/api'
+
+export type JobAction = 'confirm-spec' | 'confirm-jd' | 'publish' | 'pause' | 'resume' | 'close'
+
+export interface JobRequirement {
+  label: string
+  description?: string
+  required?: boolean
+  weight?: number
+}
+
+export interface ApiJobSpec {
+  version: number
+  title: string
+  summary: string
+  responsibilities: string[]
+  requirements: JobRequirement[]
+  skills: string[]
+  confirmed: boolean
+  confirmedAt?: string
+}
+
+export interface ApiJobJd {
+  version: number
+  language: string
+  content: string
+  generatedBy: 'human' | 'ai_assisted'
+  confirmed: boolean
+  confirmedAt?: string
+}
+
+export interface ApiJob {
+  id: string
+  code: string
+  title: string
+  departmentId: string
+  department: string
+  hiringManagerId?: string
+  recruitmentRequestId: string
+  headcount: number
+  filledCount: number
+  employmentType: string
+  workMode: string
+  location?: string
+  status: string
+  channels: string[]
+  spec?: ApiJobSpec
+  jd?: ApiJobJd
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface JobView {
+  id: string
+  entityId: string
+  title: string
+  department: string
+  status: string
+  statusLabel: string
+  channels: string[]
+  updatedAt: string
+  spec?: ApiJobSpec
+  jd?: ApiJobJd
+}
+
+export interface CreateJobInput {
+  title: string
+  departmentId: string
+  hiringManagerId?: string
+  recruitmentRequestId: string
+  headcount: number
+  employmentType: string
+  workMode: string
+  location?: string
+}
+
+export interface CreateSpecInput {
+  title: string
+  summary: string
+  responsibilities: string[]
+  requirements: JobRequirement[]
+  skills: string[]
+}
+
+function toRow(row: ApiJob): JobView {
+  return {
+    id: row.code || row.id,
+    entityId: row.id,
+    title: row.title,
+    department: row.department,
+    status: row.status,
+    statusLabel: row.status,
+    channels: row.channels || [],
+    updatedAt: (row.updatedAt || '').slice(0, 10),
+    spec: row.spec,
+    jd: row.jd,
+  }
+}
+
+export async function loadJobs(): Promise<JobView[]> {
+  const response = await apiClient.getJson<ApiJob[]>('/jobs')
+  return response.data.map(toRow)
+}
+
+export async function getJob(id: string): Promise<ApiJob> {
+  return (await apiClient.getJson<ApiJob>(`/jobs/${id}`)).data
+}
+
+export async function createJob(input: CreateJobInput): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>('/jobs', input)).data
+}
+
+export async function createSpec(id: string, input: CreateSpecInput): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec`, input)).data
+}
+
+export async function createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' }): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd`, input)).data
+}
+
+export async function jobAction(id: string, action: JobAction, reason?: string): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/${action}`, reason ? { reason } : {})).data
+}
+
+/** 演示/只读切片，供 onboarding 与 demo-only 测试引用；真实数据请使用 loadJobs。 */
+export const listJobs = () => DemoRecruitingData.jobs
+/** 岗位详情读取：与 list/action 共用 entityId（后端主键 id）入参规则。 */
+export const getJobDetail = getJob
+

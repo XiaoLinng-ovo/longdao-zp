@@ -7,7 +7,7 @@ export interface NavigationItem extends RouteMeta {
 }
 
 export const navigationItems: NavigationItem[] = appRoutes
-  .filter((route) => route.name !== 'not-found')
+  .filter((route) => route.name !== 'not-found' && !route.path.includes('/:') && !route.meta.hideInNav)
   .map((route) => ({
     path: route.path,
     name: String(route.name),

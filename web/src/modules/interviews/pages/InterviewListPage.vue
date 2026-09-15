@@ -1,12 +1,289 @@
 <script setup lang="ts">
-import { listInterviews } from '../api'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import {
+  concludeInterview,
+  createInterview,
+  INTERVIEW_TYPE_LABEL,
+  loadApplicationsForSchedule,
+  loadInterviews,
+  lockFeedback,
+  RECOMMENDATION_LABEL,
+  submitFeedback,
+  type ApiApplication,
+  type FeedbackRecommendation,
+  type InterviewType,
+  type InterviewView,
+} from '../api'
+import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import PageHeader from '../../../shared/components/PageHeader.vue'
+import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import InterviewTable from '../components/InterviewTable.vue'
 
-const rows = listInterviews()
+const rows = ref<InterviewView[]>([])
+const loading = ref(true)
+const error = ref('')
+const feedback = ref('')
+const acting = ref(false)
+
+const applications = ref<ApiApplication[]>([])
+const router = useRouter()
+
+const showArrange = ref(false)
+const arrangeForm = ref({
+  applicationId: '',
+  title: '',
+  type: 'technical' as InterviewType,
+  round: 1,
+  scheduledAt: '',
+  timezone: 'Asia/Shanghai',
+  location: '',
+  meetingUrl: '',
+  interviewerId: '',
+  interviewerName: '',
+})
+
+const showFeedback = ref(false)
+const feedbackTarget = ref<InterviewView | null>(null)
+const feedbackForm = ref({
+  interviewerId: '',
+  overallScore: 80,
+  recommendation: 'yes' as FeedbackRecommendation,
+  strengths: '',
+  concerns: '',
+  notes: '',
+})
+const showConclude = ref(false)
+const concludeTarget = ref<InterviewView | null>(null)
+const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
+
+const interviewTypes = computed(() => Object.entries(INTERVIEW_TYPE_LABEL).map(([value, label]) => ({ value, label })))
+const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
+
+function clearFlags() { error.value = ''; feedback.value = '' }
+
+async function refresh() {
+  loading.value = true
+  clearFlags()
+  try {
+    rows.value = await loadInterviews()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '读取面试失败').message
+  } finally {
+    loading.value = false
+  }
+}
+
+function applicationLabel(app: ApiApplication): string {
+  return app.code ? `${app.code}（岗位 ${app.jobId}）` : app.id
+}
+
+async function openArrange() {
+  clearFlags()
+  showArrange.value = true
+  if (!applications.value.length) {
+    try {
+      applications.value = await loadApplicationsForSchedule()
+    } catch (cause) {
+      error.value = describeApiFailure(cause, '读取申请失败').message
+    }
+  }
+}
+
+async function submitArrange() {
+  if (acting.value) return
+  const form = arrangeForm.value
+  if (!form.applicationId.trim()) { error.value = '请选择申请'; return }
+  if (!form.title.trim()) form.title = '面试'
+  if (!form.interviewerId.trim() && !form.interviewerName.trim()) { error.value = '请填写面试官'; return }
+
+  acting.value = true
+  clearFlags()
+  const scheduledStartAt = form.scheduledAt ? new Date(form.scheduledAt).toISOString() : undefined
+  try {
+    await createInterview({
+      applicationId: form.applicationId,
+      round: form.round > 0 ? form.round : undefined,
+      type: form.type,
+      title: form.title.trim(),
+      scheduledStartAt,
+      timezone: form.timezone || undefined,
+      location: form.location.trim() || undefined,
+      meetingUrl: form.meetingUrl.trim() || undefined,
+      participants: [{
+        userId: form.interviewerId.trim() || form.interviewerName.trim() || 'current-interviewer',
+        name: form.interviewerName.trim() || undefined,
+        role: 'interviewer',
+        required: true,
+      }],
+    })
+    feedback.value = '面试已创建'
+    showArrange.value = false
+    arrangeForm.value = { applicationId: '', title: '', type: 'technical', round: 1, scheduledAt: '', timezone: 'Asia/Shanghai', location: '', meetingUrl: '', interviewerId: '', interviewerName: '' }
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '安排面试失败').message
+  } finally {
+    acting.value = false
+  }
+}
+
+function openFeedback(row: InterviewView) {
+  clearFlags()
+  feedbackTarget.value = row
+  feedbackForm.value = {
+    interviewerId: row.interviewers[0] || '',
+    overallScore: 80,
+    recommendation: 'yes',
+    strengths: '',
+    concerns: '',
+    notes: '',
+  }
+  showFeedback.value = true
+}
+
+function splitList(text: string): string[] {
+  return text.split(/[，,、\n]/).map((item) => item.trim()).filter(Boolean)
+}
+
+async function submitFeedbackForm() {
+  if (acting.value || !feedbackTarget.value) return
+  const target = feedbackTarget.value
+  const form = feedbackForm.value
+  if (!form.interviewerId.trim()) { error.value = '请填写面试官 ID'; return }
+  const score = Number(form.overallScore)
+  if (!Number.isFinite(score) || score < 0 || score > 100) { error.value = '综合评分需在 0-100 之间'; return }
+
+  acting.value = true
+  clearFlags()
+  try {
+    await submitFeedback(target.entityId, {
+      interviewerId: form.interviewerId.trim(),
+      overallScore: score,
+      recommendation: form.recommendation,
+      strengths: splitList(form.strengths),
+      concerns: splitList(form.concerns),
+      notes: form.notes.trim() || undefined,
+    })
+    await lockFeedback(target.entityId, form.interviewerId.trim())
+    feedback.value = `已提交并锁定 ${target.candidate} 的反馈`
+    showFeedback.value = false
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '提交反馈失败').message
+  } finally {
+    acting.value = false
+  }
+}
+
+function openConclude(row: InterviewView) {
+  clearFlags()
+  concludeTarget.value = row
+  concludeOutcome.value = 'continue'
+  showConclude.value = true
+}
+
+async function submitConclude() {
+  if (acting.value || !concludeTarget.value) return
+  const target = concludeTarget.value
+  acting.value = true
+  clearFlags()
+  try {
+    await concludeInterview(target.entityId, concludeOutcome.value)
+    const outcomeLabel = concludeOutcome.value === 'offer' ? '通过，进入 Offer 阶段' : concludeOutcome.value === 'reject' ? '未通过' : '进入下一轮'
+    feedback.value = `${target.candidate} 面试已完成：${outcomeLabel}`
+    showConclude.value = false
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '完成面试失败').message
+  } finally {
+    acting.value = false
+  }
+}
+
+onMounted(refresh)
 </script>
 
 <template>
-  <PageHeader title="面试管理" description="安排面试并收集面试官反馈" />
-  <InterviewTable :rows="rows" />
+  <PageHeader title="面试中心" description="安排面试、收集并锁定面试官反馈，确认面试结论">
+    <div class="inline-actions">
+      <button class="btn btn-primary" type="button" @click="openArrange">安排面试</button>
+      <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
+    </div>
+  </PageHeader>
+
+  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
+  <div v-if="loading" class="loading-note">正在读取面试...</div>
+  <InterviewTable v-else :rows="rows" @feedback="openFeedback" @conclude="openConclude" @detail="router.push(`/interviews/${$event.entityId}`)" />
+
+  <section v-if="showArrange" class="form-panel">
+    <div class="section-title">安排面试</div>
+    <div class="form-grid">
+      <div class="form-field">
+        <label>申请</label>
+        <select v-model="arrangeForm.applicationId">
+          <option value="" disabled>选择申请</option>
+          <option v-for="app in applications" :key="app.id" :value="app.id">{{ applicationLabel(app) }}</option>
+        </select>
+      </div>
+      <div class="form-field"><label>面试标题</label><input v-model="arrangeForm.title" placeholder="例如：技术一面" /></div>
+      <div class="form-field">
+        <label>面试类型</label>
+        <select v-model="arrangeForm.type"><option v-for="t in interviewTypes" :key="t.value" :value="t.value">{{ t.label }}</option></select>
+      </div>
+      <div class="form-field"><label>轮次</label><input v-model.number="arrangeForm.round" type="number" min="1" /></div>
+      <div class="form-field"><label>开始时间</label><input v-model="arrangeForm.scheduledAt" type="datetime-local" /></div>
+      <div class="form-field"><label>时区</label><input v-model="arrangeForm.timezone" placeholder="Asia/Shanghai" /></div>
+      <div class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
+      <div class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
+      <div class="form-field"><label>面试官 ID</label><input v-model="arrangeForm.interviewerId" placeholder="面试官工号" /></div>
+      <div class="form-field"><label>面试官姓名</label><input v-model="arrangeForm.interviewerName" placeholder="面试官姓名" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top:14px">
+      <button class="btn btn-primary" type="button" :disabled="acting" @click="submitArrange">{{ acting ? '提交中...' : '创建面试' }}</button>
+      <button class="btn btn-ghost" type="button" :disabled="acting" @click="showArrange = false">取消</button>
+    </div>
+  </section>
+
+  <div v-if="showFeedback && feedbackTarget" class="overlay" role="presentation" @click.self="showFeedback = false">
+    <div class="dialog" role="dialog" aria-modal="true">
+      <h3>填写面试反馈</h3>
+      <p>{{ feedbackTarget.candidate }} · {{ feedbackTarget.job }} · {{ feedbackTarget.round }}</p>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr">
+        <div class="form-field"><label>面试官 ID</label><input v-model="feedbackForm.interviewerId" /></div>
+        <div class="form-field"><label>综合评分（0-100）</label><input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" /></div>
+        <div class="form-field" style="grid-column:1 / -1">
+          <label>推荐结论</label>
+          <select v-model="feedbackForm.recommendation"><option v-for="r in recommendations" :key="r.value" :value="r.value">{{ r.label }}</option></select>
+        </div>
+        <div class="form-field" style="grid-column:1 / -1"><label>优点（逗号分隔）</label><input v-model="feedbackForm.strengths" /></div>
+        <div class="form-field" style="grid-column:1 / -1"><label>顾虑（逗号分隔）</label><input v-model="feedbackForm.concerns" /></div>
+        <div class="form-field" style="grid-column:1 / -1"><label>备注</label><textarea v-model="feedbackForm.notes" rows="2"></textarea></div>
+      </div>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showFeedback = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="showConclude && concludeTarget" class="overlay" role="presentation" @click.self="showConclude = false">
+    <div class="dialog" role="dialog" aria-modal="true">
+      <h3>完成面试</h3>
+      <p>{{ concludeTarget.candidate }} · {{ concludeTarget.job }} · {{ concludeTarget.round }}</p>
+      <div class="form-field">
+        <label>面试结论</label>
+        <select v-model="concludeOutcome">
+          <option value="continue">进入下一轮</option>
+          <option value="offer">通过，进入 Offer</option>
+          <option value="reject">未通过</option>
+        </select>
+      </div>
+      <p class="list-muted">请先确保所有面试官反馈均已提交并锁定；提交后结论将写入申请状态。</p>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showConclude = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitConclude">{{ acting ? '提交中...' : '确认完成' }}</button>
+      </div>
+    </div>
+  </div>
 </template>

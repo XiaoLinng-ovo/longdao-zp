@@ -1,0 +1,26 @@
+*** Begin Patch
+*** Update File: web/src/modules/requisitions/pages/RequisitionListPage.vue
+@@
+-  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
++  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
+   <div v-if="loading" class="loading-note">正在读取招聘需求...</div>
+-  <RequisitionTable v-else :rows="visibleRows" :acting-id="actingId" @action="runAction" @open="openDetail" />
++  <RequisitionTable v-else :rows="visibleRows" :acting-id="actingId" @action="runAction" @open="openDetail" />
++
++  <section v-if="showCreate" class="form-panel">
++    <div class="section-title">新建招聘需求</div>
++    <div class="form-grid">
++      <div class="form-field"><label>需求名称</label><input v-model="form.title" placeholder="例如：高级后端工程师" /></div>
++      <div class="form-field"><label>部门</label><input v-model="form.departmentId" placeholder="例如：技术中心" /></div>
++      <div class="form-field"><label>招聘人数</label><input v-model.number="form.headcount" type="number" min="1" /></div>
++      <div class="form-field"><label>用工类型</label><select v-model="form.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
++      <div class="form-field"><label>工作模式</label><select v-model="form.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>
++      <div class="form-field"><label>招聘理由</label><textarea v-model="form.justification" rows="3" placeholder="说明招聘背景与招聘目标"></textarea></div>
++    </div>
++    <div class="inline-actions" style="margin-top:14px">
++      <button class="btn btn-primary" type="button" :disabled="saving" @click="submitCreate">{{ saving ? '保存中...' : '保存草稿' }}</button>
++      <button class="btn btn-ghost" type="button" :disabled="saving" @click="showCreate = false">取消</button>
++    </div>
++  </section>
+ </template>
+*** End Patch

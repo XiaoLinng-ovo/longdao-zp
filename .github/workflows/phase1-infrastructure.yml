@@ -1,0 +1,78 @@
+name: Phase 1 Infrastructure
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'db/**'
+      - 'deploy/**'
+      - '.github/workflows/phase1-infrastructure.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compose-infrastructure:
+    name: Compose services and PostgreSQL migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose configuration
+        run: docker compose -f deploy/docker-compose.yml config
+
+      - name: Start Phase 1 infrastructure
+        run: docker compose -f deploy/docker-compose.yml up -d --wait --wait-timeout 300
+
+      - name: Show service status
+        run: docker compose -f deploy/docker-compose.yml ps
+
+      - name: Verify PostgreSQL migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f deploy/docker-compose.yml exec -T postgres \
+            psql -v ON_ERROR_STOP=1 \
+            -U smartrecruit \
+            -d smartrecruit \
+            -c "SELECT current_database(), version();"
+          docker compose -f deploy/docker-compose.yml exec -T postgres \
+            psql -v ON_ERROR_STOP=1 \
+            -U smartrecruit \
+            -d smartrecruit \
+            -c "SELECT COUNT(*) AS expected_tables FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('users', 'jobs', 'candidates', 'applications', 'resumes', 'analysis_tasks', 'analysis_results', 'outbox_events', 'audit_logs');" \
+            | tee /tmp/postgres-migration-check.txt
+          grep -Eq '[[:space:]]+9[[:space:]]*$' /tmp/postgres-migration-check.txt
+
+      - name: Verify Redis
+        run: |
+          test "$(docker compose -f deploy/docker-compose.yml exec -T redis redis-cli ping | tr -d '\r\n')" = "PONG"
+
+      - name: Verify MinIO API
+        run: curl --fail --silent --show-error http://127.0.0.1:9000/minio/health/live
+
+      - name: Verify ClamAV
+        run: |
+          docker compose -f deploy/docker-compose.yml exec -T clamav \
+            clamdscan --ping 2>/dev/null | grep -q PONG
+
+      - name: Capture service logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/docker-compose.yml ps > /tmp/phase1-compose-ps.txt || true
+          docker compose -f deploy/docker-compose.yml logs --no-color > /tmp/phase1-compose-logs.txt || true
+
+      - name: Run infrastructure cleanup
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
+
+      - name: Upload service logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-infrastructure-logs
+          path: /tmp/phase1-*.txt
+          if-no-files-found: ignore

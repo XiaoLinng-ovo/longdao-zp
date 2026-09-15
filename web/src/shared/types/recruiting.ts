@@ -1,10 +1,16 @@
-export type Status = 'active'|'pending'|'approved'|'rejected'|'draft'|'scheduled'|'completed'|'sent'|'accepted'|'declined'|'published'|'paused'|'configured'|'disabled'
+export type Status = 'active'|'pending'|'approved'|'rejected'|'draft'|'scheduled'|'completed'|'sent'|'accepted'|'declined'|'published'|'paused'|'ready'|'closed'|'configured'|'disabled'
+export type JobStatus = 'draft'|'ready'|'published'|'paused'|'closed'
+export interface JobSpecRequirement { label:string; description?:string; required?:boolean; weight?:number }
+export interface JobSpec { version?:number; title?:string; summary?:string; responsibilities?:string[]; requirements?:JobSpecRequirement[]; skills?:string[]; confirmed:boolean; confirmedAt?:string }
+export interface JobDescription { version?:number; language?:string; content?:string; generatedBy?:'human'|'ai_assisted'; confirmed:boolean; confirmedAt?:string }
 export interface Metric { label:string; value:string|number; trend?:string; tone?:'teal'|'blue'|'amber'|'red' }
-export interface Requisition { id:string; title:string; department:string; headcount:number; budget:string; approver:string; status:Status; updatedAt:string }
-export interface Job { id:string; title:string; department:string; status:Status; channels:string[]; updatedAt:string }
-export interface Candidate { id:string; name:string; job:string; score:number; aiStatus:Status; applicationStatus:Status; updatedAt:string }
+export interface Requisition { id:string; entityId?:string; title:string; department:string; headcount:number; budget:string; approver:string; status:Status|string; updatedAt:string }
+export interface Job { id:string; entityId?:string; title:string; department:string; status:JobStatus|string; channels:string[]; updatedAt:string }
+export interface JobDetail extends Job { recruitmentRequestId?:string; headcount?:number; filledCount?:number; employmentType?:string; workMode?:string; location?:string; spec?:JobSpec; jd?:JobDescription }
+export interface Candidate { id:string; entityId?:string; name:string; job:string; score:number; aiStatus:Status; applicationStatus:Status; updatedAt:string; tags?:string[] }
 export interface Interview { id:string; candidate:string; job:string; round:string; scheduledAt:string; interviewers:string[]; feedbackStatus:Status }
 export interface Offer { id:string; candidate:string; job:string; approvalStatus:Status; deliveryStatus:Status; response:Status; updatedAt:string }
 export interface Report { label:string; value:string|number; detail:string }
 export interface AdminCheck { category:string; owner:string; status:Status; detail:string }
 export interface DemoRecruitingData { metrics:readonly Metric[]; requisitions:readonly Requisition[]; jobs:readonly Job[]; candidates:readonly Candidate[]; interviews:readonly Interview[]; offers:readonly Offer[]; reports:readonly Report[]; adminChecks:readonly AdminCheck[] }
+

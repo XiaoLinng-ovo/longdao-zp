@@ -1,0 +1,444 @@
+import assert from 'node:assert/strict';
+import { request } from 'node:http';
+import { after, before, describe, it } from 'node:test';
+import { loadConfig } from '../src/config.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+let server: ReturnType<typeof import('../src/server.js').createHttpServer>;
+let baseUrl: string;
+let testDirectory: string;
+let authHeader: Record<string, string> = {};
+const previousStorePath = process.env.RECRUITING_STORE_PATH;
+const previousQuarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT;
+
+function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, baseUrl);
+    const requestInstance = request(url, { method: 'GET', headers: { ...authHeader, ...headers } }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: JSON.parse(text)
+        });
+      });
+    });
+    requestInstance.on('error', reject);
+    requestInstance.end();
+  });
+}
+
+function requestJson(method: string, path: string, payload?: unknown): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, baseUrl)
+    const requestInstance = request(url, {
+      method,
+      headers: { ...authHeader, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
+    }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }))
+    })
+    requestInstance.on('error', reject)
+    if (payload !== undefined) requestInstance.write(JSON.stringify(payload))
+    requestInstance.end()
+  })
+}
+
+async function loginAs(email: string, password: string): Promise<void> {
+  const response = await requestJson('POST', '/api/v1/auth/login', { email, password });
+  assert.equal(response.status, 200);
+  const setCookie = response.headers['set-cookie'];
+  const cookie = Array.isArray(setCookie) ? setCookie.join(';') : setCookie;
+  const match = cookie?.split(';').find((item) => item.trim().startsWith('smartrecruit_session='));
+  assert.ok(match);
+  const token = decodeURIComponent(match.trim().slice('smartrecruit_session='.length));
+  authHeader = { authorization: `Bearer ${token}` };
+}
+
+async function login(): Promise<void> {
+  await loginAs('recruiter@smartrecruit.local', 'recruiter123');
+}
+
+before(async () => {
+  testDirectory = await mkdtemp(join(tmpdir(), 'recruiting-api-test-'));
+  process.env.RECRUITING_STORE_PATH = join(testDirectory, 'state.json');
+  process.env.RECRUITING_QUARANTINE_ROOT = join(testDirectory, 'resumes');
+  const { createHttpServer } = await import('../src/server.js');
+  server = createHttpServer(loadConfig({ NODE_ENV: 'test', PORT: '0' }));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  if (previousStorePath === undefined) delete process.env.RECRUITING_STORE_PATH; else process.env.RECRUITING_STORE_PATH = previousStorePath;
+  if (previousQuarantineRoot === undefined) delete process.env.RECRUITING_QUARANTINE_ROOT; else process.env.RECRUITING_QUARANTINE_ROOT = previousQuarantineRoot;
+  await rm(testDirectory, { recursive: true, force: true });
+});
+
+describe('Phase 1 API', { concurrency: false }, () => {
+  it('returns a request id and health data', async () => {
+    const response = await get('/api/v1/health', { 'x-request-id': 'test-request-001' });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['x-request-id'], 'test-request-001');
+    assert.deepEqual(response.body.ok, true);
+    assert.equal(response.body.data.status, 'ok');
+    assert.equal(response.body.requestId, 'test-request-001');
+  });
+
+  it('returns readiness data', async () => {
+    const response = await get('/api/v1/ready');
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.status, 'ready');
+  });
+
+  it('returns a standardized 401 response for the unauthenticated me endpoint', async () => {
+    const response = await get('/api/v1/me');
+    assert.equal(response.status, 401);
+    assert.equal(response.body.ok, false);
+    assert.equal(response.body.error.code, 'AUTHENTICATION_REQUIRED');
+    assert.equal(typeof response.body.requestId, 'string');
+  });
+
+  it('returns a standardized 404 response', async () => {
+    const response = await get('/api/v1/not-found');
+    assert.equal(response.status, 404);
+    assert.equal(response.body.error.code, 'NOT_FOUND');
+  });
+
+  it('runs the local recruitment request and job transaction flow', async () => {
+    await login();
+    const created = await requestJson('POST', '/api/v1/recruitment-requests', {
+      title: '测试数据工程师', departmentId: '数据平台', headcount: 1, employmentType: 'full_time', workMode: 'hybrid', justification: '验证事务链路'
+    })
+    assert.equal(created.status, 201)
+    assert.equal(created.body.data.status, 'draft')
+    const id = created.body.data.id
+
+    assert.equal((await requestJson('POST', `/api/v1/recruitment-requests/${id}/submit`, {})).body.data.status, 'pending_approval')
+    const forbiddenApproval = await requestJson('POST', `/api/v1/recruitment-requests/${id}/approve`, {})
+    assert.equal(forbiddenApproval.status, 403)
+    await loginAs('approver@smartrecruit.local', 'approver123')
+    assert.equal((await requestJson('POST', `/api/v1/recruitment-requests/${id}/approve`, {})).body.data.status, 'approved')
+    await loginAs('recruiter@smartrecruit.local', 'recruiter123')
+    const job = await requestJson('POST', '/api/v1/jobs', {
+      title: '测试数据工程师', departmentId: '数据平台', recruitmentRequestId: id, headcount: 1, employmentType: 'full_time', workMode: 'hybrid'
+    })
+    assert.equal(job.status, 201)
+    assert.equal(job.body.data.status, 'draft')
+    const jobId = job.body.data.id
+    await requestJson('POST', `/api/v1/jobs/${jobId}/spec`, { title: '测试数据工程师', summary: '负责数据服务', responsibilities: ['建设数据服务'], requirements: [], skills: ['SQL'] })
+    await requestJson('POST', `/api/v1/jobs/${jobId}/jd`, { language: 'zh-CN', content: '负责数据服务建设' })
+    const specVersions = await get(`/api/v1/jobs/${jobId}/spec-versions`)
+    assert.equal(specVersions.status, 200)
+    assert.equal(specVersions.body.data.length, 1)
+    assert.equal(specVersions.body.data[0].version, 1)
+    assert.equal(specVersions.body.data[0].jobId, jobId)
+    const jdVersions = await get(`/api/v1/jobs/${jobId}/jd-versions`)
+    assert.equal(jdVersions.status, 200)
+    assert.equal(jdVersions.body.data.length, 1)
+    assert.equal(jdVersions.body.data[0].version, 1)
+    assert.equal(jdVersions.body.data[0].jobId, jobId)
+    assert.equal((await requestJson('POST', `/api/v1/jobs/${jobId}/confirm-spec`, {})).body.data.status, 'draft')
+    assert.equal((await requestJson('POST', `/api/v1/jobs/${jobId}/confirm-jd`, {})).body.data.status, 'ready')
+    assert.equal((await requestJson('POST', `/api/v1/jobs/${jobId}/publish`, {})).body.data.status, 'published')
+    const converted = await requestJson('POST', `/api/v1/recruitment-requests/${id}/convert`, {})
+    assert.equal(converted.body.data.status, 'converted')
+    assert.ok(converted.body.data.convertedJobIds.includes(jobId))
+  })
+
+  it('keeps candidates and applications separate', async () => {
+    const candidates = await get('/api/v1/candidates')
+    assert.equal(candidates.status, 200)
+    assert.ok(Array.isArray(candidates.body.data))
+    assert.ok(candidates.body.data[0].applications.length > 0)
+    const applications = await get('/api/v1/applications')
+    assert.equal(applications.status, 200)
+    assert.ok(applications.body.data.every((item: any) => item.candidateId && item.jobId))
+  })
+
+  it('returns aggregated recruiting reports from persisted entities', async () => {
+    const response = await get('/api/v1/reports')
+    assert.equal(response.status, 200)
+    assert.equal(response.body.data.funnel[0].count, response.body.data.summary[0].value)
+    assert.equal(response.body.data.funnel[2].count, 1)
+    assert.ok(response.body.data.jobFilling.some((item: any) => item.code === 'JOB-108'))
+    assert.ok(response.body.data.channels.some((item: any) => item.channel === '内推'))
+    assert.ok(response.body.data.statusStats.some((item: any) => item.entity === '申请' && item.status === 'screening'))
+    assert.ok(response.body.data.recruitmentCycle)
+    assert.equal(typeof response.body.data.recruitmentCycle.hiredCount, 'number')
+    assert.ok(response.body.data.feedbackCompletion)
+    assert.equal(typeof response.body.data.feedbackCompletion.expected, 'number')
+    assert.equal(typeof response.body.data.feedbackCompletion.locked, 'number')
+    assert.ok(response.body.data.offerAcceptance)
+    assert.equal(typeof response.body.data.offerAcceptance.sent, 'number')
+    assert.equal(typeof response.body.data.offerAcceptance.accepted, 'number')
+  })
+
+  it('creates a quarantined resume, runs analysis, and persists an advisory result', async () => {
+    const candidates = await get('/api/v1/candidates')
+    const candidate = candidates.body.data[0]
+    const application = candidate.applications[0]
+    const created = await requestJson('POST', '/api/v1/resumes', {
+      candidateId: candidate.id,
+      applicationId: application.id,
+      originalFilename: 'resume.txt',
+      mimeType: 'text/plain',
+      content: `${candidate.fullName}\nJava Spring Boot PostgreSQL\n8 years experience`
+    })
+    assert.equal(created.status, 201)
+    assert.equal(created.body.data.resume.scanStatus, 'quarantined')
+    assert.equal(created.body.data.task.status, 'queued')
+
+    const binaryContent = '\u4f60\u597d123'
+    const binaryCreated = await requestJson('POST', '/api/v1/resumes', {
+      candidateId: candidate.id,
+      originalFilename: 'resume.doc',
+      mimeType: 'application/msword',
+      content: Buffer.from(binaryContent, 'utf8').toString('base64'),
+      encoding: 'base64'
+    })
+    assert.equal(binaryCreated.status, 201)
+    assert.equal(binaryCreated.body.data.resume.sizeBytes, Buffer.byteLength(binaryContent, 'utf8'))
+    assert.equal(binaryCreated.body.data.resume.mimeType, 'application/msword')
+    assert.match(binaryCreated.body.data.resume.storageKey, /^[0-9a-f-]+\.doc$/)
+
+    const processed = await requestJson('POST', '/api/v1/analysis-tasks/' + created.body.data.task.id, {})
+    assert.equal(processed.status, 200)
+    assert.equal(processed.body.data.status, 'completed')
+    const result = await get(`/api/v1/analysis-tasks/${created.body.data.task.id}/result`)
+    assert.equal(result.status, 200)
+    assert.equal(result.body.data.result.safety.advisoryOnly, true)
+    assert.equal(result.body.data.result.safety.applicationStatusMutation, 'none')
+    assert.equal(result.body.data.result.provenance.engine, 'deterministic-rules')
+    assert.ok(Array.isArray(result.body.data.result.assessment.matchedRequirements))
+    const resultId = result.body.data.id
+    assert.equal((await get(`/api/v1/analysis-results/${resultId}`)).body.data.id, resultId)
+    const reviewed = await requestJson('PATCH', `/api/v1/analysis-results/${resultId}`, { status: 'accepted', comment: '人工确认' })
+    assert.equal(reviewed.status, 200)
+    assert.equal(reviewed.body.data.humanReviewStatus, 'accepted')
+    assert.equal(reviewed.body.data.result.humanReview.status, 'accepted')
+
+    const detail = await get(`/api/v1/candidates/${candidate.id}`)
+    assert.equal(detail.status, 200)
+    assert.ok(Array.isArray(detail.body.data.analysisTasks))
+    const detailTask = detail.body.data.analysisTasks.find((task: any) => task.id === created.body.data.task.id)
+    assert.ok(detailTask)
+    assert.equal(detailTask.status, 'completed')
+  })
+
+  it('runs the interview feedback lock and application advancement flow', async () => {
+    const applications = await get('/api/v1/applications')
+    const application = applications.body.data.find((item: any) => item.status === 'screening')
+    assert.ok(application)
+    const created = await requestJson('POST', '/api/v1/interviews', { applicationId: application.id, title: '技术面', type: 'technical', participants: [{ userId: 'user-interviewer', name: '林晓', role: 'interviewer' }] })
+    assert.equal(created.status, 201)
+    const interviewId = created.body.data.id
+
+    const detail = await get(`/api/v1/interviews/${interviewId}`)
+    assert.equal(detail.status, 200)
+    assert.equal(detail.body.data.id, interviewId)
+    assert.equal(detail.body.data.application.id, application.id)
+    assert.equal(detail.body.data.feedbackStatus, 'pending')
+    assert.deepEqual(detail.body.data.feedback, [])
+    assert.equal((await requestJson('POST', `/api/v1/interviews/${interviewId}/feedback`, { interviewerId: 'user-interviewer', overallScore: 90, recommendation: 'yes' })).body.data.status, 'submitted')
+    assert.equal((await requestJson('POST', `/api/v1/interviews/${interviewId}/lock-feedback`, { interviewerId: 'user-interviewer' })).body.data.status, 'locked')
+    assert.equal((await requestJson('POST', `/api/v1/interviews/${interviewId}/conclude`, { outcome: 'offer' })).body.data.status, 'completed')
+    const updated = await get('/api/v1/applications')
+    assert.equal(updated.body.data.find((item: any) => item.id === application.id).status, 'offer')
+  })
+
+  it('completes the offer approval, response, and onboarding archive flow', async () => {
+    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'offer')
+    assert.ok(application)
+    const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '测试工程师', departmentId: '数据平台', employmentType: 'full_time', baseSalary: { amount: 20000, currency: 'CNY' }, content: '欢迎加入' })
+    assert.equal(created.status, 201)
+    const id = created.body.data.id
+    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})).body.data.status, 'pending_approval')
+    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/approve`, {})).body.data.status, 'approved')
+    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/send`, {})).body.data.status, 'sent')
+    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/accept`, {})).body.data.status, 'accepted')
+    const archived = await requestJson('POST', `/api/v1/offers/${id}/archive-onboarding`, { reason: '入职资料已归档' })
+    assert.equal(archived.body.data.status, 'pending')
+    assert.equal((await get(`/api/v1/offers/${id}`)).body.data.onboarding.status, 'pending')
+    assert.equal((await requestJson('POST', `/api/v1/onboarding/${archived.body.data.id}/complete`, {})).body.data.status, 'completed')
+  })
+
+  it('supports offer rejection, draft revision, and expiry', async () => {
+    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'interview')
+    assert.ok(application)
+
+    const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '修订前岗位', departmentId: '数据平台', employmentType: 'full_time', baseSalary: { amount: 18000, currency: 'CNY' }, content: '初版内容' })
+    assert.equal(created.status, 201)
+    const id = created.body.data.id
+
+    const revised = await requestJson('PATCH', `/api/v1/offers/${id}`, { positionTitle: '修订后岗位', content: '修订版内容' })
+    assert.equal(revised.body.data.status, 'draft')
+    assert.equal(revised.body.data.version, 2)
+    const detail = await get(`/api/v1/offers/${id}`)
+    assert.ok(detail.body.data.versions.length >= 2)
+
+    await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})
+    const rejected = await requestJson('POST', `/api/v1/offers/${id}/reject`, { reason: '薪资需调整' })
+    assert.equal(rejected.body.data.status, 'draft')
+    assert.equal(rejected.body.data.approval.status, 'rejected')
+
+    await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})
+    await requestJson('POST', `/api/v1/offers/${id}/approve`, {})
+    await requestJson('POST', `/api/v1/offers/${id}/send`, {})
+    const expired = await requestJson('POST', `/api/v1/offers/${id}/expire`, {})
+    assert.equal(expired.body.data.status, 'expired')
+  })
+
+  it('exposes candidate, application, and interview workflow event subjects', async () => {
+    const jobs = await get('/api/v1/jobs')
+    const job = jobs.body.data.find((item: any) => item.status === 'published')
+    assert.ok(job)
+
+    const candidate = await requestJson('POST', '/api/v1/candidates', { fullName: '审计候选人', email: 'audit.candidate@example.com', source: '内部推荐' })
+    assert.equal(candidate.status, 201)
+    const candidateId = candidate.body.data.id
+
+    const application = await requestJson('POST', '/api/v1/applications', { candidateId, jobId: job.id, source: '内部推荐' })
+    assert.equal(application.status, 201)
+    const applicationId = application.body.data.id
+
+    assert.equal((await requestJson('POST', `/api/v1/applications/${applicationId}/status`, { status: 'screening' })).body.data.status, 'screening')
+
+    const archivedCandidate = await requestJson("PATCH", `/api/v1/candidates/${candidateId}`, { status: 'archived', reason: '隐私保护' })
+    assert.equal(archivedCandidate.status, 200)
+    assert.equal(archivedCandidate.body.data.status, 'archived')
+
+    const invalidStatus = await requestJson("PATCH", `/api/v1/candidates/${candidateId}`, { status: 'invalid_status' })
+    assert.equal(invalidStatus.status, 400)
+
+    const restoredCandidate = await requestJson("PATCH", `/api/v1/candidates/${candidateId}`, { status: 'active' })
+    assert.equal(restoredCandidate.body.data.status, 'active')
+
+    const candidateEvents = await get('/api/v1/workflow-events?subjectType=candidate&limit=20')
+    assert.equal(candidateEvents.status, 200)
+    const candidateCreated = candidateEvents.body.data.find((item: any) => item.subjectId === candidateId && item.action === 'create')
+    assert.ok(candidateCreated)
+    assert.equal(candidateCreated.subjectLabel, '审计候选人')
+    const candidateStatusChanged = candidateEvents.body.data.find((item: any) => item.subjectId === candidateId && item.action === 'status_changed' && item.toStatus === 'archived')
+    assert.ok(candidateStatusChanged)
+    assert.equal(candidateStatusChanged.fromStatus, 'active')
+    assert.equal(candidateStatusChanged.toStatus, 'archived')
+
+    const applicationEvents = await get('/api/v1/workflow-events?subjectType=application&limit=20')
+    assert.equal(applicationEvents.status, 200)
+    assert.ok(applicationEvents.body.data.some((item: any) => item.subjectId === applicationId && item.action === 'create'))
+    const statusChanged = applicationEvents.body.data.find((item: any) => item.subjectId === applicationId && item.action === 'status_changed')
+    assert.ok(statusChanged)
+    assert.equal(statusChanged.fromStatus, 'new')
+    assert.equal(statusChanged.toStatus, 'screening')
+
+    const interviewEvents = await get('/api/v1/workflow-events?subjectType=interview&limit=50')
+    assert.equal(interviewEvents.status, 200)
+    assert.ok(interviewEvents.body.data.some((item: any) => item.action === 'create'))
+    assert.ok(interviewEvents.body.data.some((item: any) => item.action === 'feedback_submitted'))
+    assert.ok(interviewEvents.body.data.some((item: any) => item.action === 'feedback_locked'))
+    assert.ok(interviewEvents.body.data.some((item: any) => item.action === 'conclude'))
+  })
+
+  it('exposes job creation, spec, and JD workflow audit events', async () => {
+    const response = await get('/api/v1/workflow-events?subjectType=job&limit=50')
+    assert.equal(response.status, 200)
+    assert.ok(Array.isArray(response.body.data))
+    const expectedActions = ['create_job', 'spec_created', 'jd_created', 'confirm_spec', 'confirm_jd', 'publish']
+    for (const action of expectedActions) {
+      const event = response.body.data.find((item: any) => item.action === action)
+      assert.ok(event, `missing job workflow event ${action}`)
+      assert.equal(event.subjectType, 'job')
+      assert.ok(event.subjectLabel)
+    }
+  })
+
+
+  it('archives accepted offers into onboarding and lists onboarding records', async () => {
+    const applications = await get('/api/v1/applications')
+    const application = applications.body.data.find((item: any) => item.status === 'interview')
+    assert.ok(application)
+
+    const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '入职归档岗位', departmentId: '技术中心', employmentType: 'full_time', startDate: '2026-10-08', baseSalary: { amount: 22000, currency: 'CNY' }, content: 'Offer 内容' })
+    assert.equal(created.status, 201)
+    const offerId = created.body.data.id
+
+    await requestJson('POST', `/api/v1/offers/${offerId}/submit-approval`, {})
+    await requestJson('POST', `/api/v1/offers/${offerId}/approve`, {})
+    await requestJson('POST', `/api/v1/offers/${offerId}/send`, {})
+    const accepted = await requestJson('POST', `/api/v1/offers/${offerId}/accept`, {})
+    assert.equal(accepted.body.data.status, 'accepted')
+
+    const archived = await requestJson('POST', `/api/v1/offers/${offerId}/archive-onboarding`, {})
+    assert.equal(archived.status, 200)
+    assert.equal(archived.body.data.status, 'pending')
+
+    const list = await get('/api/v1/onboarding')
+    assert.equal(list.status, 200)
+    const record = list.body.data.find((item: any) => item.offerId === offerId)
+    assert.ok(record)
+    assert.equal(record.applicationId, application.id)
+    assert.equal(record.status, 'pending')
+
+    const scheduled = await requestJson('POST', `/api/v1/onboarding/${record.id}/schedule`, {})
+    assert.equal(scheduled.status, 200)
+    assert.equal(scheduled.body.data.status, 'scheduled')
+
+    const patched = await requestJson('PATCH', `/api/v1/onboarding/${record.id}`, { plannedStartDate: '2026-10-21', notes: '准备入职资料' })
+    assert.equal(patched.status, 200)
+    assert.equal(patched.body.data.plannedStartDate, '2026-10-21')
+    assert.equal(patched.body.data.notes, '准备入职资料')
+
+    const completed = await requestJson('POST', `/api/v1/onboarding/${record.id}/complete`, {})
+    assert.equal(completed.status, 200)
+    assert.equal(completed.body.data.status, 'completed')
+    assert.ok(completed.body.data.archivedAt)
+
+    const applicationAfter = await get('/api/v1/applications')
+    const hiredApplication = applicationAfter.body.data.find((item: any) => item.id === application.id)
+    assert.equal(hiredApplication.status, 'hired')
+
+    const detail = await get(`/api/v1/onboarding/${record.id}`)
+    assert.equal(detail.status, 200)
+    assert.equal(detail.body.data.id, record.id)
+    assert.equal(detail.body.data.status, 'completed')
+  })
+  it('exposes offer workflow events for audit views', async () => {
+    const response = await get('/api/v1/workflow-events?subjectType=offer&limit=20')
+    assert.equal(response.status, 200)
+    assert.ok(Array.isArray(response.body.data))
+    const event = response.body.data.find((item: any) => item.action === 'expire')
+    assert.ok(event)
+    assert.equal(event.subjectType, 'offer')
+    assert.ok(event.subjectLabel)
+    assert.ok(event.fromStatus)
+    assert.ok(event.toStatus)
+
+    const me = await get('/api/v1/me')
+    assert.equal(me.status, 200)
+    const expectedActorId = me.body.data.user.id
+    assert.ok(expectedActorId)
+
+    const createEvent = response.body.data.find((item: any) => item.action === 'create')
+    assert.ok(createEvent, 'missing offer create audit event')
+    assert.equal(createEvent.actorId, expectedActorId)
+    assert.equal(createEvent.toStatus, 'draft')
+
+    const actedEvents = response.body.data.filter((item: any) => ['create', 'revise', 'submit_approval', 'approve', 'send', 'accept', 'expire'].includes(item.action))
+    assert.ok(actedEvents.length > 0)
+    for (const item of actedEvents) {
+      assert.equal(item.actorId, expectedActorId, `offer audit action ${item.action} should capture authenticated actor`)
+    }
+  })
+});
+
+

@@ -1,0 +1,28 @@
+{
+  "name": "@smartrecruit-pro/resume-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure TypeScript contracts and deterministic resume-intelligence primitives for SmartRecruit Pro",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "node scripts/tsc.mjs -p tsconfig.json --noEmit",
+    "typecheck:test": "node scripts/tsc.mjs -p tsconfig.test.json --noEmit",
+    "build": "node scripts/tsc.mjs -p tsconfig.build.json",
+    "test:build": "node scripts/tsc.mjs -p tsconfig.test-build.json",
+    "test": "npm run test:build && node --test dist-test/tests/resume-intelligence.test.js"
+  }
+}

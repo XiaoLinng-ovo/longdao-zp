@@ -1,0 +1,69 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { jobAction, loadJobs, type JobAction, type JobView } from '../api'
+import { JOB_ACTION_LABEL } from '../workflow'
+import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import PageHeader from '../../../shared/components/PageHeader.vue'
+import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
+import JobTable from '../components/JobTable.vue'
+
+const router = useRouter()
+const rows = ref<JobView[]>([])
+const loading = ref(true)
+const error = ref('')
+const feedback = ref('')
+const actingId = ref('')
+
+function clearFlags() { error.value = ''; feedback.value = '' }
+
+async function refresh() {
+  loading.value = true
+  clearFlags()
+  try {
+    rows.value = await loadJobs()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '读取岗位失败').message
+  } finally {
+    loading.value = false
+  }
+}
+
+async function runAction(row: JobView, action: JobAction, suppliedReason?: string) {
+  if (actingId.value) return
+  const reason = suppliedReason
+  const id = row.entityId
+  actingId.value = id
+  clearFlags()
+  try {
+    const done = await jobAction(id, action, reason)
+    feedback.value = `${row.title}：${JOB_ACTION_LABEL[action]}成功，当前状态 ${done.status}`
+    await refresh()
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '岗位操作失败').message
+  } finally {
+    actingId.value = ''
+  }
+}
+
+function openJob(row: JobView) {
+  router.push({ name: 'job-detail', params: { id: row.entityId } })
+}
+
+function openDoc(row: JobView, kind: 'spec' | 'jd') {
+  router.push({ name: 'job-detail', params: { id: row.entityId || row.id }, query: { doc: kind } })
+}
+
+onMounted(refresh)
+</script>
+
+<template>
+  <PageHeader title="岗位管理" description="维护职位说明、JD 与发布状态">
+    <div class="inline-actions">
+      <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
+    </div>
+  </PageHeader>
+  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
+  <div v-if="loading" class="loading-note">正在读取岗位...</div>
+  <JobTable v-else :rows="rows" :acting-id="actingId" @action="runAction" @open="openJob" @open-doc="openDoc" />
+</template>

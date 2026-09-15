@@ -1,0 +1,26 @@
+{
+  "name": "@smartrecruit-pro/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SmartRecruit Pro background worker skeleton for asynchronous recruiting tasks",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "node scripts/tsc.mjs -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/worker.test.js",
+    "start": "npm run build && node dist/src/index.js",
+    "dev": "npm run build && node --watch dist/src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
+  }
+}
