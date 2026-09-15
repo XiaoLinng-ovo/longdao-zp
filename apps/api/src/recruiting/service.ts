@@ -310,11 +310,11 @@ export class RecruitingService {
         const previousStatus = job.status
         if (job.spec) {
           state.jobSpecVersions.push({ ...job.spec, jobId: job.id, createdAt: timestamp, actorId })
-          job.spec = { ...job.spec, version: job.spec.version + 1, confirmed: false, confirmedAt: undefined }
+          job.spec = { ...job.spec, version: job.spec.version + 1, confirmed: false, confirmedAt: undefined as any }
         }
         if (job.jd) {
           state.jobDescriptionVersions.push({ ...job.jd, jobId: job.id, createdAt: timestamp, actorId })
-          job.jd = { ...job.jd, version: job.jd.version + 1, confirmed: false, confirmedAt: undefined }
+          job.jd = { ...job.jd, version: job.jd.version + 1, confirmed: false, confirmedAt: undefined as any }
         }
         job.status = 'draft'
         addEvent(state, { subjectType: 'job', subjectId: job.id, action: 'published_job_requires_reconfirmation', fromStatus: previousStatus, toStatus: job.status, actorId })
