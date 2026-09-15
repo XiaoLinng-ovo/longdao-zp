@@ -382,7 +382,277 @@
       "tokenHash": "6ccec081b8bf74c0108a4eb4cc554666213fec79eb7a9da0ae0e0f7e481a87c2",
       "createdAt": "2026-09-15T08:13:55.768Z",
       "expiresAt": "2026-09-15T20:13:55.768Z",
-      "lastSeenAt": "2026-09-15T08:14:12.908Z",
+      "lastSeenAt": "2026-09-15T08:43:32.187Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "b6c58c20-0cdb-461f-a557-662c9e25842d",
+      "userId": "user-recruiter",
+      "tokenHash": "12b599c17b3eaff52b29437406e0239d39953fdc928936783ea1f82b359ea44e",
+      "createdAt": "2026-09-15T08:37:03.051Z",
+      "expiresAt": "2026-09-15T20:37:03.050Z",
+      "lastSeenAt": "2026-09-15T08:37:03.090Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "8d7dd56e-e235-4be8-af0c-cf69d9f35c98",
+      "userId": "user-approver",
+      "tokenHash": "5d2b921fc290776c208a6d5fda08103b4904cb10d9865e84a238719ea0b9bc21",
+      "createdAt": "2026-09-15T08:37:03.103Z",
+      "expiresAt": "2026-09-15T20:37:03.103Z",
+      "lastSeenAt": "2026-09-15T08:37:03.119Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "195497a4-1a37-422c-adca-6487e62b2a87",
+      "userId": "user-recruiter",
+      "tokenHash": "954acebd805ee2d174efe3dea377d0d392129f6157e72b1bf466167365aae659",
+      "createdAt": "2026-09-15T08:37:03.131Z",
+      "expiresAt": "2026-09-15T20:37:03.130Z",
+      "lastSeenAt": "2026-09-15T08:37:03.558Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "2e7f3d02-3f69-42d5-a987-ac9479fc311e",
+      "userId": "user-recruiter",
+      "tokenHash": "2a5fc391bbbc763e213207e6185f64e101233640ea84bc97ac99d3c27f42e295",
+      "createdAt": "2026-09-15T08:41:24.749Z",
+      "expiresAt": "2026-09-15T20:41:24.748Z",
+      "lastSeenAt": "2026-09-15T08:41:24.787Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "0b222d27-8ce7-4635-9f41-5d1ac4398d57",
+      "userId": "user-approver",
+      "tokenHash": "044e2b60056b035e3fb2351b5d0fb7e892bd0915b6f18c2e1758a15577db2e7d",
+      "createdAt": "2026-09-15T08:41:24.796Z",
+      "expiresAt": "2026-09-15T20:41:24.796Z",
+      "lastSeenAt": "2026-09-15T08:41:24.814Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "bfc61f3a-49b1-4f66-87ca-398260a3b590",
+      "userId": "user-recruiter",
+      "tokenHash": "a4df866292b3c6b8e5987aa94080396898a15087599085e605d2224dc9120d4d",
+      "createdAt": "2026-09-15T08:41:24.822Z",
+      "expiresAt": "2026-09-15T20:41:24.822Z",
+      "lastSeenAt": "2026-09-15T08:41:25.396Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "30b76481-e1b7-44e2-8791-dff3827a6c02",
+      "userId": "user-recruiter",
+      "tokenHash": "b76d52268a745bfc392a9e4f4c289ac82f7c2070bca4db4b22160badeeac50d4",
+      "createdAt": "2026-09-15T08:55:07.355Z",
+      "expiresAt": "2026-09-15T20:55:07.355Z",
+      "lastSeenAt": "2026-09-15T08:55:07.392Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "d1904a75-ce51-4091-8701-7a8ffef4f3aa",
+      "userId": "user-approver",
+      "tokenHash": "c3b8193811340700ccef09a51b42983335e1ae23c45f84e8ae12170f1792969a",
+      "createdAt": "2026-09-15T08:55:07.401Z",
+      "expiresAt": "2026-09-15T20:55:07.401Z",
+      "lastSeenAt": "2026-09-15T08:55:07.422Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "d7814fb3-9d2c-4a21-af6d-8a531dee667b",
+      "userId": "user-recruiter",
+      "tokenHash": "fae3b087c770b744b184a30eafa03e4b10da02f7b26d74e80c8d5e53fcb0f2d5",
+      "createdAt": "2026-09-15T08:55:07.429Z",
+      "expiresAt": "2026-09-15T20:55:07.429Z",
+      "lastSeenAt": "2026-09-15T08:55:08.092Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "bfb03c23-b9e7-4893-a383-a02e01661f26",
+      "userId": "user-recruiter",
+      "tokenHash": "c51e595f58bf93bee2ef9b2c8361b14c22bd78cbd3f7eba232505f82b2c428a3",
+      "createdAt": "2026-09-15T09:26:52.967Z",
+      "expiresAt": "2026-09-15T21:26:52.967Z",
+      "lastSeenAt": "2026-09-15T09:26:53.007Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "ebbd9fc3-1e1b-4128-b335-4bd59afa7a08",
+      "userId": "user-approver",
+      "tokenHash": "be555bd06f83109278e24482487f8bb325b90fc4a4c1dbd986bb1c07347f3f96",
+      "createdAt": "2026-09-15T09:26:53.017Z",
+      "expiresAt": "2026-09-15T21:26:53.017Z",
+      "lastSeenAt": "2026-09-15T09:26:53.038Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "54e8c39f-fb60-4be7-91d4-74e0747a478e",
+      "userId": "user-recruiter",
+      "tokenHash": "bb1cc8b7f2a1e2678a4a144c3126a38393c09eefaed6a9afa7d3d9a7d1403ae3",
+      "createdAt": "2026-09-15T09:26:53.049Z",
+      "expiresAt": "2026-09-15T21:26:53.049Z",
+      "lastSeenAt": "2026-09-15T09:26:53.742Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "c071c076-00d6-4ef0-9574-ed5589b3ffb8",
+      "userId": "user-recruiter",
+      "tokenHash": "e264ad7671033d8de9512e6426a449b51fffbe175b4fd129fac83516f610f27e",
+      "createdAt": "2026-09-15T09:29:20.207Z",
+      "expiresAt": "2026-09-15T21:29:20.206Z",
+      "lastSeenAt": "2026-09-15T09:29:20.248Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "df644db4-0103-48e4-a2e9-38538cda8271",
+      "userId": "user-approver",
+      "tokenHash": "77fbd4eb3de24517ee512d1bf1d9e9df8c28db2281ec202ee81e8526b24f4d14",
+      "createdAt": "2026-09-15T09:29:20.259Z",
+      "expiresAt": "2026-09-15T21:29:20.259Z",
+      "lastSeenAt": "2026-09-15T09:29:20.279Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "b2861c50-9ccd-4e00-85d4-b17bba948ed8",
+      "userId": "user-recruiter",
+      "tokenHash": "f78c55419b43dc312df975fbfbcacc8e0520ca451a2469daced6cee0636119a1",
+      "createdAt": "2026-09-15T09:29:20.290Z",
+      "expiresAt": "2026-09-15T21:29:20.290Z",
+      "lastSeenAt": "2026-09-15T09:29:20.384Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "2f872458-2afe-4a93-8855-1cc48b219c6c",
+      "userId": "user-recruiter",
+      "tokenHash": "e66269bce588d186117a937a4d2a383eb1f70d9b43ffb8147590959c62467354",
+      "createdAt": "2026-09-15T09:29:20.395Z",
+      "expiresAt": "2026-09-15T21:29:20.395Z",
+      "lastSeenAt": "2026-09-15T09:29:20.433Z",
+      "user": {
+        "id": "user-recruiter",
+        "name": "招聘专员",
+        "email": "recruiter@smartrecruit.local",
+        "role": "recruiter",
+        "departmentId": "dept-tech"
+      }
+    },
+    {
+      "sessionId": "4e6d69c9-d462-4817-bc82-474fc62b5407",
+      "userId": "user-approver",
+      "tokenHash": "684f0a8c94b93d584d9f37278cdc55ac1678b4b6e15c0b5ee570c8ab7d042615",
+      "createdAt": "2026-09-15T09:29:20.441Z",
+      "expiresAt": "2026-09-15T21:29:20.441Z",
+      "lastSeenAt": "2026-09-15T09:29:20.469Z",
+      "user": {
+        "id": "user-approver",
+        "name": "审批人",
+        "email": "approver@smartrecruit.local",
+        "role": "approver",
+        "departmentId": "dept-admin"
+      }
+    },
+    {
+      "sessionId": "394cbe5f-7912-44b3-8983-10357d63e4a7",
+      "userId": "user-recruiter",
+      "tokenHash": "90ad95c78299f5678325e7271c23e14b7afd9b19837d39b8fbc69c2e20a6d4b4",
+      "createdAt": "2026-09-15T09:29:20.477Z",
+      "expiresAt": "2026-09-15T21:29:20.477Z",
+      "lastSeenAt": "2026-09-15T09:29:21.101Z",
       "user": {
         "id": "user-recruiter",
         "name": "招聘专员",
@@ -424,6 +694,22 @@
       "role": "approver",
       "departmentId": "dept-admin",
       "passwordHash": "1c391319644c0c6e9f5955e44e55862a8fd27b3b9d9863456500096ccf512db3"
+    },
+    {
+      "id": "user-hr-admin",
+      "name": "HR 管理员",
+      "email": "hr@smartrecruit.local",
+      "role": "hr_admin",
+      "departmentId": "dept-admin",
+      "passwordHash": "070a3b5e8d4bd5c46acccb91c9c54614c0cd649e78c4c4719e3a64270bae5ddf"
+    },
+    {
+      "id": "user-interviewer",
+      "name": "面试官",
+      "email": "interviewer@smartrecruit.local",
+      "role": "interviewer",
+      "departmentId": "dept-tech",
+      "passwordHash": "27b6d217e2d7c8d21cf0cb549037d03419d006f12f946892f7fdb4659e8ad0c6"
     }
   ]
 }

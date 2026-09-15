@@ -1,4 +1,4 @@
-export type Role = 'recruiter' | 'hiring_manager' | 'approver' | 'admin'
+export type Role = 'recruiter' | 'hiring_manager' | 'approver' | 'admin' | 'hr_admin' | 'interviewer'
 
 export interface SessionUser {
   id: string
@@ -34,4 +34,7 @@ export const ROLE_LABELS: Record<Role, string> = {
   hiring_manager: '部门负责人',
   approver: '审批人',
   admin: '系统管理员',
+  hr_admin: 'HR 管理员',
+  interviewer: '面试官',
 }
+

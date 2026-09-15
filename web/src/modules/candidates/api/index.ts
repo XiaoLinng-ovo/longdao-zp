@@ -49,7 +49,7 @@ function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
     job: application ? jobs.get(application.jobId) || application.jobId : '未关联岗位',
     score: application?.score ?? 0,
     aiStatus: application?.aiStatus === 'completed' ? 'completed' : 'pending',
-    applicationStatus: (application?.status === 'interview' ? 'scheduled' : application?.status || 'pending') as Candidate['applicationStatus'],
+    applicationStatus: (application?.status === 'interviewing' ? 'scheduled' : application?.status || 'pending') as Candidate['applicationStatus'],
     updatedAt: (application?.updatedAt || row.updatedAt).slice(0, 10),
     tags: row.tags,
   }

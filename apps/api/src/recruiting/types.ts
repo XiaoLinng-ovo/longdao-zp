@@ -1,7 +1,7 @@
 export type RecruitmentRequestStatus = 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'withdrawn' | 'converted' | 'closed' | 'cancelled'
 export type JobStatus = 'draft' | 'ready' | 'published' | 'paused' | 'closed'
 export type CandidateStatus = 'active' | 'archived' | 'do_not_contact'
-export type ApplicationStatus = 'new' | 'screening' | 'interview' | 'offer' | 'hired' | 'rejected' | 'withdrawn'
+export type ApplicationStatus = 'pending_analysis' | 'analysis_queued' | 'human_review' | 'interviewing' | 'offer_approval' | 'offer_sent' | 'offer_accepted' | 'onboarding_archived' | 'rejected' | 'offer_declined' | 'offer_cancelled' | 'offer_expired'
 export type ResumeScanStatus = 'quarantined' | 'local_unscanned' | 'clean' | 'infected' | 'failed'
 export type AnalysisTaskStatus = 'queued' | 'processing' | 'completed' | 'failed'
 export type OfferStatus = 'draft' | 'pending_approval' | 'approved' | 'sent' | 'accepted' | 'declined' | 'cancelled' | 'expired'
@@ -35,6 +35,36 @@ export interface RecruitmentRequestRecord {
   version: number
   createdAt: string
   updatedAt: string
+}
+
+export interface ApprovalInstanceRecord {
+  id: string
+  entityType: 'recruitment_request'
+  entityId: string
+  version: number
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApprovalStepRecord {
+  id: string
+  instanceId: string
+  order: number
+  name: string
+  approverRole: string
+  status: 'pending' | 'approved' | 'rejected'
+  actedAt?: string
+}
+
+export interface ApprovalAuditRecord {
+  id: string
+  instanceId: string
+  stepId: string
+  actorId: string
+  action: 'approve' | 'reject'
+  comment?: string
+  createdAt: string
 }
 
 export interface ApprovalRecord {
@@ -199,6 +229,9 @@ export interface RecruitingStoreState {
   offers: OfferRecord[]
   offerVersions: OfferVersionRecord[]
   onboarding: OnboardingRecord[]
+  approvalInstances: ApprovalInstanceRecord[]
+  approvalSteps: ApprovalStepRecord[]
+  approvalRecords: ApprovalAuditRecord[]
   workflowEvents: WorkflowEventRecord[]
   candidateTags: string[]
   nextRequestNumber: number
@@ -208,3 +241,4 @@ export interface RecruitingStoreState {
   nextInterviewNumber: number
   nextOfferNumber: number
 }
+

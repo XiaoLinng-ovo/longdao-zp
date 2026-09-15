@@ -155,6 +155,41 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.ok(converted.body.data.convertedJobIds.includes(jobId))
   })
 
+  it('keeps approval instances, steps, and immutable records for recruitment requests', async () => {
+    await loginAs('recruiter@smartrecruit.local', 'recruiter123')
+    const created = await requestJson('POST', '/api/v1/recruitment-requests', { title: '审批实例测试岗位', departmentId: '数据平台', headcount: 2, employmentType: 'full_time', workMode: 'hybrid', justification: '验证审批实例历史' })
+    assert.equal(created.status, 201)
+    const id = created.body.data.id
+    await requestJson('POST', '/api/v1/recruitment-requests/' + id + '/submit', {})
+
+    const pendingApproval = await get('/api/v1/recruitment-requests/' + id + '/approval')
+    assert.equal(pendingApproval.status, 200)
+    assert.ok(pendingApproval.body.data.current)
+    assert.equal(pendingApproval.body.data.current.version, 1)
+    assert.equal(pendingApproval.body.data.steps.length, 1)
+    assert.equal(pendingApproval.body.data.records.length, 0)
+
+    await loginAs('approver@smartrecruit.local', 'approver123')
+    await requestJson('POST', '/api/v1/recruitment-requests/' + id + '/reject', { reason: '预算需要调整' })
+
+    const rejectedApproval = await get('/api/v1/recruitment-requests/' + id + '/approval')
+    assert.equal(rejectedApproval.body.data.current.status, 'rejected')
+    assert.equal(rejectedApproval.body.data.records.length, 1)
+    const rejectedRecord = rejectedApproval.body.data.records[0]
+    assert.equal(rejectedRecord.action, 'reject')
+    assert.equal(rejectedRecord.comment, '预算需要调整')
+
+    await loginAs('recruiter@smartrecruit.local', 'recruiter123')
+    await requestJson('POST', '/api/v1/recruitment-requests/' + id + '/resubmit', {})
+    const resubmittedApproval = await get('/api/v1/recruitment-requests/' + id + '/approval')
+    assert.equal(resubmittedApproval.body.data.current.version, 2)
+    assert.equal(resubmittedApproval.body.data.current.status, 'pending')
+    assert.equal(resubmittedApproval.body.data.steps.filter((item: any) => item.instanceId === resubmittedApproval.body.data.current.id).length, 1)
+
+    const history = await requestJson('GET', '/api/v1/recruitment-requests/' + id + '/approval')
+    assert.equal(history.body.data.records.length, 1)
+  })
+
   it('keeps candidates and applications separate', async () => {
     const candidates = await get('/api/v1/candidates')
     assert.equal(candidates.status, 200)
@@ -172,7 +207,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(response.body.data.funnel[2].count, 1)
     assert.ok(response.body.data.jobFilling.some((item: any) => item.code === 'JOB-108'))
     assert.ok(response.body.data.channels.some((item: any) => item.channel === '内推'))
-    assert.ok(response.body.data.statusStats.some((item: any) => item.entity === '申请' && item.status === 'screening'))
+    assert.ok(response.body.data.statusStats.some((item: any) => item.entity === '申请' && item.status === 'human_review'))
     assert.ok(response.body.data.recruitmentCycle)
     assert.equal(typeof response.body.data.recruitmentCycle.hiredCount, 'number')
     assert.ok(response.body.data.feedbackCompletion)
@@ -237,7 +272,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
 
   it('runs the interview feedback lock and application advancement flow', async () => {
     const applications = await get('/api/v1/applications')
-    const application = applications.body.data.find((item: any) => item.status === 'screening')
+    const application = applications.body.data.find((item: any) => item.status === 'human_review')
     assert.ok(application)
     const created = await requestJson('POST', '/api/v1/interviews', { applicationId: application.id, title: '技术面', type: 'technical', participants: [{ userId: 'user-interviewer', name: '林晓', role: 'interviewer' }] })
     assert.equal(created.status, 201)
@@ -253,11 +288,11 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal((await requestJson('POST', `/api/v1/interviews/${interviewId}/lock-feedback`, { interviewerId: 'user-interviewer' })).body.data.status, 'locked')
     assert.equal((await requestJson('POST', `/api/v1/interviews/${interviewId}/conclude`, { outcome: 'offer' })).body.data.status, 'completed')
     const updated = await get('/api/v1/applications')
-    assert.equal(updated.body.data.find((item: any) => item.id === application.id).status, 'offer')
+    assert.equal(updated.body.data.find((item: any) => item.id === application.id).status, 'offer_approval')
   })
 
   it('completes the offer approval, response, and onboarding archive flow', async () => {
-    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'offer')
+    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'offer_approval')
     assert.ok(application)
     const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '测试工程师', departmentId: '数据平台', employmentType: 'full_time', baseSalary: { amount: 20000, currency: 'CNY' }, content: '欢迎加入' })
     assert.equal(created.status, 201)
@@ -273,7 +308,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
   })
 
   it('supports offer rejection, draft revision, and expiry', async () => {
-    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'interview')
+    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'interviewing')
     assert.ok(application)
 
     const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '修订前岗位', departmentId: '数据平台', employmentType: 'full_time', baseSalary: { amount: 18000, currency: 'CNY' }, content: '初版内容' })
@@ -311,7 +346,8 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(application.status, 201)
     const applicationId = application.body.data.id
 
-    assert.equal((await requestJson('POST', `/api/v1/applications/${applicationId}/status`, { status: 'screening' })).body.data.status, 'screening')
+    assert.equal((await requestJson('POST', `/api/v1/applications/${applicationId}/status`, { status: 'analysis_queued' })).body.data.status, 'analysis_queued')
+    assert.equal((await requestJson('POST', `/api/v1/applications/${applicationId}/status`, { status: 'human_review' })).body.data.status, 'human_review')
 
     const archivedCandidate = await requestJson("PATCH", `/api/v1/candidates/${candidateId}`, { status: 'archived', reason: '隐私保护' })
     assert.equal(archivedCandidate.status, 200)
@@ -338,8 +374,8 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.ok(applicationEvents.body.data.some((item: any) => item.subjectId === applicationId && item.action === 'create'))
     const statusChanged = applicationEvents.body.data.find((item: any) => item.subjectId === applicationId && item.action === 'status_changed')
     assert.ok(statusChanged)
-    assert.equal(statusChanged.fromStatus, 'new')
-    assert.equal(statusChanged.toStatus, 'screening')
+    assert.equal(statusChanged.fromStatus, 'analysis_queued')
+    assert.equal(statusChanged.toStatus, 'human_review')
 
     const interviewEvents = await get('/api/v1/workflow-events?subjectType=interview&limit=50')
     assert.equal(interviewEvents.status, 200)
@@ -365,7 +401,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
 
   it('archives accepted offers into onboarding and lists onboarding records', async () => {
     const applications = await get('/api/v1/applications')
-    const application = applications.body.data.find((item: any) => item.status === 'interview')
+    const application = applications.body.data.find((item: any) => item.status === 'interviewing')
     assert.ok(application)
 
     const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '入职归档岗位', departmentId: '技术中心', employmentType: 'full_time', startDate: '2026-10-08', baseSalary: { amount: 22000, currency: 'CNY' }, content: 'Offer 内容' })
@@ -405,7 +441,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
 
     const applicationAfter = await get('/api/v1/applications')
     const hiredApplication = applicationAfter.body.data.find((item: any) => item.id === application.id)
-    assert.equal(hiredApplication.status, 'hired')
+    assert.equal(hiredApplication.status, 'onboarding_archived')
 
     const detail = await get(`/api/v1/onboarding/${record.id}`)
     assert.equal(detail.status, 200)

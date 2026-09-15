@@ -1,4 +1,4 @@
-export type Status = 'active'|'pending'|'approved'|'rejected'|'draft'|'scheduled'|'completed'|'sent'|'accepted'|'declined'|'published'|'paused'|'ready'|'closed'|'configured'|'disabled'
+export type Status = 'active'|'pending'|'approved'|'rejected'|'draft'|'scheduled'|'completed'|'sent'|'accepted'|'declined'|'published'|'paused'|'ready'|'closed'|'configured'|'disabled'|'pending_analysis'|'analysis_queued'|'human_review'|'interviewing'|'offer_approval'|'offer_sent'|'offer_accepted'|'onboarding_archived'|'offer_declined'|'offer_cancelled'|'offer_expired'|'interview'
 export type JobStatus = 'draft'|'ready'|'published'|'paused'|'closed'
 export interface JobSpecRequirement { label:string; description?:string; required?:boolean; weight?:number }
 export interface JobSpec { version?:number; title?:string; summary?:string; responsibilities?:string[]; requirements?:JobSpecRequirement[]; skills?:string[]; confirmed:boolean; confirmedAt?:string }

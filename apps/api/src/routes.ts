@@ -9,15 +9,15 @@ import type { Role } from './auth/types.js';
 const recruiting = new RecruitingService();
 const AUTH_COOKIE = 'smartrecruit_session';
 const SESSION_COOKIE_MAX_AGE = 60 * 60 * 12;
-const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin'];
-const RECRUITMENT_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
-const RECRUITMENT_APPROVAL_ROLES: Role[] = ['approver', 'hiring_manager', 'admin'];
-const JOB_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
-const CANDIDATE_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
-const APPLICATION_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
-const INTERVIEW_WRITE_ROLES: Role[] = ['recruiter', 'hiring_manager', 'admin'];
-const OFFER_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
-const ONBOARDING_WRITE_ROLES: Role[] = ['recruiter', 'admin'];
+const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin', 'hr_admin', 'interviewer'];
+const RECRUITMENT_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+const RECRUITMENT_APPROVAL_ROLES: Role[] = ['approver', 'hiring_manager', 'admin', 'hr_admin'];
+const JOB_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+const CANDIDATE_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+const APPLICATION_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+const INTERVIEW_WRITE_ROLES: Role[] = ['recruiter', 'hiring_manager', 'admin', 'hr_admin', 'interviewer'];
+const OFFER_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+const ONBOARDING_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
 
 async function readJson(context: Parameters<Middleware>[0]): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -180,6 +180,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (requestMatch) {
       const id = requestMatch[1]!; const suffix = requestMatch[2] ?? '';
       if (!suffix && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, request); return; }
+      if (suffix === 'approval' && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.getRequestApproval(id)); return; }
       if (!suffix && method === 'PATCH') { requireRole(auth, RECRUITMENT_WRITE_ROLES); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.updateRequest(id, await readJson(context) as never, auth.user.id)); return; }
       if (method === 'POST') { const requestAction = actionFrom(`/${suffix}`, '') ?? suffix.replaceAll('-', '_'); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); requireRole(auth, ['approve', 'reject'].includes(requestAction) ? RECRUITMENT_APPROVAL_ROLES : RECRUITMENT_WRITE_ROLES); sendSuccess(context, await recruiting.requestAction(id, requestAction, (await readJson(context)).reason, auth.user.id)); return; }
     }

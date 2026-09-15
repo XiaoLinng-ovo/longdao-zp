@@ -46,6 +46,22 @@ const DEV_USERS: Array<SessionUser & { password: string }> = [
     departmentId: 'dept-admin',
     password: 'approver123',
   },
+  {
+    id: 'user-hr-admin',
+    name: 'HR 管理员',
+    email: 'hr@smartrecruit.local',
+    role: 'hr_admin',
+    departmentId: 'dept-admin',
+    password: 'hr123',
+  },
+  {
+    id: 'user-interviewer',
+    name: '面试官',
+    email: 'interviewer@smartrecruit.local',
+    role: 'interviewer',
+    departmentId: 'dept-tech',
+    password: 'interviewer123',
+  },
 ]
 
 function sha256(value: string): string {
@@ -71,10 +87,16 @@ export class LocalAuthSessionStore {
     try {
       const content = await readFile(this.filePath, 'utf8')
       const parsed = JSON.parse(content) as SessionFile
+      const seed = createSeedFile()
+      const users = Array.isArray(parsed.users) ? parsed.users : seed.users
+      const mergedUsers = [...users]
+      for (const seedUser of seed.users) {
+        if (!mergedUsers.some((item) => item.email.toLowerCase() === seedUser.email.toLowerCase())) mergedUsers.push(seedUser)
+      }
       return {
         version: 1,
         sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-        users: Array.isArray(parsed.users) ? parsed.users : createSeedFile().users,
+        users: mergedUsers,
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return createSeedFile()

@@ -36,9 +36,9 @@ export function createSeedState(): RecruitingStoreState {
       { id: 'candidate-8802', code: 'CAN-8802', fullName: '李哲', source: '官网', tags: ['品牌', '设计'], status: 'active', createdAt: timestamp, updatedAt: timestamp }
     ],
     applications: [
-      { id: 'application-8821', code: 'APP-8821', candidateId: 'candidate-8821', jobId: 'job-108', status: 'screening', score: 92, aiStatus: 'completed', appliedAt: timestamp, updatedAt: timestamp },
-      { id: 'application-8814', code: 'APP-8814', candidateId: 'candidate-8814', jobId: 'job-107', status: 'interview', score: 86, aiStatus: 'completed', appliedAt: timestamp, updatedAt: timestamp },
-      { id: 'application-8802', code: 'APP-8802', candidateId: 'candidate-8802', jobId: 'job-106', status: 'new', score: 74, aiStatus: 'pending', appliedAt: timestamp, updatedAt: timestamp }
+      { id: 'application-8821', code: 'APP-8821', candidateId: 'candidate-8821', jobId: 'job-108', status: 'human_review', score: 92, aiStatus: 'completed', appliedAt: timestamp, updatedAt: timestamp },
+      { id: 'application-8814', code: 'APP-8814', candidateId: 'candidate-8814', jobId: 'job-107', status: 'interviewing', score: 86, aiStatus: 'completed', appliedAt: timestamp, updatedAt: timestamp },
+      { id: 'application-8802', code: 'APP-8802', candidateId: 'candidate-8802', jobId: 'job-106', status: 'pending_analysis', score: 74, aiStatus: 'pending', appliedAt: timestamp, updatedAt: timestamp }
     ],
     resumes: [],
     analysisTasks: [],
@@ -58,6 +58,9 @@ export function createSeedState(): RecruitingStoreState {
     onboarding: [],
     interviews: [],
     interviewFeedback: [],
+    approvalInstances: [],
+    approvalSteps: [],
+    approvalRecords: [],
     workflowEvents: [],
     candidateTags: ['内推', '后端', '高潜', '客户成功', '沟通', '品牌', '设计'],
     nextRequestNumber: 24019,
@@ -94,6 +97,9 @@ function migrateState(value: RecruitingStoreState): RecruitingStoreState {
   if (!Number.isFinite(value.nextOfferNumber)) value.nextOfferNumber = Math.max(0, ...value.offers.map((item) => Number(item.code.replace('OFF-', '')) || 0)) + 1
   if (!Array.isArray(value.interviews)) value.interviews = []
   if (!Array.isArray(value.interviewFeedback)) value.interviewFeedback = []
+  if (!Array.isArray(value.approvalInstances)) value.approvalInstances = []
+  if (!Array.isArray(value.approvalSteps)) value.approvalSteps = []
+  if (!Array.isArray(value.approvalRecords)) value.approvalRecords = []
   if (!Number.isFinite(value.nextCandidateNumber)) value.nextCandidateNumber = seed.nextCandidateNumber
   if (!Number.isFinite(value.nextApplicationNumber)) value.nextApplicationNumber = seed.nextApplicationNumber
   if (!Number.isFinite(value.nextInterviewNumber)) value.nextInterviewNumber = seed.nextInterviewNumber

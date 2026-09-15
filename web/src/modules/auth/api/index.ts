@@ -1,6 +1,6 @@
 import { apiClient } from '../../../shared/api'
 
-export type AuthRole = 'recruiter' | 'hiring_manager' | 'approver' | 'admin'
+export type AuthRole = 'recruiter' | 'hiring_manager' | 'approver' | 'admin' | 'hr_admin' | 'interviewer'
 
 export interface AuthUser {
   id: string
@@ -33,3 +33,4 @@ export async function logout(sessionId?: string): Promise<{ ok: boolean }> {
 export async function getCurrentUser(): Promise<MeResponse> {
   return (await apiClient.getJson<MeResponse>('/me')).data
 }
+

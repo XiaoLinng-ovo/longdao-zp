@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalRecruitingStore } from './store.js'
 import { createRecruitingStore } from './postgres-store.js'
-import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord } from './types.js'
+import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, ApprovalAuditRecord, ApprovalInstanceRecord, ApprovalRecord, ApprovalStepRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord } from './types.js'
 import { RecruitingWorkflowError, transitionJob, transitionRequest } from './workflow.js'
 
 const resumeIntelligenceDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../packages/resume-intelligence/dist/index.js')
@@ -75,6 +75,40 @@ function positiveInteger(value: unknown, field: string): number {
 
 function addEvent(state: RecruitingStoreState, event: Omit<WorkflowEventRecord, 'id' | 'createdAt'>): void {
   state.workflowEvents.push({ ...event, id: randomUUID(), createdAt: LocalRecruitingStore.timestamp() })
+}
+
+function approvalInstanceOrThrow(state: RecruitingStoreState, id: string): ApprovalInstanceRecord {
+  const instance = state.approvalInstances.find((item) => item.id === id)
+  if (!instance) throw new RecruitingNotFoundError(`未找到审批实例：${id}`)
+  return instance
+}
+
+function createApprovalInstance(state: RecruitingStoreState, entityId: string, actorId: string): ApprovalInstanceRecord {
+  const timestamp = LocalRecruitingStore.timestamp()
+  const version = state.approvalInstances.filter((item) => item.entityType === 'recruitment_request' && item.entityId === entityId).reduce((max, item) => Math.max(max, item.version), 0) + 1
+  const instance: ApprovalInstanceRecord = { id: randomUUID(), entityType: 'recruitment_request', entityId, version, status: 'pending', createdAt: timestamp, updatedAt: timestamp }
+  state.approvalInstances.push(instance)
+  const steps: ApprovalStepRecord[] = [
+    { id: randomUUID(), instanceId: instance.id, order: 1, name: '招聘需求审批', approverRole: 'approver', status: 'pending' }
+  ]
+  state.approvalSteps.push(...steps)
+  addEvent(state, { subjectType: 'recruitment_request', subjectId: entityId, action: 'approval_instance_created', actorId })
+  return instance
+}
+
+function currentPendingStep(state: RecruitingStoreState, instanceId: string): ApprovalStepRecord | undefined {
+  return state.approvalSteps.find((item) => item.instanceId === instanceId && item.status === 'pending')
+}
+
+function recordApproval(state: RecruitingStoreState, instance: ApprovalInstanceRecord, step: ApprovalStepRecord, action: 'approve' | 'reject', actorId: string, reason?: string): ApprovalRecord {
+  const timestamp = LocalRecruitingStore.timestamp()
+  step.status = action === 'approve' ? 'approved' : 'rejected'
+  step.actedAt = timestamp
+  const record: ApprovalRecord = { status: action === 'approve' ? 'approved' : 'rejected', approver: actorId, ...(reason ? { comment: reason } : {}), actedAt: timestamp }
+  const audit: ApprovalAuditRecord = { id: randomUUID(), instanceId: instance.id, stepId: step.id, actorId, action, ...(reason ? { comment: reason } : {}), createdAt: timestamp }
+  state.approvalRecords.push(audit)
+  instance.updatedAt = timestamp
+  return record
 }
 
 function requestOrThrow(state: RecruitingStoreState, id: string): RecruitmentRequestRecord {
@@ -202,11 +236,44 @@ export class RecruitingService {
     return this.store.transaction((state) => {
       const request = requestOrThrow(state, id)
       const fromStatus = request.status
-      transitionRequest(request, action, reason)
-      if (action === 'approve') request.approval.approver = '当前审批人'
+      const normalizedReason = reason === undefined ? '' : clean(reason)
+
+      if (action === 'submit' || action === 'resubmit') {
+        transitionRequest(request, action, reason)
+        createApprovalInstance(state, id, actorId)
+      } else if (action === 'approve' || action === 'reject') {
+        const instance = state.approvalInstances
+          .filter((item) => item.entityType === 'recruitment_request' && item.entityId === id)
+          .sort((a, b) => b.version - a.version)[0]
+        if (!instance || instance.status !== 'pending') throw new RecruitingWorkflowError('APPROVAL_INSTANCE_REQUIRED', '当前需求无可审批实例')
+        const step = currentPendingStep(state, instance.id)
+        if (!step) throw new RecruitingWorkflowError('APPROVAL_STEP_REQUIRED', '当前审批实例已结束')
+        const approvalResult = recordApproval(state, instance, step, action, actorId, normalizedReason || undefined)
+        const allSteps = state.approvalSteps.filter((item) => item.instanceId === instance.id)
+        const completed = allSteps.every((item) => item.status !== 'pending')
+        if (action === 'reject') instance.status = 'rejected'
+        else if (completed) instance.status = 'approved'
+        transitionRequest(request, action, reason)
+        request.approval = approvalResult
+        request.approval.approver = actorId === 'user-demo' ? '当前审批人' : actorId
+      } else {
+        transitionRequest(request, action, reason)
+      }
+
       addEvent(state, { subjectType: 'recruitment_request', subjectId: request.id, action, fromStatus, toStatus: request.status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
       return request
     })
+  }
+
+  async getRequestApproval(id: string): Promise<{ current: ApprovalInstanceRecord | null; steps: ApprovalStepRecord[]; records: ApprovalAuditRecord[] }> {
+    const state = await this.store.read()
+    requestOrThrow(state, id)
+    const instances = state.approvalInstances.filter((item) => item.entityType === 'recruitment_request' && item.entityId === id).sort((a, b) => b.version - a.version)
+    const current = instances[0] ?? null
+    const instanceIds = new Set(instances.map((item) => item.id))
+    const steps = instanceIds.size ? state.approvalSteps.filter((item) => instanceIds.has(item.instanceId)) : []
+    const records = instanceIds.size ? state.approvalRecords.filter((item) => instanceIds.has(item.instanceId)) : []
+    return { current, steps, records }
   }
 
   async listJobs(status?: string, recruitmentRequestId?: string, departmentId?: string): Promise<JobRecord[]> {
@@ -237,6 +304,21 @@ export class RecruitingService {
     return this.store.transaction((state) => {
       const job = jobOrThrow(state, id)
       if (job.status === 'closed') throw new RecruitingWorkflowError('JOB_NOT_EDITABLE', '已关闭岗位不能编辑')
+      const hasPublishedFieldChange = ['title', 'departmentId', 'hiringManagerId', 'employmentType', 'workMode', 'location', 'headcount'].some((field) => input[field as never] !== undefined)
+      if ((job.status === 'published' || job.status === 'paused') && hasPublishedFieldChange) {
+        const timestamp = LocalRecruitingStore.timestamp()
+        const previousStatus = job.status
+        if (job.spec) {
+          state.jobSpecVersions.push({ ...job.spec, jobId: job.id, createdAt: timestamp, actorId })
+          job.spec = { ...job.spec, version: job.spec.version + 1, confirmed: false, confirmedAt: undefined }
+        }
+        if (job.jd) {
+          state.jobDescriptionVersions.push({ ...job.jd, jobId: job.id, createdAt: timestamp, actorId })
+          job.jd = { ...job.jd, version: job.jd.version + 1, confirmed: false, confirmedAt: undefined }
+        }
+        job.status = 'draft'
+        addEvent(state, { subjectType: 'job', subjectId: job.id, action: 'published_job_requires_reconfirmation', fromStatus: previousStatus, toStatus: job.status, actorId })
+      }
       for (const field of ['title', 'departmentId', 'hiringManagerId', 'employmentType', 'workMode', 'location'] as const) {
         if (input[field] !== undefined) (job as unknown as Record<string, unknown>)[field] = input[field]
       }
@@ -359,7 +441,7 @@ export class RecruitingService {
       jobOrThrow(state, required(input.jobId, '岗位'))
       if (state.applications.some((item) => item.candidateId === input.candidateId && item.jobId === input.jobId)) throw new RecruitingWorkflowError('APPLICATION_ALREADY_EXISTS', '该候选人已经申请此岗位')
       const timestamp = LocalRecruitingStore.timestamp()
-      const application: ApplicationRecord = { id: randomUUID(), code: `APP-${state.nextApplicationNumber++}`, candidateId: input.candidateId, jobId: input.jobId, ...(input.source ? { source: clean(input.source) } : {}), status: 'new', aiStatus: 'pending', appliedAt: timestamp, updatedAt: timestamp }
+      const application: ApplicationRecord = { id: randomUUID(), code: `APP-${state.nextApplicationNumber++}`, candidateId: input.candidateId, jobId: input.jobId, ...(input.source ? { source: clean(input.source) } : {}), status: 'pending_analysis', aiStatus: 'pending', appliedAt: timestamp, updatedAt: timestamp }
       state.applications.push(application)
       addEvent(state, { subjectType: 'application', subjectId: application.id, action: 'create', actorId })
       return application
@@ -385,20 +467,20 @@ export class RecruitingService {
     return { ...interview, application: applicationOrThrow(state, interview.applicationId), feedbackStatus, feedback }
   }
 
-  async createInterview(input: CreateInterviewInput, actorId = 'user-demo'): Promise<InterviewRecord> { return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'withdrawn', 'hired'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const participants = (input.participants ?? []).map((p) => ({ userId: required(p.userId, '面试官'), ...(p.name ? { name: clean(p.name) } : {}), role: p.role ?? 'interviewer', required: p.required ?? true })); if (!participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round: input.round ?? state.interviews.filter((x) => x.applicationId === application.id).length + 1, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'screening' || application.status === 'new') application.status = 'interview'; application.updatedAt = timestamp; return interview }) }
+  async createInterview(input: CreateInterviewInput, actorId = 'user-demo'): Promise<InterviewRecord> { return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const participants = (input.participants ?? []).map((p) => ({ userId: required(p.userId, '面试官'), ...(p.name ? { name: clean(p.name) } : {}), role: p.role ?? 'interviewer', required: p.required ?? true })); if (!participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round: input.round ?? state.interviews.filter((x) => x.applicationId === application.id).length + 1, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'pending_analysis' || application.status === 'analysis_queued' || application.status === 'human_review') application.status = 'interviewing'; application.updatedAt = timestamp; return interview }) }
 
   async submitFeedback(id: string, input: FeedbackInput, actorId = 'user-demo'): Promise<InterviewFeedbackRecord> { return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const interviewerId = required(input.interviewerId, '面试官'); const existing = state.interviewFeedback.find((x) => x.interviewId === id && x.interviewerId === interviewerId); if (existing?.status === 'locked') throw new RecruitingWorkflowError('FEEDBACK_LOCKED', '反馈已锁定，不能修改', 409); const feedback = existing ?? { id: randomUUID(), interviewId: id, interviewerId, status: 'draft' as const, ratings: {}, strengths: [], concerns: [] }; Object.assign(feedback, { status: 'submitted', ...(input.overallScore !== undefined ? { overallScore: Number(input.overallScore) } : {}), ...(input.recommendation ? { recommendation: input.recommendation } : {}), ratings: input.ratings ?? feedback.ratings, strengths: input.strengths ?? feedback.strengths, concerns: input.concerns ?? feedback.concerns, ...(input.notes !== undefined ? { notes: input.notes } : {}), submittedAt: LocalRecruitingStore.timestamp() }); if (!existing) { state.interviewFeedback.push(feedback); addEvent(state, { subjectType: 'interview', subjectId: id, action: 'feedback_submitted', actorId: interviewerId }) } else { addEvent(state, { subjectType: 'interview', subjectId: id, action: 'feedback_submitted', actorId: interviewerId }) }
       return feedback }) }
 
   async lockFeedback(id: string, interviewerId: string, actorId = 'user-demo'): Promise<InterviewFeedbackRecord> { return this.store.transaction((state) => { const feedback = state.interviewFeedback.find((x) => x.interviewId === id && x.interviewerId === required(interviewerId, '面试官')); if (!feedback) throw new RecruitingNotFoundError('未找到反馈'); if (feedback.status !== 'submitted') throw new RecruitingWorkflowError('FEEDBACK_NOT_SUBMITTED', '只有已提交反馈才能锁定'); feedback.status = 'locked'; feedback.lockedAt = LocalRecruitingStore.timestamp(); addEvent(state, { subjectType: 'interview', subjectId: id, action: 'feedback_locked', actorId: interviewerId }); return feedback }) }
 
-  async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo'): Promise<InterviewRecord> { return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const application = applicationOrThrow(state, interview.applicationId); const feedback = state.interviewFeedback.filter((x) => x.interviewId === id); if (!feedback.length || feedback.some((x) => x.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试'); interview.status = 'completed'; interview.updatedAt = LocalRecruitingStore.timestamp(); application.status = outcome === 'offer' ? 'offer' : outcome === 'reject' ? 'rejected' : 'interview'; if (outcome === 'reject') application.rejectionReason = '面试未通过'; application.updatedAt = interview.updatedAt; addEvent(state, { subjectType: 'interview', subjectId: id, action: 'conclude', fromStatus: 'scheduled', toStatus: 'completed', actorId }); return interview }) }
+  async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo'): Promise<InterviewRecord> { return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const application = applicationOrThrow(state, interview.applicationId); const feedback = state.interviewFeedback.filter((x) => x.interviewId === id); if (!feedback.length || feedback.some((x) => x.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试'); interview.status = 'completed'; interview.updatedAt = LocalRecruitingStore.timestamp(); application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'; if (outcome === 'reject') application.rejectionReason = '面试未通过'; application.updatedAt = interview.updatedAt; addEvent(state, { subjectType: 'interview', subjectId: id, action: 'conclude', fromStatus: 'scheduled', toStatus: 'completed', actorId }); return interview }) }
 
   async getDashboardSummary(): Promise<DashboardSummary> {
     const state = await this.store.read()
     const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
-    const counts = [applications.length, count(['screening', 'interview', 'offer', 'hired']), count(['interview', 'offer', 'hired']), count(['offer', 'hired']), count(['hired'])]
+    const counts = [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
     const funnel = ['收到申请', '通过筛选', '进入面试', '发出 Offer', '已入职'].map((stage, index) => ({ stage, count: counts[index]!, conversionRate: index === 0 ? null : counts[index - 1] ? Math.round(counts[index]! / counts[index - 1]! * 10000) / 100 : 0 }))
     const metrics: DashboardSummary['metrics'] = [
       { label: '收到申请', value: counts[0]!, detail: '全部申请记录' },
@@ -432,16 +514,16 @@ export class RecruitingService {
   async getReports(): Promise<RecruitingReport> {
     const state = await this.store.read(); const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
-    const counts = [applications.length, count(['screening', 'interview', 'offer', 'hired']), count(['interview', 'offer', 'hired']), count(['offer', 'hired']), count(['hired'])]
+    const counts = [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
     const stages = ['收到申请', '通过筛选', '进入面试', '发出 Offer', '已入职']
     const funnel = stages.map((stage, index) => ({ stage, count: counts[index]!, conversionRate: index === 0 ? null : counts[index - 1] ? Math.round(counts[index]! / counts[index - 1]! * 10000) / 100 : 0 }))
     const statusStats: RecruitingReport['statusStats'] = []
     const statuses = (entity: string, values: string[], records: Array<{ status: string }>) => values.forEach((status) => { const value = records.filter((item) => item.status === status).length; if (value) statusStats.push({ entity, status, count: value }) })
-    statuses('招聘需求', ['draft', 'pending_approval', 'approved', 'rejected', 'closed'], state.recruitmentRequests); statuses('岗位', ['draft', 'ready', 'published', 'paused', 'closed'], state.jobs); statuses('申请', ['new', 'screening', 'interview', 'offer', 'hired', 'rejected', 'withdrawn'], applications)
-    const jobFilling = state.jobs.map((job) => { const filledCount = Math.max(job.filledCount, applications.filter((item) => item.jobId === job.id && item.status === 'hired').length); return { jobId: job.id, code: job.code, title: job.title, headcount: job.headcount, filledCount, openCount: Math.max(job.headcount - filledCount, 0), fillRate: job.headcount ? Math.round(filledCount / job.headcount * 10000) / 100 : 0 } })
+    statuses('招聘需求', ['draft', 'pending_approval', 'approved', 'rejected', 'closed'], state.recruitmentRequests); statuses('岗位', ['draft', 'ready', 'published', 'paused', 'closed'], state.jobs); statuses('申请', ['pending_analysis','analysis_queued','human_review','interviewing','offer_approval','offer_sent','offer_accepted','onboarding_archived','rejected','offer_declined','offer_cancelled','offer_expired'], applications)
+    const jobFilling = state.jobs.map((job) => { const filledCount = Math.max(job.filledCount, applications.filter((item) => item.jobId === job.id && item.status === 'onboarding_archived').length); return { jobId: job.id, code: job.code, title: job.title, headcount: job.headcount, filledCount, openCount: Math.max(job.headcount - filledCount, 0), fillRate: job.headcount ? Math.round(filledCount / job.headcount * 10000) / 100 : 0 } })
     const channelMap = new Map<string, RecruitingReport['channels'][number]>()
-    applications.forEach((application) => { const candidate = state.candidates.find((item) => item.id === application.candidateId); const channel = application.source || candidate?.source || '未标注'; const row = channelMap.get(channel) ?? { channel, applications: 0, screened: 0, interviewed: 0, offers: 0, hired: 0, conversionRate: 0 }; row.applications++; if (['screening', 'interview', 'offer', 'hired'].includes(application.status)) row.screened++; if (['interview', 'offer', 'hired'].includes(application.status)) row.interviewed++; if (['offer', 'hired'].includes(application.status)) row.offers++; if (application.status === 'hired') row.hired++; row.conversionRate = Math.round(row.hired / row.applications * 10000) / 100; channelMap.set(channel, row) })
-    const hiredApplications = applications.filter((item) => item.status === 'hired')
+    applications.forEach((application) => { const candidate = state.candidates.find((item) => item.id === application.candidateId); const channel = application.source || candidate?.source || '未标注'; const row = channelMap.get(channel) ?? { channel, applications: 0, screened: 0, interviewed: 0, offers: 0, hired: 0, conversionRate: 0 }; row.applications++; if (['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived'].includes(application.status)) row.screened++; if (['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived'].includes(application.status)) row.interviewed++; if (['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived'].includes(application.status)) row.offers++; if (application.status === 'onboarding_archived') row.hired++; row.conversionRate = Math.round(row.hired / row.applications * 10000) / 100; channelMap.set(channel, row) })
+    const hiredApplications = applications.filter((item) => item.status === 'onboarding_archived')
     const hireDurations = hiredApplications.map((item) => Math.max(0, (Date.parse(item.updatedAt) - Date.parse(item.appliedAt)) / 86400000)).sort((a, b) => a - b)
     const recruitmentCycle = { averageDaysToHire: hireDurations.length ? Math.round(hireDurations.reduce((sum, value) => sum + value, 0) / hireDurations.length * 10) / 10 : null, medianDaysToHire: hireDurations.length ? Math.round(hireDurations[Math.floor(hireDurations.length / 2)]! * 10) / 10 : null, hiredCount: hiredApplications.length }
     const completedInterviewIds = new Set(state.interviews.filter((item) => item.status === 'completed').map((item) => item.id))
@@ -457,9 +539,9 @@ export class RecruitingService {
   async updateApplicationStatus(id: string, status: ApplicationRecord['status'], reason?: unknown, actorId = 'user-demo'): Promise<ApplicationRecord> {
     return this.store.transaction((state) => {
       const application = applicationOrThrow(state, id)
-      const allowed: Record<ApplicationRecord['status'], ApplicationRecord['status'][]> = { new: ['screening', 'rejected', 'withdrawn'], screening: ['interview', 'rejected', 'withdrawn'], interview: ['offer', 'rejected', 'withdrawn'], offer: ['hired', 'rejected', 'withdrawn'], hired: [], rejected: [], withdrawn: [] }
+      const allowed: Record<ApplicationRecord['status'], ApplicationRecord['status'][]> = { pending_analysis: ['analysis_queued', 'rejected'], analysis_queued: ['human_review', 'rejected'], human_review: ['interviewing', 'rejected'], interviewing: ['offer_approval', 'rejected'], offer_approval: ['offer_sent', 'offer_cancelled'], offer_sent: ['offer_accepted', 'offer_declined', 'offer_expired'], offer_accepted: ['onboarding_archived'], onboarding_archived: [], rejected: [], offer_declined: [], offer_cancelled: [], offer_expired: [] }
       if (!allowed[application.status].includes(status)) throw new RecruitingWorkflowError('APPLICATION_INVALID_TRANSITION', `申请状态 ${application.status} 不允许变更为 ${status}`)
-      if (status === 'rejected') required(reason, '淘汰原因')
+      if (['rejected','offer_declined','offer_cancelled'].includes(status)) required(reason, '原因')
       const previousStatus = application.status
       application.status = status; application.updatedAt = LocalRecruitingStore.timestamp()
       addEvent(state, { subjectType: 'application', subjectId: application.id, action: 'status_changed', fromStatus: previousStatus, toStatus: status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
@@ -579,8 +661,8 @@ export class RecruitingService {
   async listOnboarding(): Promise<OnboardingRecord[]> { const state = await this.store.read(); return state.onboarding }
   async getOnboarding(id: string): Promise<OnboardingRecord> { const state = await this.store.read(); const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); return item }
   async updateOnboarding(id: string, input: { plannedStartDate?: string; notes?: string }, actorId = 'user-demo'): Promise<OnboardingRecord> { return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); if (item.status === 'cancelled' || item.status === 'completed') throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '已取消或已归档记录不能编辑'); if (input.plannedStartDate !== undefined) item.plannedStartDate = clean(input.plannedStartDate); if (input.notes !== undefined) item.notes = clean(input.notes); item.updatedAt = LocalRecruitingStore.timestamp(); addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action: 'update', actorId }); return item }) }
-  async onboardingAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<OnboardingRecord> { return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); const from = item.status; const allowed: Record<string, string[]> = { schedule: ['pending', 'cancelled'], complete: ['pending', 'scheduled'], cancel: ['pending', 'scheduled'] }; if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`); if (action === 'cancel') required(reason, '取消原因'); const next: Record<string, OnboardingRecord['status']> = { schedule: 'scheduled', complete: 'completed', cancel: 'cancelled' }; item.status = next[action]!; const now = LocalRecruitingStore.timestamp(); if (action === 'complete') { item.archivedAt = now; const app = state.applications.find((x) => x.id === item.applicationId); if (app) { app.status = 'hired'; app.updatedAt = now; addEvent(state, { subjectType: 'application', subjectId: app.id, action: 'status_changed', fromStatus: 'offer', toStatus: 'hired', actorId }); } } item.updatedAt = now; addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action, fromStatus: from, toStatus: item.status, actorId, ...(reason ? { reason: clean(reason) } : {}) }); return item }) }
-  async createOffer(input: CreateOfferInput, actorId = 'user-demo'): Promise<OfferRecord> { return this.store.transaction(state=>{ const app=applicationOrThrow(state,required(input.applicationId,'申请')); if(!['interview','offer'].includes(app.status)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID','当前申请不允许创建 Offer'); const t=LocalRecruitingStore.timestamp(); const offer:OfferRecord={id:randomUUID(),code:`OFF-${state.nextOfferNumber++}`,applicationId:app.id,status:'draft',approval:{status:'pending',approver:'待审批'},version:1,createdAt:t,updatedAt:t}; const v:OfferVersionRecord={id:randomUUID(),offerId:offer.id,version:1,positionTitle:required(input.positionTitle,'职位名称'),departmentId:required(input.departmentId,'部门'),employmentType:required(input.employmentType,'用工类型'),...(input.startDate?{startDate:input.startDate}:{}),compensation:{baseSalary:input.baseSalary},benefits:input.benefits??[],content:required(input.content,'Offer 内容'),createdAt:t}; state.offers.push(offer); state.offerVersions.push(v); offer.currentVersionId=v.id; addEvent(state,{subjectType:"offer",subjectId:offer.id,action:"create",toStatus:"draft",actorId}); return offer }) }
+  async onboardingAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<OnboardingRecord> { return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); const from = item.status; const allowed: Record<string, string[]> = { schedule: ['pending', 'cancelled'], complete: ['pending', 'scheduled'], cancel: ['pending', 'scheduled'] }; if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`); if (action === 'cancel') required(reason, '取消原因'); const next: Record<string, OnboardingRecord['status']> = { schedule: 'scheduled', complete: 'completed', cancel: 'cancelled' }; item.status = next[action]!; const now = LocalRecruitingStore.timestamp(); if (action === 'complete') { item.archivedAt = now; const app = state.applications.find((x) => x.id === item.applicationId); if (app) { app.status = 'onboarding_archived'; app.updatedAt = now; addEvent(state, { subjectType: 'application', subjectId: app.id, action: 'status_changed', fromStatus: 'offer_accepted', toStatus: 'onboarding_archived', actorId }); } } item.updatedAt = now; addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action, fromStatus: from, toStatus: item.status, actorId, ...(reason ? { reason: clean(reason) } : {}) }); return item }) }
+  async createOffer(input: CreateOfferInput, actorId = 'user-demo'): Promise<OfferRecord> { return this.store.transaction(state=>{ const app=applicationOrThrow(state,required(input.applicationId,'申请')); if(!['interviewing','offer_approval'].includes(app.status)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID','当前申请不允许创建 Offer'); const t=LocalRecruitingStore.timestamp(); const offer:OfferRecord={id:randomUUID(),code:`OFF-${state.nextOfferNumber++}`,applicationId:app.id,status:'draft',approval:{status:'pending',approver:'待审批'},version:1,createdAt:t,updatedAt:t}; const v:OfferVersionRecord={id:randomUUID(),offerId:offer.id,version:1,positionTitle:required(input.positionTitle,'职位名称'),departmentId:required(input.departmentId,'部门'),employmentType:required(input.employmentType,'用工类型'),...(input.startDate?{startDate:input.startDate}:{}),compensation:{baseSalary:input.baseSalary},benefits:input.benefits??[],content:required(input.content,'Offer 内容'),createdAt:t}; state.offers.push(offer); state.offerVersions.push(v); offer.currentVersionId=v.id; addEvent(state,{subjectType:"offer",subjectId:offer.id,action:"create",toStatus:"draft",actorId}); return offer }) }
   async updateOffer(id:string,input:Partial<CreateOfferInput>, actorId = 'user-demo'):Promise<OfferRecord>{return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);if(o.status!=='draft')throw new RecruitingWorkflowError('OFFER_IMMUTABLE','只有草稿 Offer 可以修改');const old=state.offerVersions.filter(x=>x.offerId===id).sort((a,b)=>b.version-a.version)[0]!;const startDate=input.startDate!==undefined?input.startDate:old.startDate;const equity=input.equity!==undefined?input.equity:old.compensation.equity;const bonus=input.bonus!==undefined?input.bonus:old.compensation.bonus;const baseSalary=input.baseSalary??old.compensation.baseSalary;const compensation:{baseSalary:{amount:number;currency:string};bonus?:{amount:number;currency:string};equity?:string}={baseSalary,...(bonus?{bonus}:{}),...(equity?{equity}:{})};const v:OfferVersionRecord={...old,id:randomUUID(),version:old.version+1,positionTitle:input.positionTitle?.trim()||old.positionTitle,departmentId:input.departmentId?.trim()||old.departmentId,employmentType:input.employmentType||old.employmentType,...(startDate?{startDate}:{}),compensation,benefits:input.benefits??old.benefits,content:input.content?.trim()||old.content,createdAt:LocalRecruitingStore.timestamp()};state.offerVersions.push(v);o.currentVersionId=v.id;o.version++;o.updatedAt=LocalRecruitingStore.timestamp();addEvent(state,{subjectType:'offer',subjectId:o.id,action:'revise',fromStatus:'draft',toStatus:'draft',actorId});return o})}async offerAction(id:string,action:string,reason?:unknown,actorId = 'user-demo'):Promise<OfferRecord|OnboardingRecord>{return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);const t=LocalRecruitingStore.timestamp();const from=o.status;const next:Record<string,string>={submit_approval:'pending_approval',approve:'approved',send:'sent',accept:'accepted',decline:'declined',cancel:'cancelled',reject:'draft',expire:'expired'};if(action==='archive_onboarding'){if(from!=='accepted')throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);const r:OnboardingRecord={id:randomUUID(),applicationId:o.applicationId,offerId:o.id,status:'pending',createdAt:t,updatedAt:t};state.onboarding.push(r);addEvent(state,{subjectType:'onboarding',subjectId:r.id,action,fromStatus:'accepted',toStatus:'pending',actorId});return r}const allowed:Record<string,string[]>={submit_approval:['draft'],reject:['pending_approval'],approve:['pending_approval'],send:['approved'],accept:['sent'],decline:['sent'],expire:['sent'],cancel:['draft','pending_approval','approved','sent']};if(!allowed[action]||!allowed[action]!.includes(from))throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);if(['decline','cancel','reject'].includes(action))required(reason,'原因');o.status=next[action] as OfferRecord['status'];if(action==='submit_approval')o.approval={status:'pending',approver:'待审批'};else if(action==='approve')o.approval={status:'approved',approver:'当前审批人',actedAt:t};else if(action==='reject')o.approval={status:'rejected',approver:'当前审批人',comment:clean(reason),actedAt:t};else if(action==='cancel')o.approval.status='cancelled';if(action==='accept'||action==='decline')o.respondedAt=t;if(action==='expire')o.expiresAt=o.expiresAt??t;o.version++;o.updatedAt=t;addEvent(state,{subjectType:'offer',subjectId:o.id,action,fromStatus:from,toStatus:o.status,actorId,...(reason?{reason:clean(reason)}:{})});return o})}
   async listWorkflowEvents(filter?: { subjectType?: WorkflowEventRecord['subjectType']; limit?: number }): Promise<Array<WorkflowEventRecord & { subjectLabel: string }>> {
     const state = await this.store.read()
