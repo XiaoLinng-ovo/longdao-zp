@@ -2,11 +2,15 @@
   "name": "smartrecruit-pro",
   "version": "1.0.0",
   "private": true,
+  "workspaces": ["apps/api", "apps/worker", "web", "packages/contracts", "packages/resume-intelligence"],
   "description": "SmartRecruit Pro recruitment workflow demo with a small deployable backend",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs",
-    "dev": "node server.mjs"
+    "start": "node scripts/start-api-local.mjs",
+    "dev": "pnpm --dir web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter smartrecruit-pro-web typecheck && pnpm --filter @smartrecruit-pro/contracts typecheck && pnpm --filter @smartrecruit-pro/resume-intelligence typecheck",
+    "test": "pnpm -r test"
   },
   "engines": {
     "node": ">=18"
