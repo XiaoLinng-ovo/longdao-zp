@@ -216,3 +216,264 @@ export interface TransactionCallback<T> {
 }
 
 export type PgPool = Pool
+
+// ===== 岗位说明书 / JD 版本（job_spec_versions / job_description_versions）=====
+export interface JobSpecVersionDbRecord {
+  id: string
+  jobId: string
+  version: number
+  content: Record<string, unknown>
+  createdById: string | null
+  createdAt: string
+  confirmedAt: string | null
+}
+
+export interface JobDescriptionVersionDbRecord {
+  id: string
+  jobId: string
+  version: number
+  title: string
+  content: string
+  status: string
+  createdById: string | null
+  createdAt: string
+  confirmedAt: string | null
+}
+
+export interface JobSpecVersionCreateInput {
+  id?: string
+  jobId: string
+  version?: number
+  content: Record<string, unknown>
+  createdById?: string | null
+  confirmedAt?: string | null
+}
+
+export interface JobDescriptionVersionCreateInput {
+  id?: string
+  jobId: string
+  version?: number
+  title?: string
+  content: string
+  status?: string
+  createdById?: string | null
+}
+
+// ===== 面试（interviews / interview_feedback）=====
+export interface InterviewParticipantDbRecord {
+  userId: string
+  name?: string
+  role: string
+  required: boolean
+}
+
+export interface InterviewDbRecord {
+  id: string
+  businessId: string
+  applicationId: string
+  round: number
+  type: string
+  title: string
+  status: string
+  scheduledStartAt: string | null
+  scheduledEndAt: string | null
+  timezone: string | null
+  location: string | null
+  meetingUrl: string | null
+  participants: InterviewParticipantDbRecord[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface InterviewCreateInput {
+  id?: string
+  businessId?: string
+  applicationId: string
+  round?: number
+  type?: string
+  title: string
+  status?: string
+  scheduledStartAt?: string | null
+  scheduledEndAt?: string | null
+  timezone?: string | null
+  location?: string | null
+  meetingUrl?: string | null
+  participants?: InterviewParticipantDbRecord[]
+}
+
+export interface InterviewUpdateInput {
+  round?: number
+  type?: string
+  title?: string
+  status?: string
+  scheduledStartAt?: string | null
+  scheduledEndAt?: string | null
+  timezone?: string | null
+  location?: string | null
+  meetingUrl?: string | null
+  participants?: InterviewParticipantDbRecord[]
+}
+
+export interface InterviewFeedbackDbRecord {
+  id: string
+  interviewId: string
+  interviewerId: string
+  status: string
+  overallScore: number | null
+  recommendation: string | null
+  ratings: Record<string, number>
+  strengths: string[]
+  concerns: string[]
+  notes: string | null
+  submittedAt: string | null
+  lockedAt: string | null
+}
+
+export interface InterviewFeedbackUpdateInput {
+  status?: string
+  overallScore?: number | null
+  recommendation?: string | null
+  ratings?: Record<string, number>
+  strengths?: string[]
+  concerns?: string[]
+  notes?: string | null
+  submittedAt?: string | null
+  lockedAt?: string | null
+}
+
+export interface InterviewFeedbackUpsertInput {
+  id?: string
+  interviewId: string
+  interviewerId: string
+  status?: string
+  overallScore?: number | null
+  recommendation?: string | null
+  ratings?: Record<string, number>
+  strengths?: string[]
+  concerns?: string[]
+  notes?: string | null
+  submittedAt?: string | null
+  lockedAt?: string | null
+}
+
+// ===== Offer（offers / offer_versions）=====
+export interface OfferDbRecord {
+  id: string
+  businessId: string
+  applicationId: string
+  status: string
+  currentVersionId: string | null
+  approvalStatus: string
+  sentAt: string | null
+  respondedAt: string | null
+  expiresAt: string | null
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OfferVersionDbRecord {
+  id: string
+  offerId: string
+  version: number
+  positionTitle: string
+  departmentId: string
+  employmentType: string
+  startDate: string | null
+  compensation: Record<string, unknown>
+  benefits: string[]
+  content: string
+  createdAt: string
+}
+
+export interface OfferCreateInput {
+  id?: string
+  applicationId: string
+  status?: string
+  approvalStatus?: string
+  version?: number
+}
+
+export interface OfferUpdateInput {
+  status?: string
+  approvalStatus?: string
+  currentVersionId?: string | null
+  sentAt?: string | null
+  respondedAt?: string | null
+  expiresAt?: string | null
+  version?: number
+}
+
+export interface OfferVersionCreateInput {
+  id?: string
+  offerId: string
+  version?: number
+  positionTitle: string
+  departmentId: string
+  employmentType: string
+  startDate?: string | null
+  compensation: Record<string, unknown>
+  benefits?: string[]
+  content: string
+}
+
+// ===== 入职归档（onboarding_records）=====
+export interface OnboardingDbRecord {
+  id: string
+  applicationId: string
+  offerId: string
+  plannedStartDate: string | null
+  status: string
+  notes: string | null
+  archivedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OnboardingCreateInput {
+  id?: string
+  applicationId: string
+  offerId: string
+  plannedStartDate?: string | null
+  status?: string
+  notes?: string | null
+}
+
+export interface OnboardingUpdateInput {
+  plannedStartDate?: string | null
+  status?: string
+  notes?: string | null
+  archivedAt?: string | null
+}
+
+// ===== 流程事件（workflow_events）=====
+export interface WorkflowEventDbRecord {
+  id: string
+  subjectType: string
+  subjectId: string
+  action: string
+  fromStatus: string | null
+  toStatus: string | null
+  actorId: string | null
+  reason: string | null
+  metadata: Record<string, unknown>
+  createdAt: string
+}
+
+export interface WorkflowEventCreateInput {
+  id?: string
+  subjectType: string
+  subjectId: string
+  action: string
+  fromStatus?: string | null
+  toStatus?: string | null
+  actorId?: string | null
+  reason?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface WorkflowEventFilter {
+  subjectType?: string
+  subjectId?: string
+  limit?: number
+}
