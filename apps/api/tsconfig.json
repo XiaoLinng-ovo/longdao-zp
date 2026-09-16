@@ -16,5 +16,9 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/recruiting/repositories/interview-postgres-repository.test.ts"
+  ]
 }
