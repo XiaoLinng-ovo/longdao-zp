@@ -6,6 +6,23 @@ export interface ApiSuccess<T> {
   ok: true;
   data: T;
   requestId: string;
+  meta?: ApiMeta;
+}
+
+/**
+ * 与 packages/contracts 的 PaginationMeta 保持同形（page / pageSize / total / totalPages），
+ * 见 packages/contracts/src/common.ts。
+ */
+export interface PaginationMeta {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface ApiMeta {
+  pagination?: PaginationMeta;
+  warnings?: string[];
 }
 
 export interface ApiErrorBody {
@@ -32,8 +49,9 @@ export function sendJson<T>(
   response.end(payload);
 }
 
-export function sendSuccess<T>(context: RequestContext, data: T, status = 200): void {
-  sendJson(context.res, status, { ok: true, data, requestId: context.requestId });
+export function sendSuccess<T>(context: RequestContext, data: T, status = 200, meta?: ApiMeta): void {
+  const body: ApiSuccess<T> = { ok: true, data, requestId: context.requestId, ...(meta ? { meta } : {}) };
+  sendJson(context.res, status, body);
 }
 
 export function sendError(

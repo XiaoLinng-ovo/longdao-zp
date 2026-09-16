@@ -209,6 +209,64 @@ function jobInput(input: CreateJobInput, request: RecruitmentRequestRecord): Job
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * 部门数据范围（DataScope）
+ *
+ * 只有「需求 / 岗位」自带 departmentId，候选人主档、申请、面试、Offer、
+ * 入职归档都没有部门字段，其归属一律沿「岗位 → 申请 → 下游对象」推断：
+ *   岗位(job.departmentId) → 申请(application.jobId) → 候选人/面试/Offer/入职
+ * 因此这里集中做一次视图收敛，列表、报表、看板共用同一口径。
+ * ------------------------------------------------------------------ */
+
+export function filterStateByDepartment(state: RecruitingStoreState, departmentId: string): RecruitingStoreState {
+  const recruitmentRequests = state.recruitmentRequests.filter((request) => request.departmentId === departmentId)
+  const jobs = state.jobs.filter((job) => job.departmentId === departmentId)
+  const jobIds = new Set(jobs.map((job) => job.id))
+  const applications = state.applications.filter((application) => jobIds.has(application.jobId))
+  const applicationIds = new Set(applications.map((application) => application.id))
+  const candidateIds = new Set(applications.map((application) => application.candidateId))
+  const interviews = state.interviews.filter((interview) => applicationIds.has(interview.applicationId))
+  const interviewIds = new Set(interviews.map((interview) => interview.id))
+  const offers = state.offers.filter((offer) => applicationIds.has(offer.applicationId))
+  const offerIds = new Set(offers.map((offer) => offer.id))
+  const onboarding = state.onboarding.filter((record) => applicationIds.has(record.applicationId) || offerIds.has(record.offerId))
+  const onboardingIds = new Set(onboarding.map((record) => record.id))
+  const resumes = state.resumes.filter((resume) => candidateIds.has(resume.candidateId) || (resume.applicationId ? applicationIds.has(resume.applicationId) : false))
+  const resumeIds = new Set(resumes.map((resume) => resume.id))
+  const requestIds = new Set(recruitmentRequests.map((request) => request.id))
+  const approvalInstances = state.approvalInstances.filter((instance) => instance.entityType === 'recruitment_request' && requestIds.has(instance.entityId))
+  const instanceIds = new Set(approvalInstances.map((instance) => instance.id))
+  const subjectIds: Record<WorkflowEventRecord['subjectType'], Set<string>> = {
+    recruitment_request: requestIds,
+    job: jobIds,
+    candidate: candidateIds,
+    application: applicationIds,
+    interview: interviewIds,
+    offer: offerIds,
+    onboarding: onboardingIds,
+  }
+
+  return {
+    ...state,
+    recruitmentRequests,
+    jobs,
+    candidates: state.candidates.filter((candidate) => candidateIds.has(candidate.id)),
+    applications,
+    resumes,
+    analysisTasks: state.analysisTasks.filter((task) => (task.applicationId ? applicationIds.has(task.applicationId) : resumeIds.has(task.resumeId))),
+    analysisResults: state.analysisResults.filter((result) => (result.applicationId ? applicationIds.has(result.applicationId) : resumeIds.has(result.resumeId))),
+    interviews,
+    interviewFeedback: state.interviewFeedback.filter((feedback) => interviewIds.has(feedback.interviewId)),
+    offers,
+    offerVersions: state.offerVersions.filter((version) => offerIds.has(version.offerId)),
+    onboarding,
+    approvalInstances,
+    approvalSteps: state.approvalSteps.filter((step) => instanceIds.has(step.instanceId)),
+    approvalRecords: state.approvalRecords.filter((record) => instanceIds.has(record.instanceId)),
+    workflowEvents: state.workflowEvents.filter((event) => subjectIds[event.subjectType]?.has(event.subjectId) ?? false),
+  }
+}
+
 export class RecruitingService {
   private readonly repository: NormalizedRecruitingRepository | undefined
   private readonly store!: ReturnType<typeof createRecruitingStore>
@@ -227,6 +285,55 @@ export class RecruitingService {
 
   private mapRepositoryJob(item: import('./repositories/types.js').JobRecord): JobRecord {
     return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  /** 目标部门下的岗位 id 集合：候选人/申请/面试/Offer 的部门归属都由此推出。 */
+  private async jobIdsInDepartment(departmentId: string): Promise<Set<string>> {
+    return new Set((await this.listJobs(undefined, undefined, departmentId)).map((job) => job.id))
+  }
+
+  /** 部门范围下的岗位/申请/候选人 id 集合（仓储路径与本地状态路径共用同一口径）。 */
+  private async scopedIds(departmentId: string): Promise<{ jobIds: Set<string>; applicationIds: Set<string>; candidateIds: Set<string> }> {
+    const jobIds = await this.jobIdsInDepartment(departmentId)
+    const applications = await this.listApplications()
+    const scoped = applications.filter((application) => jobIds.has(application.jobId))
+    return { jobIds, applicationIds: new Set(scoped.map((application) => application.id)), candidateIds: new Set(scoped.map((application) => application.candidateId)) }
+  }
+
+  /** 申请归属越权时抛 403 FORBIDDEN。 */
+  async assertApplicationInScope(applicationId: string, departmentId?: string): Promise<void> {
+    if (!departmentId) return
+    const application = this.repository ? await this.repository.getApplication(applicationId) : applicationOrThrow(await this.store.read(), applicationId)
+    const job = await this.getJob(application.jobId)
+    if (job.departmentId !== departmentId) throw new RecruitingWorkflowError('FORBIDDEN', '当前账号无权访问其他部门数据', 403)
+  }
+
+  /** 候选人主档没有部门字段，按其在目标部门岗位上的申请归属判定。 */
+  async assertCandidateInScope(candidateId: string, departmentId?: string): Promise<void> {
+    if (!departmentId) return
+    const jobIds = await this.jobIdsInDepartment(departmentId)
+    const applications = await this.listApplications()
+    if (!applications.some((application) => application.candidateId === candidateId && jobIds.has(application.jobId))) {
+      throw new RecruitingWorkflowError('FORBIDDEN', '当前账号无权访问其他部门数据', 403)
+    }
+  }
+
+  async assertInterviewInScope(interviewId: string, departmentId?: string): Promise<void> {
+    if (!departmentId) return
+    const interview = await this.getInterview(interviewId)
+    await this.assertApplicationInScope(interview.applicationId, departmentId)
+  }
+
+  async assertOfferInScope(offerId: string, departmentId?: string): Promise<void> {
+    if (!departmentId) return
+    const offer = await this.getOffer(offerId)
+    await this.assertApplicationInScope(offer.applicationId, departmentId)
+  }
+
+  async assertOnboardingInScope(onboardingId: string, departmentId?: string): Promise<void> {
+    if (!departmentId) return
+    const record = await this.getOnboarding(onboardingId)
+    await this.assertApplicationInScope(record.applicationId, departmentId)
   }
 
   async listRequests(status?: string, departmentId?: string): Promise<RecruitmentRequestRecord[]> {
@@ -448,14 +555,19 @@ export class RecruitingService {
     })
   }
 
-  async listCandidates(): Promise<Array<CandidateRecord & { applications: ApplicationRecord[] }>> {
+  async listCandidates(departmentId?: string): Promise<Array<CandidateRecord & { applications: ApplicationRecord[] }>> {
+    const jobIds = departmentId ? await this.jobIdsInDepartment(departmentId) : undefined
     if (this.repository) {
       const candidates = await this.repository.listCandidates()
       const applications = await this.repository.listApplications()
-      return candidates.map((item) => ({ id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.filter((app) => app.candidateId === item.id).map((app) => ({ id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(app.source ? { source: app.source } : {}), aiStatus: 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt })) }))
+      const rows: Array<CandidateRecord & { applications: ApplicationRecord[] }> = candidates.map((item) => ({ id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.filter((app) => app.candidateId === item.id).map((app) => ({ id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(app.source ? { source: app.source } : {}), aiStatus: 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt })) }))
+      return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
     }
+
     const state = await this.store.read()
-    return state.candidates.map((candidate) => ({ ...candidate, applications: state.applications.filter((application) => application.candidateId === candidate.id) }))
+    const scoped = departmentId ? filterStateByDepartment(state, departmentId) : state
+    const rows = scoped.candidates.map((candidate) => ({ ...candidate, applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }))
+    return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
   }
 
   async listCandidateTags(): Promise<string[]> {
@@ -542,17 +654,19 @@ export class RecruitingService {
     })
   }
 
-  async listApplications(candidateId?: string, jobId?: string): Promise<ApplicationRecord[]> {
+  async listApplications(candidateId?: string, jobId?: string, departmentId?: string): Promise<ApplicationRecord[]> {
+    const jobIds = departmentId ? await this.jobIdsInDepartment(departmentId) : undefined
     if (this.repository) {
       const rows = await this.repository.listApplications(candidateId, jobId)
-      return rows.map((item) => ({ id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, updatedAt: item.updatedAt }))
+      const mapped: ApplicationRecord[] = rows.map((item) => ({ id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, updatedAt: item.updatedAt }))
+      return jobIds ? mapped.filter((item) => jobIds.has(item.jobId)) : mapped
     }
-    const state = await this.store.read()
+    const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read()
     return state.applications.filter((item) => (!candidateId || item.candidateId === candidateId) && (!jobId || item.jobId === jobId))
   }
 
-  async listInterviews(applicationId?: string): Promise<Array<InterviewRecord & { feedbackStatus: InterviewFeedbackRecord['status'] | 'pending'; application: ApplicationRecord }>> {
-    const state = await this.store.read()
+  async listInterviews(applicationId?: string, departmentId?: string): Promise<Array<InterviewRecord & { feedbackStatus: InterviewFeedbackRecord['status'] | 'pending'; application: ApplicationRecord }>> {
+    const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read()
     return state.interviews.filter((i) => !applicationId || i.applicationId === applicationId).map((interview) => { const feedback = state.interviewFeedback.filter((x) => x.interviewId === interview.id); return { ...interview, application: applicationOrThrow(state, interview.applicationId), feedbackStatus: feedback.length && feedback.every((x) => x.status === 'locked') ? 'locked' : feedback.length ? feedback[0]!.status : 'pending' } })
   }
 
@@ -574,8 +688,8 @@ export class RecruitingService {
 
   async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo'): Promise<InterviewRecord> { return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const application = applicationOrThrow(state, interview.applicationId); const feedback = state.interviewFeedback.filter((x) => x.interviewId === id); if (!feedback.length || feedback.some((x) => x.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试'); interview.status = 'completed'; interview.updatedAt = LocalRecruitingStore.timestamp(); application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'; if (outcome === 'reject') application.rejectionReason = '面试未通过'; application.updatedAt = interview.updatedAt; addEvent(state, { subjectType: 'interview', subjectId: id, action: 'conclude', fromStatus: 'scheduled', toStatus: 'completed', actorId }); return interview }) }
 
-  async getDashboardSummary(): Promise<DashboardSummary> {
-    const state = await this.store.read()
+  async getDashboardSummary(departmentId?: string): Promise<DashboardSummary> {
+    const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read()
     const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
     const counts = [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
@@ -609,8 +723,8 @@ export class RecruitingService {
     return { generatedAt: LocalRecruitingStore.timestamp(), metrics, funnel, pendingApprovals, pendingFeedback, failedTasks }
   }
 
-  async getReports(): Promise<RecruitingReport> {
-    const state = await this.store.read(); const applications = state.applications
+  async getReports(departmentId?: string): Promise<RecruitingReport> {
+    const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read(); const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
     const counts = [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
     const stages = ['收到申请', '通过筛选', '进入面试', '发出 Offer', '已入职']
@@ -655,9 +769,10 @@ export class RecruitingService {
     })
   }
 
-  async listResumes(candidateId?: string, applicationId?: string): Promise<ResumeRecord[]> {
-    if (this.repository) return (await this.repository.listResumes(candidateId, applicationId)).map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt }))
-    const state = await this.store.read()
+  async listResumes(candidateId?: string, applicationId?: string, departmentId?: string): Promise<ResumeRecord[]> {
+    const ids = departmentId ? await this.scopedIds(departmentId) : undefined
+    if (this.repository) { const items = (await this.repository.listResumes(candidateId, applicationId)).map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt })); return ids ? items.filter((item) => ids.applicationIds.has(item.applicationId ?? '') || ids.candidateIds.has(item.candidateId)) : items }
+    const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read()
     return state.resumes.filter((item) => (!candidateId || item.candidateId === candidateId) && (!applicationId || item.applicationId === applicationId))
   }
 
@@ -812,9 +927,9 @@ export class RecruitingService {
       return task
     })
   }
-  async listOffers(status?: string): Promise<OfferRecord[]> { const state=await this.store.read(); return state.offers.filter(x=>!status||x.status===status) }
+  async listOffers(status?: string, departmentId?: string): Promise<OfferRecord[]> { const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read(); return state.offers.filter(x=>!status||x.status===status) }
   async getOffer(id:string): Promise<OfferRecord & { versions: OfferVersionRecord[]; onboarding?: OnboardingRecord }> { const state=await this.store.read(); const offer=state.offers.find(x=>x.id===id); if(!offer) throw new RecruitingNotFoundError(`未找到 Offer：${id}`); const onboarding=state.onboarding.find(x=>x.offerId===id); return {...offer,versions:state.offerVersions.filter(x=>x.offerId===id),...(onboarding?{onboarding}: {})} }
-  async listOnboarding(): Promise<OnboardingRecord[]> { const state = await this.store.read(); return state.onboarding }
+  async listOnboarding(departmentId?: string): Promise<OnboardingRecord[]> { const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read(); return state.onboarding }
   async getOnboarding(id: string): Promise<OnboardingRecord> { const state = await this.store.read(); const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); return item }
   async updateOnboarding(id: string, input: { plannedStartDate?: string; notes?: string }, actorId = 'user-demo'): Promise<OnboardingRecord> { return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); if (item.status === 'cancelled' || item.status === 'completed') throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '已取消或已归档记录不能编辑'); if (input.plannedStartDate !== undefined) item.plannedStartDate = clean(input.plannedStartDate); if (input.notes !== undefined) item.notes = clean(input.notes); item.updatedAt = LocalRecruitingStore.timestamp(); addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action: 'update', actorId }); return item }) }
   async onboardingAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<OnboardingRecord> { return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); const from = item.status; const allowed: Record<string, string[]> = { schedule: ['pending', 'cancelled'], complete: ['pending', 'scheduled'], cancel: ['pending', 'scheduled'] }; if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`); if (action === 'cancel') required(reason, '取消原因'); const next: Record<string, OnboardingRecord['status']> = { schedule: 'scheduled', complete: 'completed', cancel: 'cancelled' }; item.status = next[action]!; const now = LocalRecruitingStore.timestamp(); if (action === 'complete') { item.archivedAt = now; const app = state.applications.find((x) => x.id === item.applicationId); if (app) { app.status = 'onboarding_archived'; app.updatedAt = now; addEvent(state, { subjectType: 'application', subjectId: app.id, action: 'status_changed', fromStatus: 'offer_accepted', toStatus: 'onboarding_archived', actorId }); } } item.updatedAt = now; addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action, fromStatus: from, toStatus: item.status, actorId, ...(reason ? { reason: clean(reason) } : {}) }); return item }) }

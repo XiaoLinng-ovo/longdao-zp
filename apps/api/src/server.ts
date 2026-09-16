@@ -4,6 +4,7 @@ import { compose, type Middleware, type RequestContext } from './http.js';
 import { errorMiddleware } from './error-middleware.js';
 import { requestIdMiddleware } from './middleware.js';
 import { attachAuth } from './auth/middleware.js';
+import { idempotencyMiddleware } from './idempotency.js';
 import routeMiddleware, { notFoundMiddleware } from './routes.js';
 
 const authMiddleware: Middleware = async (context, next) => {
@@ -16,6 +17,8 @@ export function createApp(config: AppConfig = loadConfig()): (req: IncomingMessa
     errorMiddleware,
     requestIdMiddleware,
     authMiddleware,
+    // 幂等键需要操作人身份与原始请求体，因此排在 auth 之后、路由之前。
+    idempotencyMiddleware,
     routeMiddleware,
     notFoundMiddleware
   ]);
