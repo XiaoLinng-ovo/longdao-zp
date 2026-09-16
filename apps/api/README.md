@@ -69,7 +69,7 @@ npm test
 npm start
 ```
 
-API 测试通过 `RECRUITING_STORE_PATH` 使用隔离的本地文件适配器；正常本地启动命令会先连接 PostgreSQL 并执行 migration。没有 PostgreSQL 时可以继续运行 API 单元测试，但不能使用下方的 PostgreSQL 启动命令。
+API 测试在 `NODE_ENV=test` 下使用隔离的本地适配器；正常启动命令必须连接 PostgreSQL 并执行 migration。没有 PostgreSQL 时只能运行单元测试，不能启动业务 API。
 
 本地同时启动前后端（避免与带货平台的 5173 端口冲突）：
 
@@ -123,4 +123,4 @@ TypeScript 和 Node 类型声明已经记录在 `apps/api/package.json`，本次
 - `ready` 应在接入 PostgreSQL、Redis 后增加显式依赖检查。
 - `me` 应在 Phase 2 接入服务端 Session、RBAC、CSRF 和 Origin 校验。
 - 路由层只做 HTTP 映射，招聘需求、岗位、候选人和申请等业务规则应放入后续领域模块。
-- `/api/state` 不属于本 API 的正式写入接口。
+- 整体状态 JSON 接口已移除；所有业务写入必须通过 `/api/v1` 领域接口完成。

@@ -1,7 +1,7 @@
 # SmartRecruit Pro 项目开发进度与技术栈汇总
 
-> 生成日期：2026-09-15  
-> 项目路径：`D:\work\智能招聘平台\20260829-招聘\20260829-招聘`  
+> 生成日期：2026-09-16
+> 项目路径：`C:\项目\code\longdao-jianli`
 > 文档性质：用于团队汇报 / 项目交接 / 后续开发依据的汇总文件  
 > 当前状态：本地闭环可运行，但尚未达到 V1 设计文档完整验收标准
 
@@ -54,24 +54,24 @@ Audit / Workflow Events / Reports
 - 后端最小 RBAC 和部分部门 DataScope
 - 前端页面模块拆分：仪表盘、招聘需求、岗位、候选人、面试、Offer、报表、管理后台
 
-### 2.3 当前测试情况
+### 2.3 当前测试情况（以本工作区实测为准）
 
-- API 测试：`npm --prefix apps/api test` → 15/15 通过
+- API 测试：当前环境未能复现通过；`apps/api` 的 TypeScript 工具链/依赖未完整安装，需先恢复干净安装后再验证
 - 前端测试：`npm --prefix web test -- --run` → 45/45 通过
 - 前端类型检查：`npm --prefix web run typecheck` → 通过
 - 前端构建：`npm --prefix web run build` → 通过
 
 ### 2.4 尚未达到 V1 的关键点
 
-- 五类角色没有完全落地：缺 `hr_admin`、`interviewer`
+- 五类角色已在 API 类型、默认账号和权限分组中出现，但仍需补齐端到端权限矩阵与验收用例
 - Application 状态机与设计文档不一致
 - 审批模型不完整：没有完整 `ApprovalInstance / ApprovalStep / ApprovalRecord`
 - 数据层仍以本地 JSON state 为主，PostgreSQL 只是桥接/骨架
-- 安全边界缺失：Argon2id、登录限流、CSRF、Origin 校验、Secure Cookie 未完全实现
+- 安全边界仍处于过渡态：密码仍为开发级 SHA-256，本地 Session JSON；CSRF/Origin/Secure Cookie 已有首版防护，但尚未完成生产级认证闭环与集成验收
 - 岗位/JD 契约不完整：分页、乐观锁、幂等 Key 未完整落地
 - 文件隔离与病毒扫描未接 MinIO / ClamAV
 - Worker 未完整接 Redis 队列
-- 前端路由守卫、导航权限、401/403 页面不完整
+- 前端已经有登录路由守卫、管理路由 `adminOnly`/角色限制及导航过滤；401/403 页面与全局错误体验仍待完善
 
 ---
 
@@ -162,8 +162,8 @@ Audit / Workflow Events / Reports
 #### 身份与角色
 
 - 设计角色：`admin / hr_admin / recruiter / hiring_manager / interviewer`
-- 当前角色：`recruiter / hiring_manager / approver / admin`
-- 待补：`hr_admin`、`interviewer`
+- 当前 API 角色：`recruiter / hiring_manager / approver / admin / hr_admin / interviewer`
+- 当前状态：角色常量、默认账号和部分路由权限已加入；仍需将权限矩阵、DataScope 和前端页面访问逐项验收
 
 #### Application 状态机
 
@@ -194,8 +194,8 @@ Audit / Workflow Events / Reports
 - 目标：Argon2id 或同等安全散列。
 - 当前：无登录限流。
 - 当前：Cookie 缺少 `Secure` 和 `__Host-` 前缀。
-- 当前：无 CSRF Token、无 Origin 校验。
-- 待补： `GET /api/v1/auth/csrf`。
+- 当前：已增加 CSRF Token、Origin 白名单和生产 Cookie 属性的首版实现；认证仍依赖本地 Session Store 与 SHA-256 密码哈希。
+- 待补：Argon2id、PostgreSQL Session、登录限流、完整 CSRF 集成测试与安全配置审计。
 
 #### API 契约
 
@@ -221,9 +221,23 @@ Audit / Workflow Events / Reports
 
 #### 前端权限
 
-- 当前：有登录模块，但未做全局路由守卫。
-- 当前：导航未按角色动态隐藏。
-- 待补：401 / 403 页面、路由级权限守卫。
+- 当前：已有登录模块、全局路由守卫、管理路由 `adminOnly`/角色限制和导航过滤。
+- 待补：401 / 403 页面、接口级错误态统一处理，以及与后端权限矩阵的端到端测试。
+
+---
+
+## 6. 当前阶段与下一阶段
+
+当前处于“设计对齐后的安全底座与运行基线”阶段，而不是功能扩展阶段。近期并发改动只覆盖仓库卫生、依赖基线、认证首版和前端权限基线；这些改动不代表生产级认证已经完成。
+
+下一阶段按以下顺序推进：
+
+1. 恢复并锁定根级依赖安装与 API/Worker 构建、测试命令，形成可复现基线；
+2. 将认证升级为 Argon2id + PostgreSQL Session + 登录限流，并补齐 CSRF/Origin 集成测试；
+3. 以规范化 PostgreSQL Repository 迁移需求、岗位、候选人和申请的写路径，保留 JSON state 只读回退；
+4. 再接入 MinIO、ClamAV、Outbox/Redis 和可恢复 Worker 链路。
+
+验收时必须区分“源码已实现”“本地测试通过”“干净环境构建通过”和“真实部署验收”，不得仅依据页面可操作或旧进度记录宣称完成。
 
 ---
 
