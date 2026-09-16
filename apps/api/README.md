@@ -172,3 +172,35 @@ curl -X POST http://127.0.0.1:3100/api/v1/candidates \
   -H "idempotency-key: 5b1f0c2e-9a44-4c31-8f2a-7c0d1e2f3a4b" \
   -d '{"fullName":"张三"}'
 ```
+## PostgreSQL 业务闭环（本阶段接入范围）
+
+此前只有需求、审批、岗位主体、候选人、申请、简历与分析走 PostgreSQL 仓储；面试、Offer、入职归档、岗位说明书与 JD 版本、流程事件、报表/看板只在内存状态（`NODE_ENV=test`）下可用，非测试环境会因状态对象未初始化而抛 `TypeError`。现在这些聚合已全部接入仓储，且读接口统一走同一个状态视图，测试模式与 PostgreSQL 模式共用一套过滤、排序与聚合逻辑。
+
+### 运行（本地三步）
+
+```bash
+export DATABASE_URL='postgresql://smartrecruit:<password>@127.0.0.1:5432/smartrecruit'
+node scripts/migrate-postgres.mjs      # 应用 db/migrations 下全部迁移
+node scripts/seed-dev-postgres.mjs     # 部门 / 角色 / 初始账号（仅开发与验证环境）
+node scripts/verify-v1-flow.mjs        # 在真实 PostgreSQL 上跑完整 V1 闭环并逐项断言
+```
+
+`verify-v1-flow.mjs` 会启动一个 `NODE_ENV=production` 的服务实例（会话与业务数据都走 PostgreSQL），覆盖：登录 → 招聘需求 → 审批 → 岗位 → 说明书/JD → 确认 → 发布 → 候选人 → 申请 → 简历隔离 → 分析 → 人工复核 → 面试 → 反馈提交/锁定 → 结论 → Offer 审批/发送/接受 → 入职归档 → 报表/看板/流程事件 → 部门数据范围 → 分页 → 幂等重放，共 51 项断言。
+
+### 仓储口径约定
+
+- **部门标识**：对外一律使用 `departments.code`（如 `dept-tech`），不使用 UUID。会话身份（`/api/v1/me` 的 `departmentId`）、岗位、需求三处口径一致，部门数据范围（DataScope）才能对齐。
+- **日期**：`date` 列（`onboarding_records.planned_start_date`、`offer_versions.start_date`）按 `YYYY-MM-DD` 字面返回；若交给驱动解析成 `Date` 再序列化，会因本地时区偏移出现差一天。
+- **申请初始状态**：`pending_analysis`。迁移 `0009_application_status_alignment.sql` 已把列默认值从遗留的 `new` 改为 `pending_analysis`，并补齐 12 个状态 CHECK（此前 applications 是全库唯一没有状态约束的聚合表）。
+- **操作者解析**：写接口的 actor 与 `interviewerId` 需能解析到 `users` 中的真实用户（UUID 或邮箱）。`interview_feedback.interviewer_id` 为 NOT NULL，无法解析会返回校验错误；其余审计列可空，解析不到时写 NULL。
+- **部门范围**：仍从岗位推出（`job.departmentId → application → 下游`），只允许 `hiring_manager` 受部门约束。
+
+### 仍未接入的部分
+
+- `audit_logs` 与 `outbox_events` 两张表仍无代码写入，当前审计轨迹落在 `workflow_events`。
+- Offer 审批人没有独立列（设计中的 `offer_approvals` 未建表），PostgreSQL 模式下 `approval.approver` 返回空串；审批人、理由可在流程事件中查到。
+- `job_description_versions` 无 `language` 列，读取时统一按 `zh-CN` 返回。
+- `candidates` 无标签列，`/api/v1/candidate-tags` 在 PostgreSQL 模式返回空数组。
+- 简历仍落本地隔离目录；MinIO / ClamAV / Redis 未接入，Worker 仍用 PostgreSQL 租约轮询。
+- 幂等仍为单进程内存实现，重启失效（迁移里已有 `idempotency_records` 表待用）。
+- 管理后台接口（`/api/v1/admin/*`）尚未实现。

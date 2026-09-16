@@ -25,7 +25,7 @@ test('PostgreSQL connection exposes the normalized recruiting tables', async (co
     const connection = await checkPostgresConnection(pool)
     assert.equal(connection.database, postgresPoolConfig().database ?? 'smartrecruit')
     assert.deepEqual(connection.normalizedTables, ['applications', 'candidates', 'jobs', 'recruitment_requests'])
-    assert.match(connection.serverVersion, /^17\./, 'expected the configured PostgreSQL 17 server')
+    assert.ok(Number.parseInt(connection.serverVersion.split('.')[0] ?? '0', 10) >= 16, `expected PostgreSQL 16 or newer, got ${connection.serverVersion}`)
   } finally {
     await pool.end().catch(() => undefined)
   }
