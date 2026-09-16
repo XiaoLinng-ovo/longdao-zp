@@ -4,6 +4,7 @@ import { createApp, nextTick, type App } from 'vue'
 import DashboardPage from '../pages/DashboardPage.vue'
 import { loadDashboard } from './index'
 import { apiClient } from '../../../shared/api'
+import { createRouter, createMemoryHistory } from 'vue-router'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
@@ -36,7 +37,9 @@ describe('真实招聘首页', () => {
   it('错误不回退到演示数据，并支持页面重试', async () => {
     getJson.mockRejectedValue(new Error('数据库暂不可用'))
     root = document.createElement('div'); document.body.appendChild(root)
-    app = createApp(DashboardPage); app.mount(root)
+    app = createApp(DashboardPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
     await flush()
     expect(root.textContent).toContain('数据库暂不可用')
     expect(root.querySelector('.metric-card')).toBeNull()

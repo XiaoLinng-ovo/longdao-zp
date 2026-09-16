@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest'
-import { createAppRouter, navigationItems } from './router'
+import { createAppRouter, navigationItems, getNavigationItemsForRole } from './router'
 
 const expectedRoutes = [
   {
@@ -86,5 +86,13 @@ describe('application router', () => {
     await router.push('/this-route-does-not-exist')
 
     expect(router.currentRoute.value.path).toBe('/')
+  })
+
+  it('marks administration as admin-only and hides it for non-admin navigation', () => {
+    const router = createAppRouter()
+    const adminRoute = router.getRoutes().find((route) => route.name === 'administration')
+    expect(adminRoute?.meta.adminOnly).toBe(true)
+    expect(getNavigationItemsForRole('recruiter').some((item) => item.name === 'administration')).toBe(false)
+    expect(getNavigationItemsForRole('admin').some((item) => item.name === 'administration')).toBe(true)
   })
 })

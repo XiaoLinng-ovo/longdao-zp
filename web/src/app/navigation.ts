@@ -1,5 +1,6 @@
 import { appRoutes } from './routes'
 import type { RouteMeta } from './routes'
+import type { AuthRole } from '../modules/auth/api'
 
 export interface NavigationItem extends RouteMeta {
   path: string
@@ -13,3 +14,7 @@ export const navigationItems: NavigationItem[] = appRoutes
     name: String(route.name),
     ...route.meta,
   }))
+
+export function getNavigationItemsForRole(role: AuthRole | null | undefined): NavigationItem[] {
+  return navigationItems.filter((item) => !item.adminOnly || role === 'admin' || role === 'hr_admin')
+}

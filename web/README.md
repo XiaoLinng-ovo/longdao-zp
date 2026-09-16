@@ -19,4 +19,4 @@ pnpm --dir web typecheck
 pnpm --dir web test -- --run
 ```
 
-新前端入口是 `web/index.html`。仓库根目录的旧 `index.html` 仍保留为历史演示入口，未被本次模块化改造修改。
+前端入口是 `web/index.html`，由 Vite 构建并由生产 Web 服务托管。

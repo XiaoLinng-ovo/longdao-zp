@@ -1,4 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
+import type { AuthRole } from '../modules/auth/api'
 
 export interface RouteMeta {
   title: string
@@ -8,6 +9,8 @@ export interface RouteMeta {
   crumb: string
   hideInNav?: boolean
   hideShell?: boolean
+  adminOnly?: boolean
+  roles?: AuthRole[]
 }
 
 export type AppRouteRecord = RouteRecordRaw & {
@@ -134,7 +137,7 @@ export const appRoutes: AppRouteRecord[] = [
     name: 'administration',
     component: () => import('../modules/administration/pages/AdministrationPage.vue'),
     meta: {
-      title: '系统配置', navLabel: '系统配置', icon: '⚙', group: '系统', crumb: '系统 / 配置与审计',
+      title: '系统配置', navLabel: '系统配置', icon: '⚙', group: '系统', crumb: '系统 / 配置与审计', adminOnly: true, roles: ['admin', 'hr_admin'],
     },
   },
   {
