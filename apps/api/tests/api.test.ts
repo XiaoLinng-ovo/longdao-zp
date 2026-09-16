@@ -617,4 +617,153 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.notEqual(after.body.data.title, '不应写入的并发修改');
   });
 
+  it('returns pagination meta with totalPages and rejects invalid paging parameters', async () => {
+    await login();
+    const unpaged = await get('/api/v1/candidates');
+    assert.equal(unpaged.status, 200);
+    assert.ok(Array.isArray(unpaged.body.data), '未分页时 data 仍应是数组');
+    assert.equal(unpaged.body.meta, undefined, '未分页时不应返回 meta');
+    const total = unpaged.body.data.length;
 
+    const firstPage = await get('/api/v1/candidates?page=1&pageSize=2');
+    assert.equal(firstPage.status, 200);
+    assert.equal(firstPage.body.data.page, 1);
+    assert.equal(firstPage.body.data.pageSize, 2);
+    assert.equal(firstPage.body.data.total, total);
+    assert.deepEqual(firstPage.body.data.items, unpaged.body.data.slice(0, 2));
+    assert.deepEqual(firstPage.body.meta.pagination, { page: 1, pageSize: 2, total, totalPages: Math.ceil(total / 2) });
+
+    const secondPage = await get('/api/v1/candidates?page=2&pageSize=2');
+    assert.deepEqual(secondPage.body.data.items, unpaged.body.data.slice(2, 4));
+    assert.equal(secondPage.body.meta.pagination.page, 2);
+
+    const beyond = await get(`/api/v1/candidates?page=${Math.ceil(total / 2) + 5}&pageSize=2`);
+    assert.equal(beyond.status, 200);
+    assert.deepEqual(beyond.body.data.items, [], '越界页应返回空数组而不是报错');
+    assert.equal(beyond.body.meta.pagination.total, total);
+
+    const sizeOnly = await get('/api/v1/candidates?pageSize=1');
+    assert.equal(sizeOnly.body.data.page, 1, '只给 pageSize 时 page 默认 1');
+    assert.equal(sizeOnly.body.data.items.length, Math.min(1, total));
+
+    for (const query of ['page=0', 'page=-1', 'page=abc', 'page=1.5', 'pageSize=0', 'pageSize=101', 'pageSize=abc']) {
+      const invalid = await get(`/api/v1/candidates?${query}`);
+      assert.equal(invalid.status, 400, `${query} 应被拒绝`);
+      assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
+    }
+  });
+
+  it('replays idempotent writes and rejects key reuse with a different payload', async () => {
+    await login();
+    const key = 'test-idem-key-0001';
+    const payload = { fullName: '幂等候选人甲', email: 'idem-a@smartrecruit.local' };
+
+    const first = await requestJson('POST', '/api/v1/candidates', payload, { 'idempotency-key': key });
+    assert.equal(first.status, 201);
+    assert.equal(first.headers['idempotency-replay'], undefined);
+
+    const replay = await requestJson('POST', '/api/v1/candidates', payload, { 'idempotency-key': key });
+    assert.equal(replay.status, 201);
+    assert.equal(replay.headers['idempotency-replay'], 'true', '重放必须标记 idempotency-replay');
+    assert.deepEqual(replay.body.data, first.body.data, '重放必须返回与首次完全一致的资源');
+
+    const list = await get('/api/v1/candidates');
+    assert.equal(list.body.data.filter((item: any) => item.fullName === payload.fullName).length, 1, '重放不应重复写库');
+
+    const reuse = await requestJson('POST', '/api/v1/candidates', { fullName: '幂等候选人乙' }, { 'idempotency-key': key });
+    assert.equal(reuse.status, 409);
+    assert.equal(reuse.body.error.code, 'IDEMPOTENCY_KEY_REUSED');
+
+    const invalidKey = await requestJson('POST', '/api/v1/candidates', payload, { 'idempotency-key': 'short' });
+    assert.equal(invalidKey.status, 400);
+    assert.equal(invalidKey.body.error.code, 'IDEMPOTENCY_KEY_INVALID');
+
+    const retryKey = 'test-idem-retry-0002';
+    const failed = await requestJson('POST', '/api/v1/candidates', { email: 'no-name@smartrecruit.local' }, { 'idempotency-key': retryKey });
+    assert.equal(failed.status, 400);
+    const retried = await requestJson('POST', '/api/v1/candidates', { fullName: '重试候选人', email: 'no-name@smartrecruit.local' }, { 'idempotency-key': retryKey });
+    assert.equal(retried.status, 201, '失败响应不落幂等记录，同键可重试');
+    assert.equal(retried.headers['idempotency-replay'], undefined);
+
+    const plain = await requestJson('POST', '/api/v1/candidates', { fullName: '无幂等键候选人' });
+    assert.equal(plain.status, 201, '不带幂等键的写请求不受影响');
+  });
+
+  it('scopes interviews, offers, and onboarding to the department for hiring managers', async () => {
+    await login();
+    // 两侧都新建候选人+申请，避免依赖前面用例对种子数据的改动
+    const newApplication = async (fullName: string, jobId: string) => {
+      const candidate = await requestJson('POST', '/api/v1/candidates', { fullName });
+      assert.equal(candidate.status, 201, JSON.stringify(candidate.body));
+      const application = await requestJson('POST', '/api/v1/applications', { candidateId: candidate.body.data.id, jobId });
+      assert.equal(application.status, 201, JSON.stringify(application.body));
+      return application.body.data.id as string;
+    };
+    const techApplicationId = await newApplication('部门范围候选人-技术', 'job-108');
+    const foreignApplicationId = await newApplication('部门范围候选人-客户成功', 'job-107');
+
+    // 安排面试会自动把申请从 pending_analysis 推进到 interviewing
+    const techInterview = await requestJson('POST', '/api/v1/interviews', { applicationId: techApplicationId, title: '技术面', participants: [{ userId: 'interviewer-tech', role: 'interviewer' }] });
+    const foreignInterview = await requestJson('POST', '/api/v1/interviews', { applicationId: foreignApplicationId, title: '客户成功面', participants: [{ userId: 'interviewer-success', role: 'interviewer' }] });
+    assert.equal(techInterview.status, 201, JSON.stringify(techInterview.body));
+    assert.equal(foreignInterview.status, 201, JSON.stringify(foreignInterview.body));
+
+    // hiring_manager 可写面试：新建面试同样要受部门范围约束
+    await loginAs('manager@smartrecruit.local', 'manager123');
+    const foreignInterviewCreate = await requestJson('POST', '/api/v1/interviews', { applicationId: foreignApplicationId, title: '越权面试', participants: [{ userId: 'interviewer-hm', role: 'interviewer' }] });
+    assert.equal(foreignInterviewCreate.status, 403, '跨部门新建面试必须被拒绝');
+    const ownInterviewCreate = await requestJson('POST', '/api/v1/interviews', { applicationId: techApplicationId, title: '本部门补面', participants: [{ userId: 'interviewer-hm', role: 'interviewer' }] });
+    assert.equal(ownInterviewCreate.status, 201, '本部门仍可正常新建面试');
+    await login();
+
+    const offerBody = (positionTitle: string, departmentId: string, amount: number) => ({ positionTitle, departmentId, employmentType: 'full_time', baseSalary: { amount, currency: 'CNY' }, content: 'Offer 正文' });
+    const techOffer = await requestJson('POST', '/api/v1/offers', { applicationId: techApplicationId, ...offerBody('高级后端工程师', 'dept-tech', 40000) });
+    const foreignOffer = await requestJson('POST', '/api/v1/offers', { applicationId: foreignApplicationId, ...offerBody('客户成功经理', 'dept-success', 20000) });
+    assert.equal(techOffer.status, 201, JSON.stringify(techOffer.body));
+    assert.equal(foreignOffer.status, 201, JSON.stringify(foreignOffer.body));
+
+    const onboardingIds: string[] = [];
+    for (const offerId of [techOffer.body.data.id, foreignOffer.body.data.id]) {
+      for (const action of ['submit-approval', 'approve', 'send', 'accept', 'archive-onboarding']) {
+        const acted = await requestJson('POST', `/api/v1/offers/${offerId}/${action}`);
+        assert.equal(acted.status, 200, `Offer ${action} 失败：${JSON.stringify(acted.body)}`);
+        if (action === 'archive-onboarding') onboardingIds.push(acted.body.data.id);
+      }
+    }
+    const [techOnboardingId, foreignOnboardingId] = onboardingIds as [string, string];
+    assert.ok(techOnboardingId && foreignOnboardingId);
+
+    await loginAs('manager@smartrecruit.local', 'manager123');
+
+    const interviews = await get('/api/v1/interviews');
+    assert.equal(interviews.status, 200);
+    assert.ok(interviews.body.data.some((item: any) => item.id === techInterview.body.data.id), '本部门面试应可见');
+    assert.ok(!interviews.body.data.some((item: any) => item.id === foreignInterview.body.data.id), '跨部门面试不应可见');
+
+    const offers = await get('/api/v1/offers');
+    assert.ok(offers.body.data.some((item: any) => item.id === techOffer.body.data.id), '本部门 Offer 应可见');
+    assert.ok(!offers.body.data.some((item: any) => item.id === foreignOffer.body.data.id), '跨部门 Offer 不应可见');
+
+    const onboarding = await get('/api/v1/onboarding');
+    assert.ok(onboarding.body.data.some((item: any) => item.id === techOnboardingId), '本部门入职归档应可见');
+    assert.ok(!onboarding.body.data.some((item: any) => item.id === foreignOnboardingId), '跨部门入职归档不应可见');
+
+    const foreignInterviewDetail = await get(`/api/v1/interviews/${foreignInterview.body.data.id}`);
+    assert.equal(foreignInterviewDetail.status, 403);
+    assert.equal(foreignInterviewDetail.body.error.code, 'FORBIDDEN');
+
+    const foreignOfferDetail = await get(`/api/v1/offers/${foreignOffer.body.data.id}`);
+    assert.equal(foreignOfferDetail.status, 403);
+    assert.equal(foreignOfferDetail.body.error.code, 'FORBIDDEN');
+
+    const foreignConclude = await requestJson('POST', `/api/v1/interviews/${foreignInterview.body.data.id}/conclude`, { outcome: 'pass' });
+    assert.equal(foreignConclude.status, 403, '跨部门面试反馈/结论必须被拒绝');
+
+    const foreignApplicationStatus = await requestJson('POST', `/api/v1/applications/${foreignApplicationId}/status`, { status: 'rejected', reason: '越权尝试' });
+    assert.equal(foreignApplicationStatus.status, 403, '跨部门申请状态变更必须被拒绝');
+
+    const foreignOnboardingComplete = await requestJson('POST', `/api/v1/onboarding/${foreignOnboardingId}/complete`);
+    assert.equal(foreignOnboardingComplete.status, 403, '跨部门入职归档操作必须被拒绝');
+
+    await login();
+  });
