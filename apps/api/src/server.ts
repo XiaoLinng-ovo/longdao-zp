@@ -4,7 +4,9 @@ import { compose, type Middleware, type RequestContext } from './http.js';
 import { errorMiddleware } from './error-middleware.js';
 import { requestIdMiddleware } from './middleware.js';
 import { attachAuth } from './auth/middleware.js';
-import { idempotencyMiddleware } from './idempotency.js';
+import { createIdempotencyMiddleware } from './idempotency.js';
+import { PostgresIdempotencyStore } from './idempotency-postgres.js';
+import { createDatabasePool } from './db/connection.js';
 import routeMiddleware, { notFoundMiddleware } from './routes.js';
 
 const authMiddleware: Middleware = async (context, next) => {
@@ -12,13 +14,19 @@ const authMiddleware: Middleware = async (context, next) => {
   await next();
 };
 
+function buildIdempotencyMiddleware(): Middleware {
+  // 测试模式走内存实现（无外部依赖）；其余环境用 PostgreSQL，幂等跨实例/跨重启保留。
+  if (process.env.NODE_ENV === 'test') return createIdempotencyMiddleware();
+  return createIdempotencyMiddleware({ store: new PostgresIdempotencyStore(createDatabasePool()) });
+}
+
 export function createApp(config: AppConfig = loadConfig()): (req: IncomingMessage, res: ServerResponse) => void {
   const pipeline = compose([
     errorMiddleware,
     requestIdMiddleware,
     authMiddleware,
     // 幂等键需要操作人身份与原始请求体，因此排在 auth 之后、路由之前。
-    idempotencyMiddleware,
+    buildIdempotencyMiddleware(),
     routeMiddleware,
     notFoundMiddleware
   ]);

@@ -31,6 +31,10 @@ export interface IdempotencyRecord {
   key: string;
   /** method + path + 操作人 + 请求体哈希；用于识别「同键不同请求」。 */
   fingerprint: string;
+  /** `${method} ${pathname}`，用于把记录归属到具体路由（便于落库与审计）。 */
+  route: string;
+  /** 操作人用户 UUID；匿名请求为 null。 */
+  actorId: string | null;
   status: number;
   data: unknown;
   createdAt: string;
@@ -38,15 +42,17 @@ export interface IdempotencyRecord {
 }
 
 export interface IdempotencyStore {
-  find(key: string): IdempotencyRecord | undefined;
-  save(record: IdempotencyRecord): void;
-  clear(): void;
+  find(key: string): Promise<IdempotencyRecord | undefined>;
+  save(record: IdempotencyRecord): Promise<void>;
+  /** 清理过期记录；内存实现等价于清空（仅测试/排障使用）。 */
+  clear(): Promise<void>;
 }
 
 /**
  * 单进程内存实现：够本地与单实例演示用，重启即失效。
  * 生产要求跨实例/跨重启持久化时应替换为 PostgreSQL 实现
- * （唯一约束 (key) + 记录 fingerprint/status/response），接口保持不变。
+ * （`idempotency_records` 表，唯一约束 (actor_user_id, route, idempotency_key)），
+ * 接口保持不变。
  */
 export class MemoryIdempotencyStore implements IdempotencyStore {
   private readonly records = new Map<string, IdempotencyRecord>();
@@ -56,7 +62,7 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
     private readonly maxEntries: number = DEFAULT_IDEMPOTENCY_MAX_ENTRIES
   ) {}
 
-  find(key: string): IdempotencyRecord | undefined {
+  async find(key: string): Promise<IdempotencyRecord | undefined> {
     const record = this.records.get(key);
     if (!record) return undefined;
     if (Date.parse(record.expiresAt) <= Date.now()) {
@@ -66,7 +72,7 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
     return record;
   }
 
-  save(record: IdempotencyRecord): void {
+  async save(record: IdempotencyRecord): Promise<void> {
     this.prune();
     if (this.records.size >= this.maxEntries) {
       const oldest = [...this.records.entries()].sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt))[0];
@@ -75,7 +81,7 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
     this.records.set(record.key, record);
   }
 
-  clear(): void {
+  async clear(): Promise<void> {
     this.records.clear();
   }
 
@@ -183,7 +189,7 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): M
     const { raw } = await readBody(context);
     const fingerprint = fingerprintOf(context, raw);
 
-    const existing = store.find(key);
+    const existing = await store.find(key);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
         throw new HttpError(409, 'IDEMPOTENCY_KEY_REUSED', '该 Idempotency-Key 已用于其它请求，请为每次写操作使用新键');
@@ -200,9 +206,11 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): M
       const captured = release();
       if (captured && captured.status >= 200 && captured.status < 300 && isSuccessEnvelope(captured.body)) {
         const createdAt = new Date().toISOString();
-        store.save({
+        await store.save({
           key,
           fingerprint,
+          route: `${method} ${context.url.pathname}`,
+          actorId: context.auth?.user.id ?? null,
           status: captured.status,
           data: captured.body.data,
           createdAt,

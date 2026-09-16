@@ -4,14 +4,18 @@ import { sendSuccess, type ApiMeta } from './response.js';
 import { readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
+import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/service.js';
+import { createDatabasePool } from './db/connection.js';
 import { authService } from './auth/middleware.js';
 import type { Role } from './auth/types.js';
 import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
 
 const recruiting = new RecruitingService();
+const adminService = new AdminService(createDatabasePool());
 const AUTH_COOKIE = 'smartrecruit_session';
 const SESSION_COOKIE_MAX_AGE = 60 * 60 * 12;
 const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin', 'hr_admin', 'interviewer'];
+const ADMIN_ROLES: Role[] = ['admin', 'hr_admin'];
 const RECRUITMENT_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
 const RECRUITMENT_APPROVAL_ROLES: Role[] = ['approver', 'hiring_manager', 'admin', 'hr_admin'];
 const JOB_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
@@ -194,7 +198,9 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/dashboard/summary',
 
     '/api/v1/reports',
-    '/api/v1/workflow-events'
+    '/api/v1/workflow-events',
+
+    '/api/v1/admin'
   ];
   const isProtectedPath = protectedPaths.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
   if (!isProtectedPath) {
@@ -261,6 +267,20 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/applications' && method === 'GET') { sendList(context, await recruiting.listApplications(context.url.searchParams.get('candidateId') ?? undefined, context.url.searchParams.get('jobId') ?? undefined, departmentScope(auth))); return; }
     if (path === '/api/v1/dashboard/summary' && method === 'GET') { sendSuccess(context, await recruiting.getDashboardSummary(departmentScope(auth))); return; }
     if (path === '/api/v1/reports' && method === 'GET') { sendSuccess(context, await recruiting.getReports(departmentScope(auth))); return; }
+    if (path === '/api/v1/reports/funnel' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).funnel); return; }
+    if (path === '/api/v1/reports/channels' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).channels); return; }
+    if (path === '/api/v1/reports/cycle-time' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).recruitmentCycle); return; }
+
+    if (path === '/api/v1/admin/users' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await adminService.listUsers()); return; }
+    const adminUserMatch = path.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
+    if (adminUserMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateUser(adminUserMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/roles' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listRoles()); return; }
+    const adminRoleMatch = path.match(/^\/api\/v1\/admin\/roles\/([^/]+)$/);
+    if (adminRoleMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateRole(adminRoleMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/settings' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.getSettings()); return; }
+    if (path === '/api/v1/admin/settings' && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/analysis-tasks' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await recruiting.listAnalysisTasks(context.url.searchParams.get('status') ?? undefined)); return; }
+    if (path === '/api/v1/admin/audit-logs' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await adminService.listAuditLogs(Number(context.url.searchParams.get('limit') ?? '50'))); return; }
     if (path === '/api/v1/workflow-events' && method === 'GET') {
       const subjectTypeParam = context.url.searchParams.get('subjectType');
       const subjectType = subjectTypeParam === 'recruitment_request' || subjectTypeParam === 'job' || subjectTypeParam === 'offer' || subjectTypeParam === 'onboarding' || subjectTypeParam === 'candidate' || subjectTypeParam === 'application' || subjectTypeParam === 'interview' ? subjectTypeParam : undefined;
