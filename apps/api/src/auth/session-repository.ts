@@ -21,12 +21,13 @@ export class PostgresSessionRepository implements SessionRepository {
 
   async findUserByEmailPassword(email: string, password: string): Promise<SessionUser | undefined> {
     const result = await this.db.query<any>(
-      `SELECT u.id, u.display_name, u.email, u.password_hash, u.department_id,
+      `SELECT u.id, u.display_name, u.email, u.password_hash, u.department_id, d.code AS department_code,
               COALESCE((SELECT r.code FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id ORDER BY r.code LIMIT 1), 'recruiter') AS role
-         FROM users u WHERE lower(u.email) = lower($1) AND u.is_active = true LIMIT 1`, [email.trim()])
+         FROM users u LEFT JOIN departments d ON d.id = u.department_id
+        WHERE lower(u.email) = lower($1) AND u.is_active = true LIMIT 1`, [email.trim()])
     const row = result.rows[0]
     if (!row?.password_hash || !(await verifyPassword(password, row.password_hash))) return undefined
-    return { id: row.id, name: row.display_name, email: row.email, role: row.role, departmentId: row.department_id ?? '' }
+    return { id: row.id, name: row.display_name, email: row.email, role: row.role, departmentId: row.department_code ?? row.department_id ?? '' }
   }
 
   async createSession(user: SessionUser, ttlMs = TTL_MS, metadata: { userAgent?: string; ipAddress?: string } = {}) {
@@ -49,15 +50,16 @@ export class PostgresSessionRepository implements SessionRepository {
     if (!token) return undefined
     const result = await this.db.query<any>(
       `SELECT s.id, s.user_id, s.token_hash, s.created_at, s.expires_at, s.last_seen_at,
-              u.name, u.email, COALESCE(ur.role, 'recruiter') AS role, u.department_id
+              u.display_name AS name, u.email, COALESCE(ur.role, 'recruiter') AS role, u.department_id, d.code AS department_code
          FROM sessions s JOIN users u ON u.id = s.user_id
+         LEFT JOIN departments d ON d.id = u.department_id
          LEFT JOIN LATERAL (SELECT r.code AS role FROM user_roles x JOIN roles r ON r.id = x.role_id WHERE x.user_id = u.id ORDER BY r.code LIMIT 1) ur ON true
         WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
         LIMIT 1`, [hash(token)])
     const row = result.rows[0]
     if (!row) return undefined
     await this.db.query('UPDATE sessions SET last_seen_at = now() WHERE id = $1::uuid', [row.id])
-    const user: SessionUser = { id: row.user_id, name: row.name, email: row.email, role: row.role, departmentId: row.department_id }
+    const user: SessionUser = { id: row.user_id, name: row.name, email: row.email, role: row.role, departmentId: row.department_code ?? row.department_id ?? '' }
     return { sessionId: row.id, userId: row.user_id, tokenHash: row.token_hash, createdAt: iso(row.created_at), expiresAt: iso(row.expires_at), lastSeenAt: new Date().toISOString(), user }
   }
 
