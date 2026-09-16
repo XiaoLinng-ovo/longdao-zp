@@ -2,6 +2,21 @@ data/state.json
 data/*.tmp
 data/api-state.json
 data/api-state.json.*.tmp
+data/auth-sessions.json*
+data/_probe.txt
+data/resumes/quarantine/
+apps/api/data/auth-sessions.json*
+apps/api/data/*.tmp
+*.log
+*.bak
+*_current.txt
+*_typecheck.out
+_*.diff
+patch-*.mjs
+patch-*.ps1
+inspect-*.mjs
+generate-test-resume.mjs
+测试简历*.docx
 node_modules/
 
 .env
