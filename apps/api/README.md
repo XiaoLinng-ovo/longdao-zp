@@ -124,3 +124,51 @@ TypeScript 和 Node 类型声明已经记录在 `apps/api/package.json`，本次
 - `me` 应在 Phase 2 接入服务端 Session、RBAC、CSRF 和 Origin 校验。
 - 路由层只做 HTTP 映射，招聘需求、岗位、候选人和申请等业务规则应放入后续领域模块。
 - 整体状态 JSON 接口已移除；所有业务写入必须通过 `/api/v1` 领域接口完成。
+
+## 列表分页结构
+
+所有列表接口（需求、岗位、候选人、申请、面试、Offer、入职、简历、分析任务/结果、候选标签）统一走 `routes.ts` 的 `sendList`：
+
+- 不传 `page` / `pageSize`：`data` 仍是数组（保持旧客户端兼容），不返回 `meta`。
+- 传参：`data = { items, total, page, pageSize }`，同时给出 `meta.pagination = { page, pageSize, total, totalPages }`，与 `packages/contracts` 的 `PaginationMeta` 同形。
+- 校验：`page` 必须 ≥ 1 的整数，`pageSize` 必须为 1–100 的整数，否则 `400 VALIDATION_ERROR`；只给 `pageSize` 时 `page` 默认 1；越界页返回空 `items` 而不是报错。
+
+```bash
+curl -H "authorization: <token>" "http://127.0.0.1:3100/api/v1/candidates?page=2&pageSize=20"
+# { "ok": true, "data": { "items": [...], "total": 41, "page": 2, "pageSize": 20 },
+#   "meta": { "pagination": { "page": 2, "pageSize": 20, "total": 41, "totalPages": 3 } },
+#   "requestId": "..." }
+```
+
+## 部门数据范围（DataScope）
+
+只有「招聘需求 / 岗位」自带 `departmentId`；候选人主档、申请、面试、Offer、入职归档、简历都没有部门字段，其归属一律沿 `岗位.departmentId → 申请.jobId → 下游对象` 推断（实现见 `recruiting/service.ts` 的 `filterStateByDepartment`，列表/报表/看板共用同一口径）。
+
+- `recruiter / admin / hr_admin` 不受限；`hiring_manager` 只看本部门链路内的数据。
+- 列表接口按范围过滤（`listCandidates / listApplications / listInterviews / listOffers / listOnboarding / listResumes` 均接受 `departmentId`）。
+- 详情与写操作在 `routes.ts` 里先做越权断言，命中他部门数据返回 `403 FORBIDDEN`：`assertCandidateInScope / assertApplicationInScope / assertInterviewInScope / assertOfferInScope / assertOnboardingInScope`（分别覆盖候选人读取与修改、申请状态变更、面试读取与反馈/结论、Offer 全部动作、入职归档读取与推进）。
+- `/api/v1/reports` 与 `/api/v1/dashboard/summary` 的聚合口径同步收敛，避免从报表侧看到他部门漏斗。
+
+## 幂等写接口（Idempotency-Key）
+
+写请求（POST/PATCH/PUT/DELETE）可带 `Idempotency-Key`，中间件实现在 `src/idempotency.ts`，管线位置在鉴权之后、路由之前（见 `src/server.ts`）：
+
+| 场景 | 行为 |
+| --- | --- |
+| 首次请求 | 正常执行，2xx 后记录 `{ key, 指纹, 状态码, 响应 }` |
+| 同键 + 同请求（method + path + 操作人 + 请求体哈希） | 直接回放原响应，附响应头 `idempotency-replay: true`，不重复写库 |
+| 同键 + 不同请求 | `409 IDEMPOTENCY_KEY_REUSED` |
+| 键格式非法（非 8–128 位 `[A-Za-z0-9._:-]`） | `400 IDEMPOTENCY_KEY_INVALID` |
+| 首次请求返回非 2xx | 不落记录，同键可安全重试 |
+| 不带该头 | 行为完全不变 |
+
+- 请求体统一由 `src/body.ts` 的 `readBody` 读取并缓存（1 MB 上限），因此指纹与路由内 `readJson` 使用同一份解析结果。
+- 可调参数在 `src/idempotency.ts` 顶部：`DEFAULT_IDEMPOTENCY_TTL_MS`（默认 24h）、`DEFAULT_IDEMPOTENCY_MAX_ENTRIES`（默认 1000）、`IDEMPOTENCY_ENABLED=false` 可整体关闭；`/api/v1/auth/*` 与 GET/HEAD 不参与幂等。
+- 当前为单进程内存实现（`MemoryIdempotencyStore`），重启即失效；多实例/需持久化时替换为 PostgreSQL 实现（唯一键 + 指纹 + 响应体），中间件与调用方无需改动。
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/v1/candidates \
+  -H "authorization: <token>" -H "content-type: application/json" \
+  -H "idempotency-key: 5b1f0c2e-9a44-4c31-8f2a-7c0d1e2f3a4b" \
+  -d '{"fullName":"张三"}'
+```
