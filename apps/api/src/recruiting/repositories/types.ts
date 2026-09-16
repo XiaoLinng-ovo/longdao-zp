@@ -144,6 +144,68 @@ export type ApplicationUpdateInput = Partial<Pick<ApplicationCreateInput, 'statu
   withdrawnAt?: string | null
 }
 
+export interface ResumeRecord {
+  id: string; candidateId: string; applicationId: string | null; storageKey: string; originalFilename: string; mimeType: string; sizeBytes: number; scanStatus: string; contentHash: string | null; createdAt: string
+}
+
+export interface ResumeCreateInput { id?: string; candidateId: string; applicationId?: string | null; storageKey: string; originalFilename: string; mimeType: string; sizeBytes: number; contentHash: string; scanStatus?: string }
+
+export interface RecruitmentApprovalInstanceRecord {
+  id: string
+  entityType: 'recruitment_request'
+  entityId: string
+  version: number
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface RecruitmentApprovalStepRecord {
+  id: string
+  instanceId: string
+  order: number
+  name: string
+  approverRole: string
+  status: 'pending' | 'approved' | 'rejected'
+  actedAt?: string
+}
+
+export interface RecruitmentApprovalAuditRecord {
+  id: string
+  instanceId: string
+  stepId: string
+  actorId: string
+  action: 'approve' | 'reject'
+  comment?: string
+  createdAt: string
+}
+
+export interface AnalysisTaskRecord {
+  id: string
+  resumeId: string
+  applicationId: string | null
+  status: string
+  attempts: number
+  idempotencyKey: string
+  lastError: string | null
+  availableAt: string
+  startedAt: string | null
+  completedAt: string | null
+  createdAt: string
+}
+
+export interface AnalysisResultRecord {
+  id: string
+  analysisTaskId: string
+  resumeId: string
+  applicationId: string | null
+  result: Record<string, unknown>
+  analyzerVersion: string | null
+  inputHash: string | null
+  humanReviewStatus: string
+  createdAt: string
+}
+
 export interface RepositoryOptions {
   /** Used when a legacy id has no corresponding row in a *_no column. */
   generatedBusinessId?: (prefix: string) => string

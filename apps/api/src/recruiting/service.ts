@@ -5,6 +5,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalRecruitingStore } from './store.js'
 import { createRecruitingStore } from './postgres-store.js'
+import { createNormalizedRecruitingRepository, type NormalizedRecruitingRepository } from './repositories/postgres-repository.js'
+import type { AnalysisTaskRecord as RepositoryAnalysisTask, AnalysisResultRecord as RepositoryAnalysisResult, JobRecord as RepositoryJob } from './repositories/types.js'
 import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, ApprovalAuditRecord, ApprovalInstanceRecord, ApprovalRecord, ApprovalStepRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord } from './types.js'
 import { RecruitingWorkflowError, transitionJob, transitionRequest } from './workflow.js'
 
@@ -173,6 +175,18 @@ function buildJobRequirements(job: JobRecord | undefined, jobId?: string) {
   return { ...(jobKey ? { jobId: jobKey } : {}), title: spec?.title ?? job?.title ?? '未命名岗位', ...(summary ? { summary } : {}), requirements: [...requirements, ...skills] }
 }
 
+function mapRepositoryAnalysisTask(item: RepositoryAnalysisTask): AnalysisTaskRecord {
+  return { id: item.id, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), status: item.status as AnalysisTaskRecord['status'], attempts: item.attempts, idempotencyKey: item.idempotencyKey, ...(item.lastError ? { lastError: item.lastError } : {}), availableAt: item.availableAt, ...(item.startedAt ? { startedAt: item.startedAt } : {}), ...(item.completedAt ? { completedAt: item.completedAt } : {}), createdAt: item.createdAt }
+}
+
+function mapRepositoryAnalysisResult(item: RepositoryAnalysisResult): AnalysisResultRecord {
+  return { id: item.id, analysisTaskId: item.analysisTaskId, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), result: item.result, analyzerVersion: item.analyzerVersion ?? 'unknown', inputHash: item.inputHash ?? '', humanReviewStatus: item.humanReviewStatus as AnalysisResultRecord['humanReviewStatus'], createdAt: item.createdAt }
+}
+
+function mapRepositoryJobForAnalysis(item: RepositoryJob): JobRecord {
+  return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
+}
+
 function requestInput(input: CreateRecruitmentRequestInput): RecruitmentRequestRecord {
   const timestamp = LocalRecruitingStore.timestamp()
   return {
@@ -196,19 +210,45 @@ function jobInput(input: CreateJobInput, request: RecruitmentRequestRecord): Job
 }
 
 export class RecruitingService {
-  constructor(private readonly store = createRecruitingStore(), private readonly quarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT || resolve(process.cwd(), '../../data/resumes/quarantine')) {}
+  private readonly repository: NormalizedRecruitingRepository | undefined
+  private readonly store!: ReturnType<typeof createRecruitingStore>
+  constructor(store?: ReturnType<typeof createRecruitingStore>, private readonly quarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT || resolve(process.cwd(), '../../data/resumes/quarantine')) {
+    if (process.env.NODE_ENV === 'test') {
+      this.store = store ?? createRecruitingStore()
+      this.repository = undefined
+    } else {
+      this.repository = createNormalizedRecruitingRepository()
+    }
+  }
+
+  private mapRepositoryRequest(item: import('./repositories/types.js').RecruitmentRequestRecord): RecruitmentRequestRecord {
+    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId ?? '', department: item.departmentName ?? item.departmentId ?? '', requesterId: item.requestedById ?? '', headcount: item.headcount, employmentType: 'full_time', workMode: 'onsite', ...(item.budgetMin === null && item.budgetMax === null ? {} : { salaryRange: { ...(item.budgetMin === null ? {} : { min: { amount: item.budgetMin, currency: 'CNY' } }), ...(item.budgetMax === null ? {} : { max: { amount: item.budgetMax, currency: 'CNY' } }) } }), justification: item.reason, status: item.status as RecruitmentRequestRecord['status'], approval: { status: item.status === 'approved' ? 'approved' : item.status === 'rejected' ? 'rejected' : 'pending', approver: '' }, convertedJobIds: [], version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  private mapRepositoryJob(item: import('./repositories/types.js').JobRecord): JobRecord {
+    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
 
   async listRequests(status?: string, departmentId?: string): Promise<RecruitmentRequestRecord[]> {
+    if (this.repository) {
+      const rows = await this.repository.listRecruitmentRequests(status)
+      return rows.filter((item) => !departmentId || item.departmentId === departmentId).map((item) => this.mapRepositoryRequest(item))
+    }
     const state = await this.store.read()
     return state.recruitmentRequests.filter((item) => (!status || item.status === status) && (!departmentId || item.departmentId === departmentId))
   }
 
   async getRequest(id: string): Promise<RecruitmentRequestRecord> {
+    if (this.repository) return this.mapRepositoryRequest(await this.repository.getRecruitmentRequest(id))
     const state = await this.store.read()
     return requestOrThrow(state, id)
   }
 
   async createRequest(input: CreateRecruitmentRequestInput, actorId = 'user-demo'): Promise<RecruitmentRequestRecord> {
+    if (this.repository) {
+      const row = await this.repository.createRecruitmentRequest({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, requestedById: actorId, headcount: positiveInteger(input.headcount, '招聘人数'), budgetMin: input.salaryRange?.min?.amount ?? null, budgetMax: input.salaryRange?.max?.amount ?? null, reason: input.justification, status: 'draft' })
+      return this.mapRepositoryRequest(row)
+    }
     return this.store.transaction((state) => {
       const request = requestInput(input)
       request.requesterId = actorId
@@ -220,6 +260,12 @@ export class RecruitingService {
   }
 
   async updateRequest(id: string, input: UpdateRecruitmentRequestInput, actorId = 'user-demo'): Promise<RecruitmentRequestRecord> {
+    if (this.repository) {
+      const current = await this.repository.getRecruitmentRequest(id)
+      if (current.status !== 'draft' && current.status !== 'rejected') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_EDITABLE', '只有草稿或已驳回需求可以编辑')
+      const row = await this.repository.updateRecruitmentRequest(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '招聘人数') }), ...(input.justification === undefined ? {} : { reason: input.justification }), ...(input.salaryRange?.min ? { budgetMin: input.salaryRange.min.amount } : {}), ...(input.salaryRange?.max ? { budgetMax: input.salaryRange.max.amount } : {}), version: current.version + 1 })
+      return this.mapRepositoryRequest(row)
+    }
     return this.store.transaction((state) => {
       const request = requestOrThrow(state, id)
       if (request.status !== 'draft' && request.status !== 'rejected') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_EDITABLE', '只有草稿或已驳回需求可以编辑')
@@ -233,6 +279,10 @@ export class RecruitingService {
   }
 
   async requestAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<RecruitmentRequestRecord> {
+    if (this.repository && ['submit', 'resubmit', 'approve', 'reject'].includes(action)) {
+      const row = await this.repository.requestApprovalAction(id, action as 'submit' | 'resubmit' | 'approve' | 'reject', actorId, reason === undefined ? undefined : clean(reason))
+      return this.mapRepositoryRequest(row)
+    }
     return this.store.transaction((state) => {
       const request = requestOrThrow(state, id)
       const fromStatus = request.status
@@ -266,6 +316,15 @@ export class RecruitingService {
   }
 
   async getRequestApproval(id: string): Promise<{ current: ApprovalInstanceRecord | null; steps: ApprovalStepRecord[]; records: ApprovalAuditRecord[] }> {
+    if (this.repository) {
+      await this.repository.getRecruitmentRequest(id)
+      const approval = await this.repository.getRecruitmentRequestApproval(id)
+      return {
+        current: approval.current ? { id: approval.current.id, entityType: 'recruitment_request', entityId: approval.current.entityId, version: approval.current.version, status: approval.current.status, createdAt: approval.current.createdAt, updatedAt: approval.current.updatedAt } : null,
+        steps: approval.steps.map((item) => ({ id: item.id, instanceId: item.instanceId, order: item.order, name: item.name, approverRole: item.approverRole, status: item.status, ...(item.actedAt ? { actedAt: item.actedAt } : {}) })),
+        records: approval.records.map((item) => ({ id: item.id, instanceId: item.instanceId, stepId: item.stepId, actorId: item.actorId, action: item.action, ...(item.comment ? { comment: item.comment } : {}), createdAt: item.createdAt })),
+      }
+    }
     const state = await this.store.read()
     requestOrThrow(state, id)
     const instances = state.approvalInstances.filter((item) => item.entityType === 'recruitment_request' && item.entityId === id).sort((a, b) => b.version - a.version)
@@ -277,16 +336,25 @@ export class RecruitingService {
   }
 
   async listJobs(status?: string, recruitmentRequestId?: string, departmentId?: string): Promise<JobRecord[]> {
+    if (this.repository) {
+      const rows = await this.repository.listJobs(status, recruitmentRequestId)
+      return rows.filter((item) => !departmentId || item.departmentId === departmentId).map((item) => this.mapRepositoryJob(item))
+    }
     const state = await this.store.read()
     return state.jobs.filter((item) => (!status || item.status === status) && (!recruitmentRequestId || item.recruitmentRequestId === recruitmentRequestId) && (!departmentId || item.departmentId === departmentId))
   }
 
   async getJob(id: string): Promise<JobRecord> {
+    if (this.repository) return this.mapRepositoryJob(await this.repository.getJob(id))
     const state = await this.store.read()
     return jobOrThrow(state, id)
   }
 
   async createJob(input: CreateJobInput, actorId = 'user-demo'): Promise<JobRecord> {
+    if (this.repository) {
+      const row = await this.repository.createJob({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, recruitmentRequestId: input.recruitmentRequestId, headcount: positiveInteger(input.headcount, '岗位人数'), status: 'draft', createdById: actorId })
+      return this.mapRepositoryJob(row)
+    }
     return this.store.transaction((state) => {
       const request = requestOrThrow(state, required(input.recruitmentRequestId, '招聘需求'))
       if (request.status !== 'approved' && request.status !== 'converted') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_APPROVED', '只有审批通过的招聘需求才能创建岗位')
@@ -301,6 +369,10 @@ export class RecruitingService {
   }
 
   async updateJob(id: string, input: UpdateJobInput, actorId = 'user-demo'): Promise<JobRecord> {
+    if (this.repository) {
+      const row = await this.repository.updateJob(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '岗位人数') }) })
+      return this.mapRepositoryJob(row)
+    }
     return this.store.transaction((state) => {
       const job = jobOrThrow(state, id)
       if (job.status === 'closed') throw new RecruitingWorkflowError('JOB_NOT_EDITABLE', '已关闭岗位不能编辑')
@@ -377,6 +449,11 @@ export class RecruitingService {
   }
 
   async listCandidates(): Promise<Array<CandidateRecord & { applications: ApplicationRecord[] }>> {
+    if (this.repository) {
+      const candidates = await this.repository.listCandidates()
+      const applications = await this.repository.listApplications()
+      return candidates.map((item) => ({ id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.filter((app) => app.candidateId === item.id).map((app) => ({ id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(app.source ? { source: app.source } : {}), aiStatus: 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt })) }))
+    }
     const state = await this.store.read()
     return state.candidates.map((candidate) => ({ ...candidate, applications: state.applications.filter((application) => application.candidateId === candidate.id) }))
   }
@@ -387,6 +464,11 @@ export class RecruitingService {
   }
 
   async getCandidate(id: string): Promise<CandidateRecord & { applications: ApplicationRecord[]; resumes: ResumeRecord[]; analysisTasks: AnalysisTaskRecord[]; analysisResults: AnalysisResultRecord[]; jobs: Array<{ id: string; code: string; title: string }> }> {
+    if (this.repository) {
+      const item = await this.repository.getCandidate(id)
+      const applications = await this.repository.listApplications(item.id)
+      return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.map((app) => ({ id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], aiStatus: 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt })), resumes: [], analysisTasks: [], analysisResults: [], jobs: [] }
+    }
     const state = await this.store.read()
     const candidate = candidateOrThrow(state, id)
     const applications = state.applications.filter((application) => application.candidateId === id)
@@ -401,6 +483,10 @@ export class RecruitingService {
   }
 
   async createCandidate(input: CreateCandidateInput, actorId = 'user-demo'): Promise<CandidateRecord> {
+    if (this.repository) {
+      const item = await this.repository.createCandidate({ name: required(input.fullName, '候选人姓名'), ...(input.email ? { email: input.email } : {}), ...(input.phone ? { phone: input.phone } : {}), ...(input.source ? { source: input.source } : {}), consentStatus: 'unknown' })
+      return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: 'active', createdAt: item.createdAt, updatedAt: item.updatedAt }
+    }
     return this.store.transaction((state) => {
       const tags = normalizeTags(input.tags)
       const candidate: CandidateRecord = { id: randomUUID(), code: `CAN-${state.nextCandidateNumber++}`, fullName: required(input.fullName, '候选人姓名'), ...(input.email ? { email: clean(input.email) } : {}), ...(input.phone ? { phone: clean(input.phone) } : {}), ...(input.source ? { source: clean(input.source) } : {}), ...(tags ? { tags } : {}), status: 'active', createdAt: LocalRecruitingStore.timestamp(), updatedAt: LocalRecruitingStore.timestamp() }
@@ -411,6 +497,10 @@ export class RecruitingService {
   }
 
   async updateCandidate(id: string, input: UpdateCandidateInput, actorId = 'user-demo'): Promise<CandidateRecord> {
+    if (this.repository) {
+      const item = await this.repository.updateCandidate(id, { ...(input.fullName === undefined ? {} : { name: input.fullName }), ...(input.email === undefined ? {} : { email: input.email }), ...(input.phone === undefined ? {} : { phone: input.phone }), ...(input.source === undefined ? {} : { source: input.source }), ...(input.status === undefined ? {} : { consentStatus: input.status }) })
+      return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt }
+    }
     return this.store.transaction((state) => {
       const candidate = candidateOrThrow(state, id)
       const fromStatus = candidate.status
@@ -436,6 +526,10 @@ export class RecruitingService {
   }
 
   async createApplication(input: CreateApplicationInput, actorId = 'user-demo'): Promise<ApplicationRecord> {
+    if (this.repository) {
+      const item = await this.repository.createApplication({ candidateId: required(input.candidateId, '候选人'), jobId: required(input.jobId, '岗位'), ...(input.source ? { source: input.source } : {}) })
+      return { id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, updatedAt: item.updatedAt }
+    }
     return this.store.transaction((state) => {
       candidateOrThrow(state, required(input.candidateId, '候选人'))
       jobOrThrow(state, required(input.jobId, '岗位'))
@@ -449,6 +543,10 @@ export class RecruitingService {
   }
 
   async listApplications(candidateId?: string, jobId?: string): Promise<ApplicationRecord[]> {
+    if (this.repository) {
+      const rows = await this.repository.listApplications(candidateId, jobId)
+      return rows.map((item) => ({ id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, updatedAt: item.updatedAt }))
+    }
     const state = await this.store.read()
     return state.applications.filter((item) => (!candidateId || item.candidateId === candidateId) && (!jobId || item.jobId === jobId))
   }
@@ -537,6 +635,14 @@ export class RecruitingService {
   }
 
   async updateApplicationStatus(id: string, status: ApplicationRecord['status'], reason?: unknown, actorId = 'user-demo'): Promise<ApplicationRecord> {
+    if (this.repository) {
+      const current = await this.repository.getApplication(id)
+      const allowed: Record<string, string[]> = { pending_analysis: ['analysis_queued', 'rejected'], analysis_queued: ['human_review', 'rejected'], human_review: ['interviewing', 'rejected'], interviewing: ['offer_approval', 'rejected'], offer_approval: ['offer_sent', 'offer_cancelled'], offer_sent: ['offer_accepted', 'offer_declined', 'offer_expired'], offer_accepted: ['onboarding_archived'] }
+      if (!(allowed[current.status] ?? []).includes(status)) throw new RecruitingWorkflowError('APPLICATION_INVALID_TRANSITION', `申请状态 ${current.status} 不允许变更为 ${status}`)
+      const normalizedReason = reason === undefined ? undefined : required(reason, '原因')
+      const item = await this.repository.updateApplicationStatus(id, status, normalizedReason)
+      return { id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), ...(item.rejectedReason ? { rejectionReason: item.rejectedReason } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, updatedAt: item.updatedAt }
+    }
     return this.store.transaction((state) => {
       const application = applicationOrThrow(state, id)
       const allowed: Record<ApplicationRecord['status'], ApplicationRecord['status'][]> = { pending_analysis: ['analysis_queued', 'rejected'], analysis_queued: ['human_review', 'rejected'], human_review: ['interviewing', 'rejected'], interviewing: ['offer_approval', 'rejected'], offer_approval: ['offer_sent', 'offer_cancelled'], offer_sent: ['offer_accepted', 'offer_declined', 'offer_expired'], offer_accepted: ['onboarding_archived'], onboarding_archived: [], rejected: [], offer_declined: [], offer_cancelled: [], offer_expired: [] }
@@ -550,6 +656,7 @@ export class RecruitingService {
   }
 
   async listResumes(candidateId?: string, applicationId?: string): Promise<ResumeRecord[]> {
+    if (this.repository) return (await this.repository.listResumes(candidateId, applicationId)).map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt }))
     const state = await this.store.read()
     return state.resumes.filter((item) => (!candidateId || item.candidateId === candidateId) && (!applicationId || item.applicationId === applicationId))
   }
@@ -562,6 +669,18 @@ export class RecruitingService {
     const encoding = input.encoding === 'base64' ? 'base64' : 'utf8'
     const payload = encoding === 'base64' ? Buffer.from(rawContent, 'base64') : Buffer.from(rawContent, 'utf8')
     if (payload.length > 10 * 1024 * 1024) throw new RecruitingWorkflowError('RESUME_TOO_LARGE', '简历文件不能超过 10 MB', 413)
+    if (this.repository) {
+      await this.repository.getCandidate(candidateId)
+      if (input.applicationId) {
+        const application = await this.repository.getApplication(input.applicationId)
+        if (application.candidateId !== candidateId) throw new RecruitingWorkflowError('RESUME_CANDIDATE_MISMATCH', '简历与申请的候选人不一致')
+      }
+      const id = randomUUID(); const hash = contentHashBuffer(payload); const storageKey = `${id}.${resumeExtension(filename, mimeType)}`
+      await mkdir(this.quarantineRoot, { recursive: true }); await writeFile(resolve(this.quarantineRoot, storageKey), payload)
+      const saved = await this.repository.createResume({ id, candidateId, ...(input.applicationId ? { applicationId: input.applicationId } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash })
+      const queued = await this.repository.createAnalysisTask({ resumeId: saved.id, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), idempotencyKey: `resume-analysis:${saved.id}:${hash}` })
+      return { resume: { id: saved.id, candidateId: saved.candidateId, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), storageKey: saved.storageKey, originalFilename: saved.originalFilename, mimeType: saved.mimeType, sizeBytes: saved.sizeBytes, contentHash: saved.contentHash ?? hash, scanStatus: saved.scanStatus as ResumeRecord['scanStatus'], createdAt: saved.createdAt }, task: { id: queued.id, resumeId: queued.resumeId, ...(queued.applicationId ? { applicationId: queued.applicationId } : {}), status: queued.status as AnalysisTaskRecord['status'], attempts: queued.attempts, idempotencyKey: queued.idempotencyKey, availableAt: queued.availableAt, createdAt: queued.createdAt } }
+    }
     return this.store.transaction(async (state) => {
       const candidate = candidateOrThrow(state, candidateId)
       let application: ApplicationRecord | undefined
@@ -585,6 +704,9 @@ export class RecruitingService {
   }
 
   async getAnalysisTask(id: string): Promise<AnalysisTaskRecord> {
+    if (this.repository) {
+      try { return mapRepositoryAnalysisTask(await this.repository.getAnalysisTask(id)) } catch (error) { if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'REPOSITORY_NOT_FOUND') throw new RecruitingNotFoundError(`未找到分析任务：${id}`); throw error }
+    }
     const state = await this.store.read()
     const task = state.analysisTasks.find((item) => item.id === id)
     if (!task) throw new RecruitingNotFoundError(`未找到分析任务：${id}`)
@@ -592,16 +714,21 @@ export class RecruitingService {
   }
 
   async listAnalysisTasks(status?: string): Promise<AnalysisTaskRecord[]> {
+    if (this.repository) return (await this.repository.listAnalysisTasks(status)).map(mapRepositoryAnalysisTask)
     const state = await this.store.read()
     return state.analysisTasks.filter((item) => !status || item.status === status)
   }
 
   async listAnalysisResults(resumeId?: string, applicationId?: string): Promise<AnalysisResultRecord[]> {
+    if (this.repository) return (await this.repository.listAnalysisResults(resumeId, applicationId)).map(mapRepositoryAnalysisResult)
     const state = await this.store.read()
     return state.analysisResults.filter((item) => (!resumeId || item.resumeId === resumeId) && (!applicationId || item.applicationId === applicationId))
   }
 
   async getAnalysisResult(taskId: string): Promise<AnalysisResultRecord> {
+    if (this.repository) {
+      try { return mapRepositoryAnalysisResult(await this.repository.getAnalysisResultByTask(taskId)) } catch (error) { if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'REPOSITORY_NOT_FOUND') throw new RecruitingNotFoundError(`未找到分析结果：${taskId}`); throw error }
+    }
     const state = await this.store.read()
     const result = state.analysisResults.find((item) => item.analysisTaskId === taskId)
     if (!result) throw new RecruitingNotFoundError(`未找到分析结果：${taskId}`)
@@ -609,6 +736,9 @@ export class RecruitingService {
   }
 
   async getAnalysisResultById(id: string): Promise<AnalysisResultRecord> {
+    if (this.repository) {
+      try { return mapRepositoryAnalysisResult(await this.repository.getAnalysisResult(id)) } catch (error) { if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'REPOSITORY_NOT_FOUND') throw new RecruitingNotFoundError(`未找到分析结果：${id}`); throw error }
+    }
     const state = await this.store.read()
     const result = state.analysisResults.find((item) => item.id === id)
     if (!result) throw new RecruitingNotFoundError(`未找到分析结果：${id}`)
@@ -616,6 +746,13 @@ export class RecruitingService {
   }
 
   async reviewAnalysisResult(id: string, input: { status: AnalysisResultRecord['humanReviewStatus']; comment?: string; reviewedBy?: string }, actorId = 'user-demo'): Promise<AnalysisResultRecord> {
+    if (this.repository) {
+      if (!['accepted', 'needs_correction'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '复核状态必须是 accepted 或 needs_correction', 400)
+      const current = await this.repository.getAnalysisResult(id)
+      const report = current.result as { humanReview?: Record<string, unknown> }
+      report.humanReview = { ...(report.humanReview ?? {}), status: input.status, ...(input.comment ? { comment: clean(input.comment) } : {}), reviewedBy: clean(input.reviewedBy) || actorId, reviewedAt: new Date().toISOString() }
+      return mapRepositoryAnalysisResult(await this.repository.reviewAnalysisResult(id, input.status, current.result))
+    }
     return this.store.transaction((state) => {
       const result = state.analysisResults.find((item) => item.id === id)
       if (!result) throw new RecruitingNotFoundError(`未找到分析结果：${id}`)
@@ -628,6 +765,25 @@ export class RecruitingService {
   }
 
   async processAnalysisTask(taskId: string): Promise<AnalysisTaskRecord> {
+    if (this.repository) {
+      let task: RepositoryAnalysisTask
+      try { task = await this.repository.getAnalysisTask(taskId) } catch (error) { if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'REPOSITORY_NOT_FOUND') throw new RecruitingNotFoundError(`未找到分析任务：${taskId}`); throw error }
+      if (task.status === 'completed') return mapRepositoryAnalysisTask(task)
+      if (task.status === 'processing') throw new RecruitingWorkflowError('ANALYSIS_TASK_BUSY', '分析任务正在处理中', 409)
+      const startedAt = new Date().toISOString()
+      const processing = await this.repository.updateAnalysisTask(taskId, { status: 'processing', attempts: task.attempts + 1, startedAt, lastError: null })
+      try {
+        const resume = await this.repository.getResume(processing.resumeId)
+        const application = processing.applicationId ? await this.repository.getApplication(processing.applicationId) : undefined
+        const job = application ? await this.repository.getJob(application.jobId) : undefined
+        const content = await readFile(resolve(this.quarantineRoot, resume.storageKey), 'utf8')
+        const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: resume.originalFilename, mimeType: resume.mimeType, text: content, source: 'upload' }, job: buildJobRequirements(job ? mapRepositoryJobForAnalysis(job) : undefined, job?.id) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), ...(job ? { jobId: job.id } : {}) } })
+        await this.repository.createAnalysisResult({ analysisTaskId: processing.id, resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), result: report as unknown as Record<string, unknown>, analyzerVersion: 'resume-intelligence-rule-based-0.1.0', inputHash: resume.contentHash })
+        return mapRepositoryAnalysisTask(await this.repository.updateAnalysisTask(taskId, { status: 'completed', completedAt: new Date().toISOString(), lastError: null }))
+      } catch (error) {
+        return mapRepositoryAnalysisTask(await this.repository.updateAnalysisTask(taskId, { status: 'failed', lastError: error instanceof Error ? error.message : '分析失败' }))
+      }
+    }
     return this.store.transaction(async (state) => {
       const task = taskOrThrow(state, taskId)
       if (task.status === 'completed') return task

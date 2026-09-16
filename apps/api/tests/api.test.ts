@@ -5,13 +5,14 @@ import { loadConfig } from '../src/config.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buildAuthCookie, buildCsrfCookie, readCookie } from '../src/auth/security.js';
 
 let server: ReturnType<typeof import('../src/server.js').createHttpServer>;
 let baseUrl: string;
 let testDirectory: string;
 let authHeader: Record<string, string> = {};
-const previousStorePath = process.env.RECRUITING_STORE_PATH;
 const previousQuarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT;
+const previousNodeEnv = process.env.NODE_ENV;
 
 function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
   return new Promise((resolve, reject) => {
@@ -33,12 +34,12 @@ function get(path: string, headers: Record<string, string> = {}): Promise<{ stat
   });
 }
 
-function requestJson(method: string, path: string, payload?: unknown): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
+function requestJson(method: string, path: string, payload?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl)
     const requestInstance = request(url, {
       method,
-      headers: { ...authHeader, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
+      headers: { ...authHeader, ...headers, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
     }, (response) => {
       const chunks: Buffer[] = []
       response.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -66,8 +67,8 @@ async function login(): Promise<void> {
 }
 
 before(async () => {
+  process.env.NODE_ENV = 'test';
   testDirectory = await mkdtemp(join(tmpdir(), 'recruiting-api-test-'));
-  process.env.RECRUITING_STORE_PATH = join(testDirectory, 'state.json');
   process.env.RECRUITING_QUARANTINE_ROOT = join(testDirectory, 'resumes');
   const { createHttpServer } = await import('../src/server.js');
   server = createHttpServer(loadConfig({ NODE_ENV: 'test', PORT: '0' }));
@@ -79,12 +80,132 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  if (previousStorePath === undefined) delete process.env.RECRUITING_STORE_PATH; else process.env.RECRUITING_STORE_PATH = previousStorePath;
   if (previousQuarantineRoot === undefined) delete process.env.RECRUITING_QUARANTINE_ROOT; else process.env.RECRUITING_QUARANTINE_ROOT = previousQuarantineRoot;
+  if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
   await rm(testDirectory, { recursive: true, force: true });
 });
 
 describe('Phase 1 API', { concurrency: false }, () => {
+  it('limits hiring managers to recruiting data in their department', async () => {
+    await loginAs('manager@smartrecruit.local', 'manager123');
+
+    const candidates = await get('/api/v1/candidates');
+    assert.equal(candidates.status, 200);
+    assert.deepEqual(candidates.body.data.map((item: { id: string }) => item.id), ['candidate-8821']);
+
+    const applications = await get('/api/v1/applications');
+    assert.equal(applications.status, 200);
+    assert.deepEqual(applications.body.data.map((item: { id: string }) => item.id), ['application-8821']);
+
+    const foreignCandidate = await get('/api/v1/candidates/candidate-8814');
+    assert.equal(foreignCandidate.status, 403);
+    assert.equal(foreignCandidate.body.error.code, 'FORBIDDEN');
+
+    const reports = await get('/api/v1/reports');
+    assert.equal(reports.status, 200);
+    assert.equal(reports.body.data.funnel[0].count, 1);
+    assert.deepEqual(reports.body.data.jobFilling.map((item: { jobId: string }) => item.jobId), ['job-108']);
+
+    await login();
+  });
+
+  it('paginates core recruiting lists while preserving unpaged array responses', async () => {
+    await login();
+    const paths = [
+      '/api/v1/recruitment-requests',
+      '/api/v1/jobs',
+      '/api/v1/candidates',
+      '/api/v1/applications',
+      '/api/v1/offers',
+    ];
+
+    for (const path of paths) {
+      const unpaged = await get(path);
+      assert.equal(unpaged.status, 200);
+      assert.ok(Array.isArray(unpaged.body.data));
+
+      const paged = await get(`${path}?page=2&pageSize=1`);
+      assert.equal(paged.status, 200);
+      assert.deepEqual(paged.body.data, {
+        items: unpaged.body.data.slice(1, 2),
+        total: unpaged.body.data.length,
+        page: 2,
+        pageSize: 1,
+      });
+    }
+  });
+
+  it('authenticates with the session cookie, exposes /me, and invalidates it on logout', async () => {
+    const previousAuth = authHeader;
+    authHeader = {};
+    const loginResponse = await requestJson('POST', '/api/v1/auth/login', {
+      email: 'recruiter@smartrecruit.local',
+      password: 'recruiter123',
+    });
+    assert.equal(loginResponse.status, 200);
+    const setCookies = loginResponse.headers['set-cookie'];
+    const cookies = Array.isArray(setCookies) ? setCookies : [setCookies];
+    const sessionCookie = cookies.find((value) => value?.startsWith('smartrecruit_session='))?.split(';')[0];
+    const csrfCookie = cookies.find((value) => value?.startsWith('smartrecruit_csrf='))?.split(';')[0];
+    assert.ok(sessionCookie, 'login must issue a session cookie');
+    assert.ok(csrfCookie, 'login must issue a CSRF cookie');
+
+    const me = await get('/api/v1/me', { cookie: `${sessionCookie}; ${csrfCookie}` });
+    assert.equal(me.status, 200);
+    assert.equal(me.body.data.user.email, 'recruiter@smartrecruit.local');
+    assert.equal(me.body.data.method, 'session');
+
+    const logout = await requestJson('POST', '/api/v1/auth/logout', undefined, { cookie: `${sessionCookie}; ${csrfCookie}` });
+    assert.equal(logout.status, 200);
+    assert.equal(logout.body.data.ok, true);
+
+    const afterLogout = await get('/api/v1/me', { cookie: `${sessionCookie}; ${csrfCookie}` });
+    assert.equal(afterLogout.status, 401);
+    assert.equal(afterLogout.body.error.code, 'AUTHENTICATION_REQUIRED');
+    authHeader = previousAuth;
+  });
+
+  it('uses __Host- cookies in production and parses their prefixed names', () => {
+    const authCookie = buildAuthCookie('session-token', { production: true });
+    const csrfCookie = buildCsrfCookie('csrf-token', { production: true });
+    assert.match(authCookie, /^__Host-smartrecruit_session=session-token;/);
+    assert.match(csrfCookie, /^__Host-smartrecruit_csrf=csrf-token;/);
+    assert.equal(readCookie(`${authCookie}; ${csrfCookie}`, 'smartrecruit_session', { production: true }), 'session-token');
+    assert.equal(readCookie(`${authCookie}; ${csrfCookie}`, 'smartrecruit_csrf', { production: true }), 'csrf-token');
+  });
+
+  it('enforces CSRF origin and token when REQUIRE_CSRF is enabled', async () => {
+    const previousRequire = process.env.REQUIRE_CSRF;
+    const previousOrigins = process.env.ALLOWED_ORIGINS;
+    process.env.REQUIRE_CSRF = 'true';
+    process.env.ALLOWED_ORIGINS = 'http://allowed.example.test';
+    try {
+      await login();
+      const payload = { title: 'CSRF 测试岗位', departmentId: '数据平台', headcount: 1, employmentType: 'full_time', workMode: 'hybrid', justification: 'csrf' };
+
+      const missingOrigin = await requestJson('POST', '/api/v1/recruitment-requests', payload);
+      assert.equal(missingOrigin.status, 403);
+      assert.equal(missingOrigin.body.error.code, 'CSRF_ORIGIN_MISMATCH');
+
+      const csrf = await get('/api/v1/auth/csrf');
+      assert.equal(csrf.status, 200);
+      const token = String(csrf.body.data.token);
+      const setCookie = csrf.headers['set-cookie'];
+      const csrfCookie = (Array.isArray(setCookie) ? setCookie : [setCookie]).find((value) => value?.startsWith('smartrecruit_csrf='))?.split(';')[0];
+      assert.ok(csrfCookie);
+
+      const missingToken = await requestJson('POST', '/api/v1/recruitment-requests', payload, { origin: 'http://allowed.example.test', cookie: csrfCookie! });
+      assert.equal(missingToken.status, 403);
+      assert.equal(missingToken.body.error.code, 'CSRF_TOKEN_INVALID');
+
+      const valid = await requestJson('POST', '/api/v1/recruitment-requests', payload, { origin: 'http://allowed.example.test', cookie: csrfCookie!, 'x-csrf-token': token });
+      assert.equal(valid.status, 201);
+    } finally {
+      authHeader = {};
+      if (previousRequire === undefined) delete process.env.REQUIRE_CSRF; else process.env.REQUIRE_CSRF = previousRequire;
+      if (previousOrigins === undefined) delete process.env.ALLOWED_ORIGINS; else process.env.ALLOWED_ORIGINS = previousOrigins;
+    }
+  });
   it('returns a request id and health data', async () => {
     const response = await get('/api/v1/health', { 'x-request-id': 'test-request-001' });
     assert.equal(response.status, 200);
@@ -475,6 +596,25 @@ describe('Phase 1 API', { concurrency: false }, () => {
       assert.equal(item.actorId, expectedActorId, `offer audit action ${item.action} should capture authenticated actor`)
     }
   })
-});
+  });
+
+  it('rejects stale If-Match versions before mutating a recruitment request', async () => {
+    await login();
+    const requests = await get('/api/v1/recruitment-requests');
+    const request = requests.body.data.find((item: any) => item.status === 'draft');
+    assert.ok(request);
+
+    const response = await requestJson(
+      'PATCH',
+      `/api/v1/recruitment-requests/${request.id}`,
+      { title: '不应写入的并发修改' },
+      { 'if-match': `"${request.version + 1}"` },
+    );
+
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, 'VERSION_CONFLICT');
+    const after = await get(`/api/v1/recruitment-requests/${request.id}`);
+    assert.notEqual(after.body.data.title, '不应写入的并发修改');
+  });
 
 

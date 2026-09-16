@@ -5,6 +5,7 @@ import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { authService } from './auth/middleware.js';
 import type { Role } from './auth/types.js';
+import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
 
 const recruiting = new RecruitingService();
 const AUTH_COOKIE = 'smartrecruit_session';
@@ -86,6 +87,37 @@ function requireAuth(context: Parameters<Middleware>[0], roles: Role[] = DEFAULT
   return context.auth!;
 }
 
+function parseIfMatch(context: Parameters<Middleware>[0]): number | undefined {
+  const raw = context.req.headers['if-match']
+  if (Array.isArray(raw) || raw === undefined) return undefined
+  const value = raw.trim().replace(/^W\//, '').replace(/^"|"$/g, '')
+  if (!/^\d+$/.test(value)) throw new HttpError(400, 'INVALID_IF_MATCH', 'If-Match 必须是版本号')
+  return Number(value)
+}
+
+function assertVersion(expected: number | undefined, actual: number): void {
+  if (expected !== undefined && expected !== actual) throw new HttpError(409, 'VERSION_CONFLICT', '资源版本已变化，请刷新后重试', { expected, actual })
+}
+
+function setVersionEtag(context: Parameters<Middleware>[0], version: number): void {
+  context.res.setHeader('etag', `"${version}"`)
+}
+
+function paginateIfRequested<T>(context: Parameters<Middleware>[0], items: T[]): T[] | { items: T[]; total: number; page: number; pageSize: number } {
+  const rawPage = context.url.searchParams.get('page');
+  const rawPageSize = context.url.searchParams.get('pageSize');
+  if (rawPage === null && rawPageSize === null) return items;
+
+  const page = rawPage === null ? 1 : Number(rawPage);
+  const pageSize = rawPageSize === null ? 20 : Number(rawPageSize);
+  if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'page 必须是大于 0 的整数，pageSize 必须是 1 到 100 的整数');
+  }
+
+  const start = (page - 1) * pageSize;
+  return { items: items.slice(start, start + pageSize), total: items.length, page, pageSize };
+}
+
 const routeMiddleware: Middleware = async (context, next) => {
   const { method } = context.req;
   const path = context.url.pathname;
@@ -115,7 +147,9 @@ const routeMiddleware: Middleware = async (context, next) => {
   if (path === '/api/v1/auth/login' && method === 'POST') {
     const body = await readJson(context);
     const result = await authService.login({ email: String(body.email ?? ''), password: String(body.password ?? '') });
-    context.res.setHeader('set-cookie', `${AUTH_COOKIE}=${encodeURIComponent(result.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_COOKIE_MAX_AGE}`);
+    const production = process.env.NODE_ENV === 'production';
+    const csrfToken = generateCsrfToken();
+    context.res.setHeader('set-cookie', [buildAuthCookie(result.token, { production, maxAge: SESSION_COOKIE_MAX_AGE }), buildCsrfCookie(csrfToken, { production, maxAge: SESSION_COOKIE_MAX_AGE })]);
     sendSuccess(context, {
       user: result.session.user,
       sessionId: result.session.sessionId,
@@ -126,8 +160,17 @@ const routeMiddleware: Middleware = async (context, next) => {
 
   if (path === '/api/v1/auth/logout' && method === 'POST') {
     await authService.logout(context.auth?.sessionId ?? '');
-    context.res.setHeader('set-cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+    const production = process.env.NODE_ENV === 'production';
+    context.res.setHeader('set-cookie', [buildAuthCookie('', { production, maxAge: 0 }), buildCsrfCookie('', { production, maxAge: 0 })]);
     sendSuccess(context, { ok: true });
+    return;
+  }
+
+  if (path === '/api/v1/auth/csrf' && method === 'GET') {
+    const production = process.env.NODE_ENV === 'production';
+    const token = generateCsrfToken();
+    context.res.setHeader('set-cookie', buildCsrfCookie(token, { production }));
+    sendSuccess(context, { token });
     return;
   }
 
@@ -166,11 +209,20 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   try {
+    if (shouldProtectCsrf(method, process.env.REQUIRE_CSRF)) {
+      const origin = Array.isArray(context.req.headers.origin) ? undefined : context.req.headers.origin;
+      const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+      if (!isAllowedOrigin(origin, allowed)) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
+      const headerToken = Array.isArray(context.req.headers['x-csrf-token']) ? undefined : context.req.headers['x-csrf-token'];
+      const cookieHeader = Array.isArray(context.req.headers.cookie) ? undefined : context.req.headers.cookie;
+      const cookieToken = readCookie(cookieHeader, 'smartrecruit_csrf', { production: process.env.NODE_ENV === 'production' });
+      if (!validateCsrf(headerToken, cookieToken)) throw new HttpError(403, 'CSRF_TOKEN_INVALID', 'CSRF Token 无效');
+    }
     const auth = requireAuth(context);
 
     if (path === '/api/v1/recruitment-requests' && method === 'GET') {
       const requests = await recruiting.listRequests(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);
-      sendSuccess(context, filterByDepartment(requests, departmentScope(auth))); return;
+      sendSuccess(context, paginateIfRequested(context, filterByDepartment(requests, departmentScope(auth)))); return;
     }
     if (path === '/api/v1/recruitment-requests' && method === 'POST') {
       requireRole(auth, RECRUITMENT_WRITE_ROLES);
@@ -179,25 +231,25 @@ const routeMiddleware: Middleware = async (context, next) => {
     const requestMatch = path.match(/^\/api\/v1\/recruitment-requests\/([^/]+)(?:\/(.*))?$/);
     if (requestMatch) {
       const id = requestMatch[1]!; const suffix = requestMatch[2] ?? '';
-      if (!suffix && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, request); return; }
+      if (!suffix && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); setVersionEtag(context, request.version); sendSuccess(context, request); return; }
       if (suffix === 'approval' && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.getRequestApproval(id)); return; }
-      if (!suffix && method === 'PATCH') { requireRole(auth, RECRUITMENT_WRITE_ROLES); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.updateRequest(id, await readJson(context) as never, auth.user.id)); return; }
+      if (!suffix && method === 'PATCH') { requireRole(auth, RECRUITMENT_WRITE_ROLES); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); assertVersion(parseIfMatch(context), request.version); const result = await recruiting.updateRequest(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
       if (method === 'POST') { const requestAction = actionFrom(`/${suffix}`, '') ?? suffix.replaceAll('-', '_'); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); requireRole(auth, ['approve', 'reject'].includes(requestAction) ? RECRUITMENT_APPROVAL_ROLES : RECRUITMENT_WRITE_ROLES); sendSuccess(context, await recruiting.requestAction(id, requestAction, (await readJson(context)).reason, auth.user.id)); return; }
     }
     if (path === '/api/v1/jobs' && method === 'GET') {
       const jobs = await recruiting.listJobs(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('recruitmentRequestId') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);
-      sendSuccess(context, filterByDepartment(jobs, departmentScope(auth))); return;
+      sendSuccess(context, paginateIfRequested(context, filterByDepartment(jobs, departmentScope(auth)))); return;
     }
     if (path === '/api/v1/jobs' && method === 'POST') {
       requireRole(auth, JOB_WRITE_ROLES);
       sendSuccess(context, await recruiting.createJob(await readJson(context) as never, auth.user.id), 201); return;
     }
-    if (path === '/api/v1/candidates' && method === 'GET') { sendSuccess(context, await recruiting.listCandidates()); return; }
+    if (path === '/api/v1/candidates' && method === 'GET') { sendSuccess(context, paginateIfRequested(context, await recruiting.listCandidates())); return; }
     if (path === '/api/v1/candidates' && method === 'POST') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.createCandidate(await readJson(context) as never, auth.user.id), 201); return; }
     if (path === '/api/v1/candidate-tags' && method === 'GET') { sendSuccess(context, await recruiting.listCandidateTags()); return; }
     const candidateDetailMatch = path.match(/^\/api\/v1\/candidates\/([^/]+)$/);
-    if (candidateDetailMatch && method === 'GET') { sendSuccess(context, await recruiting.getCandidate(candidateDetailMatch[1]!)); return; }
-    if (candidateDetailMatch && method === 'PATCH') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.updateCandidate(candidateDetailMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
+    if (candidateDetailMatch && method === 'GET') { const result = await recruiting.getCandidate(candidateDetailMatch[1]!); sendSuccess(context, result); return; }
+    if (candidateDetailMatch && method === 'PATCH') { requireRole(auth, CANDIDATE_WRITE_ROLES); const current = await recruiting.getCandidate(candidateDetailMatch[1]!); assertVersion(parseIfMatch(context), current.updatedAt ? 1 : 1); const result = await recruiting.updateCandidate(candidateDetailMatch[1]!, await readJson(context) as never, auth.user.id); sendSuccess(context, result); return; }
     if (path === '/api/v1/resumes' && method === 'GET') { sendSuccess(context, await recruiting.listResumes(context.url.searchParams.get('candidateId') ?? undefined, context.url.searchParams.get('applicationId') ?? undefined)); return; }
     if (path === '/api/v1/resumes' && method === 'POST') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.createResume(await readJson(context) as never, auth.user.id), 201); return; }
     if (path === '/api/v1/analysis-tasks' && method === 'GET') { sendSuccess(context, await recruiting.listAnalysisTasks(context.url.searchParams.get('status') ?? undefined)); return; }
@@ -212,7 +264,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (analysisResultByIdMatch && method === 'PATCH') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.reviewAnalysisResult(analysisResultByIdMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
     const analysisResultActionMatch = path.match(/^\/api\/v1\/analysis-results\/([^/]+)\/review$/);
     if (analysisResultActionMatch && method === 'POST') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.reviewAnalysisResult(analysisResultActionMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
-    if (path === '/api/v1/applications' && method === 'GET') { sendSuccess(context, await recruiting.listApplications(context.url.searchParams.get('candidateId') ?? undefined, context.url.searchParams.get('jobId') ?? undefined)); return; }
+    if (path === '/api/v1/applications' && method === 'GET') { sendSuccess(context, paginateIfRequested(context, await recruiting.listApplications(context.url.searchParams.get('candidateId') ?? undefined, context.url.searchParams.get('jobId') ?? undefined))); return; }
     if (path === '/api/v1/dashboard/summary' && method === 'GET') { sendSuccess(context, await recruiting.getDashboardSummary()); return; }
     if (path === '/api/v1/reports' && method === 'GET') { sendSuccess(context, await recruiting.getReports()); return; }
     if (path === '/api/v1/workflow-events' && method === 'GET') {
@@ -235,10 +287,10 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (!suffix && method === 'GET') { sendSuccess(context, await recruiting.getOnboarding(onboardingId)); return; }
       if (!suffix && method === 'PATCH') { requireRole(auth, ONBOARDING_WRITE_ROLES); sendSuccess(context, await recruiting.updateOnboarding(onboardingId, await readJson(context) as never, auth.user.id)); return; }
       if (method === 'POST') { requireRole(auth, ONBOARDING_WRITE_ROLES); const body = await readJson(context); sendSuccess(context, await recruiting.onboardingAction(onboardingId, suffix.replaceAll('-', '_'), body.reason, auth.user.id)); return; }
-    }    if (path === '/api/v1/offers' && method === 'GET') { sendSuccess(context, await recruiting.listOffers(context.url.searchParams.get('status') ?? undefined)); return; }
+    }    if (path === '/api/v1/offers' && method === 'GET') { sendSuccess(context, paginateIfRequested(context, await recruiting.listOffers(context.url.searchParams.get('status') ?? undefined))); return; }
     if (path === '/api/v1/offers' && method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, await recruiting.createOffer(await readJson(context) as never, auth.user.id), 201); return; }
     const offerMatch = path.match(/^\/api\/v1\/offers\/([^/]+)(?:\/(.*))?$/);
-    if (offerMatch) { const id=offerMatch[1]!; const suffix=offerMatch[2] ?? ''; if (!suffix && method === 'GET') { sendSuccess(context, await recruiting.getOffer(id)); return; } if (!suffix && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, await recruiting.updateOffer(id, await readJson(context) as never, auth.user.id)); return; } if (method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); const body=await readJson(context); sendSuccess(context, await recruiting.offerAction(id, suffix.replaceAll('-', '_'), body.reason, auth.user.id)); return; } }
+    if (offerMatch) { const id=offerMatch[1]!; const suffix=offerMatch[2] ?? ''; if (!suffix && method === 'GET') { const result = await recruiting.getOffer(id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (!suffix && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); const current = await recruiting.getOffer(id); assertVersion(parseIfMatch(context), current.version); const result = await recruiting.updateOffer(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); const body=await readJson(context); sendSuccess(context, await recruiting.offerAction(id, suffix.replaceAll('-', '_'), body.reason, auth.user.id)); return; } }
     if (path === '/api/v1/interviews' && method === 'GET') { sendSuccess(context, await recruiting.listInterviews(context.url.searchParams.get('applicationId') ?? undefined)); return; }
     if (path === '/api/v1/interviews' && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); sendSuccess(context, await recruiting.createInterview(await readJson(context) as never, auth.user.id), 201); return; }
     const interviewMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)(?:\/(feedback|lock-feedback|conclude))?$/);
@@ -250,8 +302,8 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (jobMatch) {
       const id = jobMatch[1]!; const suffix = jobMatch[2] ?? '';
       const job = await recruiting.getJob(id); assertDepartmentScope(auth, job.departmentId);
-      if (!suffix && method === 'GET') { sendSuccess(context, job); return; }
-      if (!suffix && method === 'PATCH') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.updateJob(id, await readJson(context) as never, auth.user.id)); return; }
+      if (!suffix && method === 'GET') { setVersionEtag(context, job.version); sendSuccess(context, job); return; }
+      if (!suffix && method === 'PATCH') { requireRole(auth, JOB_WRITE_ROLES); assertVersion(parseIfMatch(context), job.version); const result = await recruiting.updateJob(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
       if (suffix === 'spec' && method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.createSpec(id, await readJson(context) as never, auth.user.id)); return; }
       if (suffix === 'jd' && method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.createJd(id, await readJson(context) as never, auth.user.id)); return; }
       if (suffix === 'spec-versions' && method === 'GET') { sendSuccess(context, await recruiting.listJobSpecVersions(id)); return; }

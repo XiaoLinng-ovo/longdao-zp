@@ -17,6 +17,11 @@ import type {
   RepositoryOptions,
   RepositoryPool,
   TransactionCallback,
+  ResumeCreateInput, ResumeRecord,
+  RecruitmentApprovalInstanceRecord,
+  RecruitmentApprovalStepRecord,
+  RecruitmentApprovalAuditRecord,
+  AnalysisTaskRecord, AnalysisResultRecord,
 } from './types.js'
 
 export class RepositoryNotFoundError extends Error {
@@ -362,6 +367,159 @@ export class NormalizedRecruitingRepository {
     return this.updateApplication(idOrBusinessId, { status, ...(rejectedReason === undefined ? {} : { rejectedReason }) })
   }
 
+  async listResumes(candidateId?: string, applicationId?: string): Promise<ResumeRecord[]> {
+    const values: unknown[] = []; const where: string[] = []
+    if (candidateId) where.push(`r.candidate_id = $${values.push(candidateId)}::uuid`)
+    if (applicationId) where.push(`r.application_id = $${values.push(applicationId)}::uuid`)
+    const result = await this.pool.query<any>(`SELECT r.id, r.candidate_id, r.application_id, r.storage_key, r.original_filename, r.mime_type, r.size_bytes, r.scan_status, r.content_hash, r.created_at FROM resumes r ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY r.created_at DESC`, values)
+    return result.rows.map((row) => ({ id: row.id, candidateId: row.candidate_id, applicationId: row.application_id, storageKey: row.storage_key, originalFilename: row.original_filename, mimeType: row.mime_type, sizeBytes: Number(row.size_bytes), scanStatus: row.scan_status, contentHash: row.content_hash, createdAt: iso(row.created_at) }))
+  }
+
+  async getResume(id: string): Promise<ResumeRecord> {
+    const result = await this.pool.query<any>('SELECT id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash, created_at FROM resumes WHERE id = $1::uuid', [id])
+    const row = result.rows[0]; if (!row) throw new RepositoryNotFoundError(`Resume not found: ${id}`)
+    return { id: row.id, candidateId: row.candidate_id, applicationId: row.application_id, storageKey: row.storage_key, originalFilename: row.original_filename, mimeType: row.mime_type, sizeBytes: Number(row.size_bytes), scanStatus: row.scan_status, contentHash: row.content_hash, createdAt: iso(row.created_at) }
+  }
+
+  async createResume(input: ResumeCreateInput): Promise<ResumeRecord> {
+    return this.transaction(async (client) => {
+      const row = await queryOne<any>(client, `INSERT INTO resumes (id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9) RETURNING id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash, created_at`, [uuidOrGenerated(input.id), input.candidateId, input.applicationId ?? null, input.storageKey, input.originalFilename, input.mimeType, input.sizeBytes, input.scanStatus ?? 'quarantined', input.contentHash])
+      return { id: row.id, candidateId: row.candidate_id, applicationId: row.application_id, storageKey: row.storage_key, originalFilename: row.original_filename, mimeType: row.mime_type, sizeBytes: Number(row.size_bytes), scanStatus: row.scan_status, contentHash: row.content_hash, createdAt: iso(row.created_at) }
+    })
+  }
+
+  async createAnalysisTask(input: { resumeId: string; applicationId?: string | null; idempotencyKey: string }): Promise<{ id: string; resumeId: string; applicationId: string | null; status: string; attempts: number; idempotencyKey: string; availableAt: string; createdAt: string }> {
+    const id = randomUUID()
+    const result = await this.pool.query<any>(`INSERT INTO analysis_tasks (id, resume_id, application_id, status, attempts, idempotency_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'queued', 0, $4) RETURNING id, resume_id, application_id, status, attempts, idempotency_key, available_at, created_at`, [id, input.resumeId, input.applicationId ?? null, input.idempotencyKey])
+    const row = result.rows[0]; if (!row) throw new RepositoryNotFoundError('Analysis task insert returned no row')
+    return { id: row.id, resumeId: row.resume_id, applicationId: row.application_id, status: row.status, attempts: row.attempts, idempotencyKey: row.idempotency_key, availableAt: iso(row.available_at), createdAt: iso(row.created_at) }
+  }
+
+  async getAnalysisTask(id: string): Promise<AnalysisTaskRecord> {
+    const result = await this.pool.query<AnalysisTaskRow>(`${ANALYSIS_TASK_COLUMNS} FROM analysis_tasks WHERE id = $1::uuid`, [id])
+    const row = result.rows[0]; if (!row) throw new RepositoryNotFoundError(`Analysis task not found: ${id}`)
+    return mapAnalysisTask(row)
+  }
+
+  async listAnalysisTasks(status?: string): Promise<AnalysisTaskRecord[]> {
+    const values: unknown[] = []; const where = status ? `WHERE status = $1` : ''
+    if (status) values.push(status)
+    const result = await this.pool.query<AnalysisTaskRow>(`${ANALYSIS_TASK_COLUMNS} FROM analysis_tasks ${where} ORDER BY created_at DESC`, values)
+    return result.rows.map(mapAnalysisTask)
+  }
+
+  async updateAnalysisTask(id: string, input: { status?: string; attempts?: number; lastError?: string | null; startedAt?: string | null; completedAt?: string | null }): Promise<AnalysisTaskRecord> {
+    return this.transaction(async (client) => {
+      const assignments: string[] = []; const values: unknown[] = []
+      const add = (column: string, value: unknown, cast = '') => assignments.push(`${column} = $${values.push(value)}${cast}`)
+      if (input.status !== undefined) add('status', input.status)
+      if (input.attempts !== undefined) add('attempts', input.attempts)
+      if (input.lastError !== undefined) add('last_error', input.lastError)
+      if (input.startedAt !== undefined) add('started_at', input.startedAt, '::timestamptz')
+      if (input.completedAt !== undefined) add('completed_at', input.completedAt, '::timestamptz')
+      if (!assignments.length) return this.getAnalysisTaskWithExecutor(client, id)
+      values.push(id)
+      const row = await queryOne<AnalysisTaskRow>(client, `UPDATE analysis_tasks SET ${assignments.join(', ')} WHERE id = $${values.length}::uuid RETURNING ${ANALYSIS_TASK_RETURNING}`, values)
+      return mapAnalysisTask(row)
+    })
+  }
+
+  async listAnalysisResults(resumeId?: string, applicationId?: string): Promise<AnalysisResultRecord[]> {
+    const values: unknown[] = []; const where: string[] = []
+    if (resumeId) where.push(`resume_id = $${values.push(resumeId)}::uuid`)
+    if (applicationId) where.push(`application_id = $${values.push(applicationId)}::uuid`)
+    const result = await this.pool.query<AnalysisResultRow>(`${ANALYSIS_RESULT_COLUMNS} FROM analysis_results ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC`, values)
+    return result.rows.map(mapAnalysisResult)
+  }
+
+  async getAnalysisResultByTask(taskId: string): Promise<AnalysisResultRecord> {
+    const result = await this.pool.query<AnalysisResultRow>(`${ANALYSIS_RESULT_COLUMNS} FROM analysis_results WHERE analysis_task_id = $1::uuid`, [taskId])
+    const row = result.rows[0]; if (!row) throw new RepositoryNotFoundError(`Analysis result not found for task: ${taskId}`)
+    return mapAnalysisResult(row)
+  }
+
+  async getAnalysisResult(id: string): Promise<AnalysisResultRecord> {
+    const result = await this.pool.query<AnalysisResultRow>(`${ANALYSIS_RESULT_COLUMNS} FROM analysis_results WHERE id = $1::uuid`, [id])
+    const row = result.rows[0]; if (!row) throw new RepositoryNotFoundError(`Analysis result not found: ${id}`)
+    return mapAnalysisResult(row)
+  }
+
+  async createAnalysisResult(input: { id?: string; analysisTaskId: string; resumeId: string; applicationId?: string | null; result: Record<string, unknown>; analyzerVersion?: string | null; inputHash?: string | null; humanReviewStatus?: string }): Promise<AnalysisResultRecord> {
+    return this.transaction(async (client) => {
+      const row = await queryOne<AnalysisResultRow>(client, `INSERT INTO analysis_results (id, analysis_task_id, resume_id, application_id, result, analyzer_version, input_hash, human_review_status) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::jsonb, $6, $7, $8) ON CONFLICT (analysis_task_id) DO UPDATE SET result = EXCLUDED.result, analyzer_version = EXCLUDED.analyzer_version, input_hash = EXCLUDED.input_hash, human_review_status = EXCLUDED.human_review_status RETURNING ${ANALYSIS_RESULT_RETURNING}`, [uuidOrGenerated(input.id), input.analysisTaskId, input.resumeId, input.applicationId ?? null, JSON.stringify(input.result), input.analyzerVersion ?? null, input.inputHash ?? null, input.humanReviewStatus ?? 'pending'])
+      return mapAnalysisResult(row)
+    })
+  }
+
+  async reviewAnalysisResult(id: string, status: string, result: Record<string, unknown>): Promise<AnalysisResultRecord> {
+    const row = await queryOne<AnalysisResultRow>(this.pool, `UPDATE analysis_results SET human_review_status = $1, result = $2::jsonb WHERE id = $3::uuid RETURNING ${ANALYSIS_RESULT_RETURNING}`, [status, JSON.stringify(result), id])
+    return mapAnalysisResult(row)
+  }
+
+  private async getAnalysisTaskWithExecutor(executor: RepositoryClient, id: string): Promise<AnalysisTaskRecord> {
+    return mapAnalysisTask(await queryOne<AnalysisTaskRow>(executor, `${ANALYSIS_TASK_COLUMNS} FROM analysis_tasks WHERE id = $1::uuid`, [id]))
+  }
+
+  async requestApprovalAction(idOrBusinessId: string, action: 'submit' | 'resubmit' | 'approve' | 'reject', actorId: string, reason?: string): Promise<RecruitmentRequestRecord> {
+    return this.transaction(async (client) => {
+      const requestId = await resolveEntityId(client, 'recruitment_requests', 'request_no', 'REQ', 'rr', idOrBusinessId)
+      const current = await queryOne<{ id: string; status: string; version: number }>(client,
+        'SELECT id, status, version FROM recruitment_requests WHERE id = $1::uuid FOR UPDATE', [requestId])
+      if (action === 'submit' || action === 'resubmit') {
+        if (current.status !== 'draft' && current.status !== 'rejected') throw new RepositoryValidationError(`Recruitment request status ${current.status} cannot be submitted`)
+        const instanceId = randomUUID()
+        const stepId = randomUUID()
+        await client.query(
+          `INSERT INTO approval_instances (id, subject_type, subject_id, version, status, current_step, created_by, updated_at)
+           SELECT $1::uuid, 'recruitment_request', $2::uuid, COALESCE(MAX(version), 0) + 1, 'pending', 1, $3::uuid, now()
+           FROM approval_instances WHERE subject_type = 'recruitment_request' AND subject_id = $2::uuid`,
+          [instanceId, requestId, isUuid(actorId) ? actorId : null],
+        )
+        await client.query(
+          `INSERT INTO approval_steps (id, approval_instance_id, step_no, approver_role_code, status)
+           VALUES ($1::uuid, $2::uuid, 1, 'approver', 'pending')`, [stepId, instanceId])
+        return mapRecruitmentRequest(await queryOne<RecruitmentRequestRow>(client,
+          `UPDATE recruitment_requests SET status = 'pending_approval', version = version + 1, updated_at = now()
+           WHERE id = $1::uuid RETURNING ${REQUEST_COLUMNS}`, [requestId]))
+      }
+
+      if (current.status !== 'pending_approval') throw new RepositoryValidationError(`Recruitment request status ${current.status} cannot be approved`)
+      if (action === 'reject' && !text(reason)) throw new RepositoryValidationError('Approval rejection reason is required')
+      const instance = await queryOne<{ id: string; status: string }>(client,
+        `SELECT id, status FROM approval_instances
+         WHERE subject_type = 'recruitment_request' AND subject_id = $1::uuid AND status = 'pending'
+         ORDER BY version DESC, created_at DESC LIMIT 1 FOR UPDATE`, [requestId])
+      const step = await queryOne<{ id: string; status: string }>(client,
+        `SELECT id, status FROM approval_steps WHERE approval_instance_id = $1::uuid AND status = 'pending' ORDER BY step_no LIMIT 1 FOR UPDATE`, [instance.id])
+      const decision = action === 'approve' ? 'approved' : 'rejected'
+      await client.query(
+        `INSERT INTO approval_records (id, approval_instance_id, approval_step_id, actor_user_id, decision, comment)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)`,
+        [randomUUID(), instance.id, step.id, isUuid(actorId) ? actorId : null, decision, text(reason)],
+      )
+      await client.query(`UPDATE approval_steps SET status = $2, acted_at = now() WHERE id = $1::uuid`, [step.id, decision])
+      await client.query(`UPDATE approval_instances SET status = $2, completed_at = now(), updated_at = now() WHERE id = $1::uuid`, [instance.id, decision])
+      return mapRecruitmentRequest(await queryOne<RecruitmentRequestRow>(client,
+        `UPDATE recruitment_requests SET status = $2, version = version + 1, updated_at = now()
+         WHERE id = $1::uuid RETURNING ${REQUEST_COLUMNS}`, [requestId, decision]))
+    })
+  }
+
+  async getRecruitmentRequestApproval(idOrBusinessId: string): Promise<{ current: RecruitmentApprovalInstanceRecord | null; steps: RecruitmentApprovalStepRecord[]; records: RecruitmentApprovalAuditRecord[] }> {
+    const requestId = await resolveEntityId(this.pool as Pick<RepositoryPool, 'query'>, 'recruitment_requests', 'request_no', 'REQ', 'rr', idOrBusinessId)
+    const instances = await this.pool.query<ApprovalInstanceRow>(
+      `SELECT id, subject_type, subject_id, version, status, created_at, updated_at
+       FROM approval_instances WHERE subject_type = 'recruitment_request' AND subject_id = $1::uuid ORDER BY version DESC, created_at DESC`, [requestId])
+    const current = instances.rows[0] ? mapApprovalInstance(instances.rows[0]) : null
+    const ids = instances.rows.map((row) => row.id)
+    if (!ids.length) return { current, steps: [], records: [] }
+    const steps = await this.pool.query<ApprovalStepRow>(
+      `SELECT id, approval_instance_id, step_no, approver_role_code, status, acted_at FROM approval_steps WHERE approval_instance_id = ANY($1::uuid[]) ORDER BY step_no`, [ids])
+    const records = await this.pool.query<ApprovalRecordRow>(
+      `SELECT id, approval_instance_id, approval_step_id, actor_user_id, decision, comment, created_at FROM approval_records WHERE approval_instance_id = ANY($1::uuid[]) ORDER BY created_at`, [ids])
+    return { current, steps: steps.rows.map(mapApprovalStep), records: records.rows.map(mapApprovalRecord) }
+  }
+
   private async getRecruitmentRequestWithExecutor(executor: RepositoryClient, id: string): Promise<RecruitmentRequestRecord> {
     return mapRecruitmentRequest(await queryOne<RecruitmentRequestRow>(executor, `${REQUEST_SELECT} WHERE rr.id = $1::uuid`, [id]))
   }
@@ -405,7 +563,7 @@ async function resolveRequiredForeignKey(client: RepositoryClient, table: string
   return result
 }
 
-async function resolveEntityId(client: RepositoryClient, table: string, businessColumn: string, prefix: string, legacyPrefix: string, value: string): Promise<string> {
+async function resolveEntityId(client: Pick<RepositoryPool, 'query'> | Pick<RepositoryClient, 'query'>, table: string, businessColumn: string, prefix: string, legacyPrefix: string, value: string): Promise<string> {
   const reference = normalizeReference(required(value, 'id'), prefix, legacyPrefix)
   const result = isUuid(reference)
     ? await client.query<{ id: string }>(`SELECT id FROM ${table} WHERE id = $1::uuid`, [reference])
@@ -427,11 +585,20 @@ interface CandidateRow extends QueryResultRow {
 interface ApplicationRow extends QueryResultRow {
   id: string; application_no: string; candidate_id: string; candidate_no: string | null; job_id: string; job_no: string | null; status: string; recruiter_id: string | null; source: string | null; applied_at: string | Date; rejected_reason: string | null; withdrawn_at: string | Date | null; created_at: string | Date; updated_at: string | Date
 }
+interface AnalysisTaskRow extends QueryResultRow { id: string; resume_id: string; application_id: string | null; status: string; attempts: number; idempotency_key: string; last_error: string | null; available_at: string | Date; started_at: string | Date | null; completed_at: string | Date | null; created_at: string | Date }
+interface AnalysisResultRow extends QueryResultRow { id: string; analysis_task_id: string; resume_id: string; application_id: string | null; result: Record<string, unknown>; analyzer_version: string | null; input_hash: string | null; human_review_status: string; created_at: string | Date }
+interface ApprovalInstanceRow extends QueryResultRow { id: string; subject_type: string; subject_id: string; version: number; status: 'pending' | 'approved' | 'rejected' | 'cancelled'; created_at: string | Date; updated_at: string | Date }
+interface ApprovalStepRow extends QueryResultRow { id: string; approval_instance_id: string; step_no: number; approver_role_code: string | null; status: 'pending' | 'approved' | 'rejected'; acted_at: string | Date | null }
+interface ApprovalRecordRow extends QueryResultRow { id: string; approval_instance_id: string; approval_step_id: string | null; actor_user_id: string | null; decision: 'approved' | 'rejected'; comment: string; created_at: string | Date }
 
 const REQUEST_COLUMNS = 'id, request_no, title, department_id, NULL::text AS department_name, requested_by, headcount, budget_min, budget_max, reason, status, version, created_at, updated_at'
 const JOB_COLUMNS = 'id, job_no, recruitment_request_id, NULL::text AS recruitment_request_no, department_id, NULL::text AS department_name, title, status, headcount, created_by, created_at, updated_at'
 const CANDIDATE_COLUMNS = 'id, candidate_no, name, email, phone, location, source, consent_status, created_at, updated_at'
 const APPLICATION_COLUMNS = 'id, application_no, candidate_id, NULL::text AS candidate_no, job_id, NULL::text AS job_no, status, recruiter_id, source, applied_at, rejected_reason, withdrawn_at, created_at, updated_at'
+const ANALYSIS_TASK_COLUMNS = 'SELECT id, resume_id, application_id, status, attempts, idempotency_key, last_error, available_at, started_at, completed_at, created_at'
+const ANALYSIS_TASK_RETURNING = 'id, resume_id, application_id, status, attempts, idempotency_key, last_error, available_at, started_at, completed_at, created_at'
+const ANALYSIS_RESULT_COLUMNS = 'SELECT id, analysis_task_id, resume_id, application_id, result, analyzer_version, input_hash, human_review_status, created_at'
+const ANALYSIS_RESULT_RETURNING = 'id, analysis_task_id, resume_id, application_id, result, analyzer_version, input_hash, human_review_status, created_at'
 
 const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, rr.requested_by, rr.headcount, rr.budget_min, rr.budget_max, rr.reason, rr.status, rr.version, rr.created_at, rr.updated_at
   FROM recruitment_requests rr
@@ -461,6 +628,26 @@ function mapCandidate(row: CandidateRow): CandidateRecord {
 
 function mapApplication(row: ApplicationRow): ApplicationRecord {
   return { id: row.id, businessId: row.application_no, legacyId: legacyId('APP', row.application_no), code: row.application_no, candidateId: row.candidate_id, candidateBusinessId: row.candidate_no, jobId: row.job_id, jobBusinessId: row.job_no, status: row.status, recruiterId: row.recruiter_id, source: row.source, appliedAt: iso(row.applied_at), rejectedReason: row.rejected_reason, withdrawnAt: row.withdrawn_at ? iso(row.withdrawn_at) : null, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapAnalysisTask(row: AnalysisTaskRow): AnalysisTaskRecord {
+  return { id: row.id, resumeId: row.resume_id, applicationId: row.application_id, status: row.status, attempts: Number(row.attempts), idempotencyKey: row.idempotency_key, lastError: row.last_error, availableAt: iso(row.available_at), startedAt: row.started_at ? iso(row.started_at) : null, completedAt: row.completed_at ? iso(row.completed_at) : null, createdAt: iso(row.created_at) }
+}
+
+function mapAnalysisResult(row: AnalysisResultRow): AnalysisResultRecord {
+  return { id: row.id, analysisTaskId: row.analysis_task_id, resumeId: row.resume_id, applicationId: row.application_id, result: row.result ?? {}, analyzerVersion: row.analyzer_version, inputHash: row.input_hash, humanReviewStatus: row.human_review_status, createdAt: iso(row.created_at) }
+}
+
+function mapApprovalInstance(row: ApprovalInstanceRow): RecruitmentApprovalInstanceRecord {
+  return { id: row.id, entityType: 'recruitment_request', entityId: row.subject_id, version: row.version, status: row.status, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapApprovalStep(row: ApprovalStepRow): RecruitmentApprovalStepRecord {
+  return { id: row.id, instanceId: row.approval_instance_id, order: row.step_no, name: '招聘需求审批', approverRole: row.approver_role_code ?? 'approver', status: row.status, ...(row.acted_at ? { actedAt: iso(row.acted_at) } : {}) }
+}
+
+function mapApprovalRecord(row: ApprovalRecordRow): RecruitmentApprovalAuditRecord {
+  return { id: row.id, instanceId: row.approval_instance_id, stepId: row.approval_step_id ?? '', actorId: row.actor_user_id ?? '', action: row.decision === 'approved' ? 'approve' : 'reject', ...(row.comment ? { comment: row.comment } : {}), createdAt: iso(row.created_at) }
 }
 
 export function createNormalizedRecruitingRepository(config: PoolConfig = poolConfigFromEnv(), options?: RepositoryOptions): NormalizedRecruitingRepository {

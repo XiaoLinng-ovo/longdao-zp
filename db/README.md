@@ -1,6 +1,6 @@
 # Database migrations
 
-`migrations/0001_initial_schema.sql` through `0006_recruiting_state_bridge.sql` establish the first SmartRecruit Pro domain schema. The API currently uses a PostgreSQL JSONB transaction bridge while normalized repositories are migrated incrementally. It deliberately separates `candidates` from `applications` and keeps workflow, analysis, outbox, and audit history append-oriented.
+`migrations/0001_initial_schema.sql` through `0007_auth_security.sql` establish the SmartRecruit Pro domain schema. Migration 0007 adds persistent CSRF token records, login-attempt throttling data, and revocation/lookup indexes for database-backed sessions. Business entities are persisted in normalized PostgreSQL tables; the API deliberately separates `candidates` from `applications` and keeps workflow, analysis, outbox, and audit history append-oriented.
 
 Migration files are applied by the Node.js runner in `scripts/migrate-postgres.mjs`. It uses the API's existing `pg` dependency and does not require the PostgreSQL `psql` executable. Applied files are recorded in `schema_migrations`; each migration runs in its own transaction and concurrent runners are serialized by a PostgreSQL advisory lock.
 
@@ -20,3 +20,10 @@ node scripts/check-postgres-ready.mjs
 ```
 
 Do not use `state.json` writes to update these tables. Domain commands and later application services own all business transitions.
+
+Authentication tables
+
+- `users`, `roles`, `user_roles`, and `sessions` are created by migration 0001.
+- `csrf_tokens` stores only token hashes and is scoped to a session.
+- `login_attempts` records success/failure events for rate limiting and security review; application code should prune old rows according to the retention policy.
+- Session revocation is represented by `sessions.revoked_at`; callers must reject revoked or expired sessions.

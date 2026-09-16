@@ -52,6 +52,84 @@ class FakePool implements RepositoryPool {
 }
 
 describe('NormalizedRecruitingRepository SQL contract', () => {
+  it('lists and loads normalized analysis tasks and results', async () => {
+    const taskRow = { id: '44444444-4444-4444-8444-444444444444', resume_id: '55555555-5555-4555-8555-555555555555', application_id: null, status: 'queued', attempts: 0, idempotency_key: 'resume-analysis:x:y', last_error: null, available_at: '2026-09-10T00:00:00.000Z', started_at: null, completed_at: null, created_at: '2026-09-10T00:00:00.000Z' }
+    const resultRow = { id: '66666666-6666-4666-8666-666666666666', analysis_task_id: taskRow.id, resume_id: taskRow.resume_id, application_id: null, result: { assessment: { score: 88 } }, analyzer_version: 'rule-1', input_hash: 'hash', human_review_status: 'pending', created_at: '2026-09-10T00:00:00.000Z' }
+    const pool = new FakePool([[taskRow], [resultRow]])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const tasks = await repository.listAnalysisTasks('queued')
+    const results = await repository.listAnalysisResults(taskRow.resume_id)
+
+    assert.equal(tasks[0]?.id, taskRow.id)
+    assert.equal(tasks[0]?.lastError, null)
+    assert.equal(results[0]?.analysisTaskId, taskRow.id)
+    assert.equal((results[0]?.result.assessment as { score: number }).score, 88)
+    assert.equal(pool.calls.length, 2)
+    assert.ok(pool.calls[0]?.sql.includes('FROM analysis_tasks'))
+    assert.ok(pool.calls[1]?.sql.includes('FROM analysis_results'))
+  })
+
+  it('updates task lifecycle and upserts an analysis result in one transaction', async () => {
+    const taskRow = { id: '44444444-4444-4444-8444-444444444444', resume_id: '55555555-5555-4555-8555-555555555555', application_id: null, status: 'completed', attempts: 1, idempotency_key: 'k', last_error: null, available_at: '2026-09-10T00:00:00.000Z', started_at: '2026-09-10T00:00:00.000Z', completed_at: '2026-09-10T00:01:00.000Z', created_at: '2026-09-10T00:00:00.000Z' }
+    const resultRow = { id: '66666666-6666-4666-8666-666666666666', analysis_task_id: taskRow.id, resume_id: taskRow.resume_id, application_id: null, result: { ok: true }, analyzer_version: 'rule-1', input_hash: 'hash', human_review_status: 'pending', created_at: '2026-09-10T00:01:00.000Z' }
+    const pool = new FakePool([], [[], [taskRow], [], [], [resultRow], []])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const task = await repository.updateAnalysisTask(taskRow.id, { status: 'completed', attempts: 1, startedAt: taskRow.started_at, completedAt: taskRow.completed_at })
+    const result = await repository.createAnalysisResult({ analysisTaskId: taskRow.id, resumeId: taskRow.resume_id, result: resultRow.result, analyzerVersion: 'rule-1', inputHash: 'hash' })
+
+    assert.equal(task.status, 'completed')
+    assert.equal(result.id, resultRow.id)
+    assert.deepEqual(pool.client.calls.map((call) => call.sql), ['BEGIN', pool.client.calls[1]!.sql, 'COMMIT', 'BEGIN', pool.client.calls[4]!.sql, 'COMMIT'])
+    assert.ok(pool.client.calls[1]?.sql.startsWith('UPDATE analysis_tasks'))
+    assert.ok(pool.client.calls[4]?.sql.startsWith('INSERT INTO analysis_results'))
+  })
+  it('persists recruitment request approval submission in normalized approval tables', async () => {
+    const requestId = '44444444-4444-4444-8444-444444444444'
+    const pool = new FakePool([], [
+      [],
+      [{ id: requestId }],
+      [{ id: requestId, status: 'draft', version: 1 }],
+      [],
+      [],
+      [{ id: requestId, request_no: 'REQ-1001', title: '后端', department_id: null, department_name: null, requested_by: null, headcount: 1, budget_min: null, budget_max: null, reason: '扩编', status: 'pending_approval', version: 2, created_at: '2026-09-10T00:00:00.000Z', updated_at: '2026-09-10T00:00:00.000Z' }],
+      [],
+    ])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const result = await repository.requestApprovalAction(requestId, 'submit', '77777777-7777-4777-8777-777777777777')
+
+    assert.equal(result.status, 'pending_approval')
+    assert.ok(pool.client.calls.some((call) => call.sql.includes('INSERT INTO approval_instances')))
+    assert.ok(pool.client.calls.some((call) => call.sql.includes('INSERT INTO approval_steps')))
+    assert.ok(pool.client.calls.some((call) => call.sql.includes('UPDATE recruitment_requests')))
+  })
+
+  it('records a normalized rejection decision and requires a reason', async () => {
+    const requestId = '44444444-4444-4444-8444-444444444444'
+    const pool = new FakePool([], [
+      [],
+      [{ id: requestId }],
+      [{ id: requestId, status: 'pending_approval', version: 2 }],
+      [{ id: '55555555-5555-4555-8555-555555555555', status: 'pending' }],
+      [{ id: '66666666-6666-4666-8666-666666666666', status: 'pending' }],
+      [],
+      [],
+      [],
+      [{ id: requestId, request_no: 'REQ-1001', title: '后端', department_id: null, department_name: null, requested_by: null, headcount: 1, budget_min: null, budget_max: null, reason: '扩编', status: 'rejected', version: 3, created_at: '2026-09-10T00:00:00.000Z', updated_at: '2026-09-10T00:00:00.000Z' }],
+      [],
+    ])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const result = await repository.requestApprovalAction(requestId, 'reject', '77777777-7777-4777-8777-777777777777', '预算不足')
+
+    assert.equal(result.status, 'rejected')
+    const record = pool.client.calls.find((call) => call.sql.includes('INSERT INTO approval_records'))
+    assert.equal(record?.values.at(-1), '预算不足')
+    assert.ok(pool.client.calls.some((call) => call.sql.includes('UPDATE approval_instances')))
+  })
+
   it('maps a legacy seed candidate id to a generated UUID and business number', async () => {
     const pool = new FakePool([], [
       [],

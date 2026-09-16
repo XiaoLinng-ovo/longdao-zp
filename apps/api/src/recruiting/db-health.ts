@@ -1,14 +1,17 @@
-import { Pool, type PoolClient, type PoolConfig } from 'pg'
+import { Pool, type PoolConfig } from 'pg'
 
-export interface RecruitingStateValue {
-  marker: string
-  writtenAt: string
-}
+/** Tables required by the normalized recruiting repository. */
+export const REQUIRED_RECRUITING_TABLES = [
+  'recruitment_requests',
+  'jobs',
+  'candidates',
+  'applications',
+] as const
 
 export interface PostgresConnectionInfo {
   database: string
   serverVersion: string
-  recruitingStateTable: string
+  normalizedTables: string[]
 }
 
 function isTruthy(value: string | undefined): boolean {
@@ -65,61 +68,23 @@ export async function checkPostgresConnection(pool: Pool): Promise<PostgresConne
   const connection = await pool.query<{ database: string; server_version: string }>(
     'SELECT current_database() AS database, current_setting(\'server_version\') AS server_version',
   )
-  const table = await pool.query<{ table_name: string | null }>(
-    "SELECT to_regclass('public.recruiting_state') AS table_name",
+  const tables = await pool.query<{ table_name: string }>(
+    `SELECT table_name
+       FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = ANY($1::text[])
+      ORDER BY table_name`,
+    [REQUIRED_RECRUITING_TABLES],
   )
   const row = connection.rows[0]
-  const tableName = table.rows[0]?.table_name
-  if (!row || tableName !== 'recruiting_state') {
-    throw new Error('PostgreSQL is reachable but public.recruiting_state is missing; run migration 0006')
+  const normalizedTables = tables.rows.map((table) => table.table_name)
+  const missing = REQUIRED_RECRUITING_TABLES.filter((table) => !normalizedTables.includes(table))
+  if (!row || missing.length) {
+    throw new Error(`PostgreSQL is reachable but normalized recruiting tables are missing: ${missing.join(', ')}`)
   }
   return {
     database: row.database,
     serverVersion: row.server_version,
-    recruitingStateTable: tableName,
+    normalizedTables,
   }
-}
-
-export async function readRecruitingState(
-  pool: Pool,
-  id: string,
-): Promise<RecruitingStateValue | null> {
-  const result = await pool.query<{ state: RecruitingStateValue }>(
-    'SELECT state FROM recruiting_state WHERE id = $1',
-    [id],
-  )
-  return result.rows[0]?.state ?? null
-}
-
-async function writeState(client: PoolClient, id: string, state: RecruitingStateValue): Promise<void> {
-  await client.query(
-    `INSERT INTO recruiting_state (id, state, updated_at)
-     VALUES ($1, $2::jsonb, now())
-     ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
-    [id, JSON.stringify(state)],
-  )
-}
-
-/** Runs one real PostgreSQL transaction and explicitly commits or rolls back it. */
-export async function writeRecruitingStateInTransaction(
-  pool: Pool,
-  id: string,
-  state: RecruitingStateValue,
-  outcome: 'commit' | 'rollback',
-): Promise<void> {
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    await writeState(client, id, state)
-    await client.query(outcome === 'commit' ? 'COMMIT' : 'ROLLBACK')
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined)
-    throw error
-  } finally {
-    client.release()
-  }
-}
-
-export async function deleteRecruitingState(pool: Pool, id: string): Promise<void> {
-  await pool.query('DELETE FROM recruiting_state WHERE id = $1', [id])
 }

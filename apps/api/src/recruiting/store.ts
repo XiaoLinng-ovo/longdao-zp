@@ -1,5 +1,3 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { RecruitingStoreState } from './types.js'
 
@@ -107,20 +105,13 @@ function migrateState(value: RecruitingStoreState): RecruitingStoreState {
 }
 
 export class LocalRecruitingStore {
-  private state: RecruitingStoreState | undefined
+  private state: RecruitingStoreState = createSeedState()
   private queue: Promise<void> = Promise.resolve()
 
-  constructor(private readonly filePath = process.env.RECRUITING_STORE_PATH || resolve(process.cwd(), '../../data/api-state.json')) {}
+  /** In-memory test fixture only. Production never constructs this store. */
+  constructor() {}
 
   async read(): Promise<RecruitingStoreState> {
-    if (this.state) return clone(this.state)
-    try {
-      this.state = migrateState(JSON.parse(await readFile(this.filePath, 'utf8')) as RecruitingStoreState)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      this.state = createSeedState()
-      await this.persist(this.state)
-    }
     return clone(this.state)
   }
 
@@ -130,19 +121,11 @@ export class LocalRecruitingStore {
       const current = await this.read()
       const draft = clone(current)
       result = await operation(draft)
-      await this.persist(draft)
       this.state = draft
     })
     this.queue = next.then(() => undefined, () => undefined)
     await next
     return result
-  }
-
-  private async persist(state: RecruitingStoreState): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true })
-    const tempPath = `${this.filePath}.${process.pid}.tmp`
-    await writeFile(tempPath, JSON.stringify(state, null, 2), 'utf8')
-    await rename(tempPath, this.filePath)
   }
 
   static eventId(): string { return randomUUID() }
