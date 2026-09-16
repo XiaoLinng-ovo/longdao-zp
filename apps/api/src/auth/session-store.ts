@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import type { AuthSession, SessionUser } from './types.js'
+import { hashPassword, verifyPassword } from './password.js'
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12
 const DEFAULT_PATH = resolve(process.cwd(), 'data/auth-sessions.json')
@@ -119,7 +120,16 @@ export class LocalAuthSessionStore {
   async findUserByEmailPassword(email: string, password: string): Promise<SessionUser | undefined> {
     const file = await this.readFile()
     const normalizedEmail = email.trim().toLowerCase()
-    const user = file.users.find((item) => item.email.toLowerCase() === normalizedEmail && item.passwordHash === sha256(password))
+    const user = file.users.find((item) => item.email.toLowerCase() === normalizedEmail)
+    if (!user) return undefined
+    const encoded = user.passwordHash
+    const isScrypt = encoded.startsWith('scrypt$')
+    const valid = isScrypt ? await verifyPassword(password, encoded) : encoded === sha256(password)
+    if (!valid) return undefined
+    if (!isScrypt) {
+      user.passwordHash = await hashPassword(password)
+      await this.writeFile(file)
+    }
     return user ? { id: user.id, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId } : undefined
   }
 

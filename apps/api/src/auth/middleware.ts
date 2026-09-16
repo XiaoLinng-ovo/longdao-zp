@@ -3,7 +3,7 @@ import type { AuthContext } from './types.js'
 import { AuthService } from './auth-service.js'
 
 const BEARER_PREFIX = 'Bearer '
-const SESSION_COOKIE = 'smartrecruit_session'
+const SESSION_COOKIE = process.env.NODE_ENV === 'production' ? '__Host-smartrecruit_session' : 'smartrecruit_session'
 
 export const authService = new AuthService()
 

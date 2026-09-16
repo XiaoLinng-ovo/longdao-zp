@@ -1,11 +1,32 @@
 import { LocalAuthSessionStore } from './session-store.js'
 import type { AuthContext, AuthSession, LoginInput, Role, SessionUser } from './types.js'
+import { LoginRateLimiter } from './rate-limit.js'
+import type { SessionRepository } from './session-repository.js'
+import { PostgresSessionRepository } from './session-repository.js'
+import { createDatabasePool } from '../db/connection.js'
+import { loadDatabaseConfig } from '../db/config.js'
+
+export type AuthSessionStore = Pick<LocalAuthSessionStore, 'findUserByEmailPassword' | 'createSession' | 'findSessionByToken' | 'deleteSession'>
+
+export function createAuthSessionStore(env: NodeJS.ProcessEnv = process.env): AuthSessionStore {
+  const hasDatabase = Boolean(env.DATABASE_URL?.trim() || env.PGPASSWORD?.trim())
+  if (env.NODE_ENV === 'production' && !hasDatabase) {
+    throw new Error('Production authentication requires database configuration')
+  }
+  if (env.NODE_ENV === 'production' && hasDatabase) {
+    const pool = createDatabasePool(loadDatabaseConfig(env))
+    return new PostgresSessionRepository(pool) as SessionRepository & AuthSessionStore
+  }
+  return new LocalAuthSessionStore()
+}
 
 export class AuthService {
-  private readonly sessionStore: LocalAuthSessionStore
+  private readonly sessionStore: AuthSessionStore
+  private readonly loginLimiter: LoginRateLimiter
 
-  constructor(sessionStore = new LocalAuthSessionStore()) {
+  constructor(sessionStore = createAuthSessionStore(), loginLimiter = new LoginRateLimiter()) {
     this.sessionStore = sessionStore
+    this.loginLimiter = loginLimiter
   }
 
   async login(input: LoginInput): Promise<{ session: AuthSession; token: string }> {
@@ -17,6 +38,12 @@ export class AuthService {
       error.status = 400
       throw error
     }
+    const key = email.toLowerCase()
+    if (!this.loginLimiter.allow(key)) {
+      const error = new Error('登录尝试过于频繁，请稍后再试') as Error & { code?: string; status?: number }
+      error.code = 'LOGIN_RATE_LIMITED'; error.status = 429
+      throw error
+    }
     const user = await this.sessionStore.findUserByEmailPassword(email, password)
     if (!user) {
       const error = new Error('邮箱或密码错误') as Error & { code?: string; status?: number }
@@ -24,6 +51,7 @@ export class AuthService {
       error.status = 401
       throw error
     }
+    this.loginLimiter.clear(key)
     return this.sessionStore.createSession(user)
   }
 
