@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict'
+import { describe, it } from 'node:test'
+import type { Pool, QueryResult } from 'pg'
+import { PostgresDingTalkApprovalRepository } from './postgres-approval-workflow.js'
+
+class FakePool {
+  calls: Array<{ sql: string; values?: unknown[] }> = []
+  constructor(private responses: Array<Record<string, unknown>[]>) {}
+  async query(sql: string, values?: unknown[]): Promise<QueryResult> {
+    this.calls.push({ sql, ...(values ? { values } : {}) })
+    const rows = this.responses.shift() ?? []
+    return { rows, rowCount: rows.length } as QueryResult
+  }
+  async connect() { return { query: this.query.bind(this), release() {} } }
+}
+
+describe('PostgresDingTalkApprovalRepository', () => {
+  it('resolves a platform user to the mapped DingTalk user id', async () => {
+    const pool = new FakePool([[{ external_id: 'ding-user-1' }]])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+    assert.equal(await repository.resolveExternalUserId('11111111-1111-4111-8111-111111111111'), 'ding-user-1')
+    assert.deepEqual(pool.calls[0]?.values, ['dingtalk', '11111111-1111-4111-8111-111111111111'])
+  })
+
+  it('loads a department policy with its mapped DingTalk department id', async () => {
+    const pool = new FakePool([[{ process_code: 'PROC-TECH', external_id: '42' }]])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+    assert.deepEqual(await repository.getDepartmentPolicy('dept-1', 'recruitment_request'), { processCode: 'PROC-TECH', departmentExternalId: 42 })
+  })
+
+  it('cancels an unlinked pending instance and returns its request to draft atomically', async () => {
+    const pool = new FakePool([[], [{ id: 'instance-1', subject_type: 'recruitment_request', subject_id: 'request-1' }], [], [], [], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+
+    await repository.cancelPendingStart({ internalInstanceId: 'instance-1', reason: 'DingTalk unavailable' })
+
+    assert.ok(pool.calls.some(({ sql }) => sql.includes("UPDATE approval_instances SET status = 'cancelled'")))
+    assert.ok(pool.calls.some(({ sql }) => sql.includes("UPDATE recruitment_requests SET status = 'draft'")))
+    assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
+  })
+
+  it('persists a callback decision transactionally and records its receipt', async () => {
+    const pool = new FakePool([[], [{ status: 'processing' }], [{ id: 'instance-1', subject_type: 'recruitment_request', subject_id: 'request-1', status: 'pending' }], [{ id: 'step-1' }], [], [], [], [], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+    assert.deepEqual(await repository.applyDecision({ eventId: 'event-1', processInstanceId: 'ding-1', decision: 'approved', approverUserId: 'ding-user-1', comment: 'ok', rawPayload: {} }), { replayed: false })
+    assert.ok(pool.calls.some(({ sql }) => sql.includes('UPDATE recruitment_requests')))
+    assert.ok(pool.calls.some(({ sql }) => sql.includes('INSERT INTO approval_records')))
+    assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
+  })
+
+  it('treats an already completed callback receipt as a replay', async () => {
+    const pool = new FakePool([[], [], [{ status: 'completed' }], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+    assert.deepEqual(await repository.applyDecision({ eventId: 'event-1', processInstanceId: 'ding-1', decision: 'approved', rawPayload: {} }), { replayed: true })
+    assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
+  })
+})

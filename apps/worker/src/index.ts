@@ -6,6 +6,8 @@ import { createResumeAnalysisHandler, resumeAnalysisHandler } from './handlers/r
 import { createTaskExecutor, InMemoryIdempotencyStore, TaskExecutor } from './runner.js'
 import { beginTaskAttempt, createTask, hasAttemptsRemaining, isSupportedTaskType, TaskExhaustedError, TaskValidationError, validateTaskEnvelope, type CreateTaskInput, type TaskEnvelope, type TaskHandler, type TaskHandlerContext, type TaskType } from './task.js'
 import { startWorker, type StartWorkerOptions, type WorkerRuntime } from './worker.js'
+import { ClamdClient } from './security/clamd-client.js'
+import { processNextResumeScan, startResumeScanPoll } from './security/resume-scan.js'
 
 export {
   beginTaskAttempt,
@@ -29,6 +31,9 @@ export {
   validateTaskEnvelope,
   isSupportedTaskType,
   WorkerFailure,
+  ClamdClient,
+  processNextResumeScan,
+  startResumeScanPoll,
 }
 
 export type {

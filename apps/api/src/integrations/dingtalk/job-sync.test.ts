@@ -86,8 +86,9 @@ describe('DingTalkJobSyncService', () => {
     const receipt = repository.events.get(event.eventId)!
     repository.events.set(event.eventId, { ...receipt, status: 'processing', receivedAt: new Date(Date.now() - 11 * 60 * 1000) })
     const replay = await service.publish(event)
-    assert.equal(replay.status, 'draft')
-    assert.equal(repository.created.length, 2)
+    // A persisted result is authoritative even if the receipt status was left stale.
+    assert.equal(replay.status, 'replayed')
+    assert.equal(repository.created.length, 1)
   })
 
   it('rejects a second event for an already synced external job', async () => {

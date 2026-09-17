@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { extractResumeText } from './resume-text-extractor.js'
 
 function createTextPdf(text: string): Buffer {
@@ -30,7 +32,8 @@ test('extracts UTF-8 text files as text', async () => {
 })
 
 test('extracts raw text from the real DOCX fixture', async () => {
-  const content = await readFile('测试简历-张伟.docx')
+  const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../测试简历-张伟.docx')
+  const content = await readFile(fixture)
   const text = await extractResumeText(content, '测试简历-张伟.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
   assert.match(text, /张伟/)
   assert.ok(text.length > 20)

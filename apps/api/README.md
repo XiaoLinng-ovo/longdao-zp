@@ -58,6 +58,8 @@ HTTP Server
 - `PORT=3100`
 - `NODE_ENV=development`
 - `DINGTALK_INTEGRATION_TOKEN`：钉钉服务端调用专用 Bearer Token；未配置时接口保持关闭
+- `DINGTALK_APP_KEY` / `DINGTALK_APP_SECRET`：企业内部应用凭据，用于获取 access token 并发起审批实例
+- `DINGTALK_CALLBACK_TOKEN` / `DINGTALK_CALLBACK_AES_KEY` / `DINGTALK_CALLBACK_CORP_ID`：钉钉 HTTP 加密回调配置
 - `PLATFORM_BASE_URL=http://127.0.0.1:5174`：返回给钉钉的岗位完善页面根地址
 
 端口设置为 `0` 可用于测试时让操作系统分配临时端口。
@@ -111,9 +113,34 @@ curl -X POST http://127.0.0.1:3100/api/v1/integrations/dingtalk/jobs \
   }'
 ```
 
-首次调用创建一条 `approved` 招聘需求和一条 `draft` 岗位，并返回 `completeUrl`；相同 `eventId` 和相同负载只回放原结果，不会重复创建。相同 `eventId` 携带不同负载返回 `409 DINGTALK_EVENT_CONFLICT`。`departmentCode` 必须已存在于平台 `departments.code`；可通过 `external_entity_mappings` 预先把钉钉用户 ID 映射到平台用户，未映射时岗位仍可创建，但创建人为空。
+首次调用创建一条 `draft` 招聘需求和一条 `draft` 岗位，并返回 `completeUrl`；相同 `eventId` 和相同负载只回放原结果，不会重复创建。相同 `eventId` 携带不同负载返回 `409 DINGTALK_EVENT_CONFLICT`。`departmentCode` 必须已存在于平台 `departments.code`；可通过 `external_entity_mappings` 预先把钉钉用户 ID 映射到平台用户，未映射时岗位仍可创建，但创建人为空。
 
-这部分是平台侧真实 HTTP 接入点。正式上线还需要在钉钉宜搭/连接器/企业内部应用中配置该 URL、Token 和字段映射，并从钉钉实际发起一次请求完成联调验收；本阶段不包含钉钉 OAuth 登录或加密事件回调。
+## 钉钉真实审批
+
+平台用户提交招聘需求时，若已完整配置钉钉应用和加密回调参数，API 会按部门的 `department_approval_policies` 查找流程模板，调用钉钉 `/v1.0/workflow/processInstances` 发起审批并保存 `processInstanceId`。外部审批进行中，网站的本地同意/驳回接口返回 `409 DINGTALK_APPROVAL_ACTIVE`，最终结果只能由验签、解密成功的钉钉回调写入。
+
+钉钉后台的 HTTP 回调地址配置为：
+
+```text
+POST https://<api-domain>/api/v1/integrations/dingtalk/approvals/callback
+```
+
+上线前必须为部门配置流程代码，并为提交人配置钉钉用户映射：
+
+```sql
+INSERT INTO department_approval_policies (department_id, subject_type, process_code)
+VALUES ('<department-uuid>', 'recruitment_request', '<ding-process-code>')
+ON CONFLICT (department_id, subject_type)
+DO UPDATE SET process_code = EXCLUDED.process_code, is_active = true, updated_at = now();
+
+INSERT INTO external_entity_mappings
+  (provider, external_type, external_id, internal_type, internal_id)
+VALUES ('dingtalk', 'user', '<ding-user-id>', 'user', '<platform-user-uuid>')
+ON CONFLICT (provider, external_type, external_id)
+DO UPDATE SET internal_id = EXCLUDED.internal_id, last_synced_at = now();
+```
+
+回调采用钉钉官方 SHA1 排序签名、AES-256-CBC 解密、CorpId/AppKey 校验，并返回加密的 `success`。代码级协议测试已经覆盖，但“真实接入完成”仍以在钉钉管理后台配置回调后，用企业真实流程完成一次提交、批准和驳回联调为准。
 
 ## 本地 PostgreSQL 启动
 

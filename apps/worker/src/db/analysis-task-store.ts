@@ -106,6 +106,10 @@ interface ResumeScanRow extends Record<string, unknown> {
   id: string
   scan_status: ResumeScanStatus
 }
+interface ResumeScanClaimRow extends Record<string, unknown> {
+  id: string
+  storage_key: string
+}
 export class AnalysisTaskNotFoundError extends Error {
   readonly code = 'ANALYSIS_TASK_NOT_FOUND'
 
@@ -252,6 +256,28 @@ async function inTransaction<T>(pool: PgPool, operation: (client: PgClient) => P
  */
 export class PostgresAnalysisTaskStore {
   constructor(readonly pool: PgPool) {}
+
+  async claimNextResumeForScan(): Promise<{ resumeId: string; storageKey: string } | undefined> {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query<ResumeScanClaimRow>(
+        `WITH candidate AS (
+           SELECT id
+           FROM resumes
+           WHERE scan_status = 'quarantined'
+           ORDER BY created_at ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1
+         )
+         UPDATE resumes AS r
+         SET scan_status = 'scanning'
+         FROM candidate
+         WHERE r.id = candidate.id
+         RETURNING r.id, r.storage_key`,
+      )
+      const row = result.rows[0]
+      return row ? { resumeId: row.id, storageKey: row.storage_key } : undefined
+    })
+  }
 
   async claimNextTask(input: ClaimNextTaskInput): Promise<AnalysisTaskLease | undefined> {
     assertPositiveInteger(input.maxAttempts, 'maxAttempts')

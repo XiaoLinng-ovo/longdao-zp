@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalRecruitingStore } from './store.js'
@@ -11,6 +10,7 @@ import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, Appro
 import { RecruitingWorkflowError, transitionJob, transitionRequest } from './workflow.js'
 import { validateResumeUpload } from './file-security.js'
 import { extractResumeText } from './resume-text-extractor.js'
+import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pro/object-storage'
 
 const resumeIntelligenceDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../packages/resume-intelligence/dist/index.js')
 const { buildRuleBasedReport } = createRequire(import.meta.url)(resumeIntelligenceDist) as { buildRuleBasedReport: typeof import('../../../../packages/resume-intelligence/dist/index.js').buildRuleBasedReport }
@@ -54,6 +54,12 @@ function required(value: unknown, field: string): string {
   const result = clean(value)
   if (!result) throw new RecruitingWorkflowError('VALIDATION_ERROR', `${field} 不能为空`, 400)
   return result
+}
+
+function requireCleanResume(scanStatus: string): void {
+  if (scanStatus !== 'clean') {
+    throw new RecruitingWorkflowError('RESUME_SCAN_NOT_CLEAN', `简历病毒扫描状态为 ${scanStatus}，仅 clean 状态允许分析`, 409)
+  }
 }
 function normalizeTags(value: unknown): string[] | undefined {
   if (value === undefined) return undefined
@@ -272,7 +278,9 @@ export function filterStateByDepartment(state: RecruitingStoreState, departmentI
 export class RecruitingService {
   private readonly repository: NormalizedRecruitingRepository | undefined
   private readonly store!: ReturnType<typeof createRecruitingStore>
-  constructor(store?: ReturnType<typeof createRecruitingStore>, private readonly quarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT || resolve(process.cwd(), '../../data/resumes/quarantine')) {
+  private readonly objectStorage: ObjectStorage
+  constructor(store?: ReturnType<typeof createRecruitingStore>, quarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT || resolve(process.cwd(), '../../data/resumes/quarantine'), objectStorage?: ObjectStorage) {
+    this.objectStorage = objectStorage ?? createObjectStorageFromEnv(process.env, quarantineRoot)
     if (process.env.NODE_ENV === 'test') {
       this.store = store ?? createRecruitingStore()
       this.repository = undefined
@@ -990,39 +998,38 @@ export class RecruitingService {
         if (application.candidateId !== candidateId) throw new RecruitingWorkflowError('RESUME_CANDIDATE_MISMATCH', '简历与申请的候选人不一致')
       }
       const id = randomUUID(); const hash = validatedUpload.contentHash; const storageKey = `${id}.${validatedUpload.extension}`
-      const filePath = resolve(this.quarantineRoot, storageKey)
-      await mkdir(this.quarantineRoot, { recursive: true }); await writeFile(filePath, payload)
+      await this.objectStorage.put(storageKey, payload, mimeType)
       let saved: Awaited<ReturnType<NormalizedRecruitingRepository['createResume']>>
       let queued: Awaited<ReturnType<NormalizedRecruitingRepository['createAnalysisTask']>>
       try {
         saved = await this.repository.createResume({ id, candidateId, ...(input.applicationId ? { applicationId: input.applicationId } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash })
         queued = await this.repository.createAnalysisTask({ resumeId: saved.id, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), idempotencyKey: `resume-analysis:${saved.id}:${hash}` })
       } catch (error) {
-        await rm(filePath, { force: true }).catch(() => undefined)
+        await this.objectStorage.delete(storageKey).catch(() => undefined)
         throw error
       }
       return { resume: { id: saved.id, candidateId: saved.candidateId, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), storageKey: saved.storageKey, originalFilename: saved.originalFilename, mimeType: saved.mimeType, sizeBytes: saved.sizeBytes, contentHash: saved.contentHash ?? hash, scanStatus: saved.scanStatus as ResumeRecord['scanStatus'], createdAt: saved.createdAt }, task: { id: queued.id, resumeId: queued.resumeId, ...(queued.applicationId ? { applicationId: queued.applicationId } : {}), status: queued.status as AnalysisTaskRecord['status'], attempts: queued.attempts, idempotencyKey: queued.idempotencyKey, availableAt: queued.availableAt, createdAt: queued.createdAt } }
     }
-    return this.store.transaction(async (state) => {
+    const localId = randomUUID()
+    const localStorageKey = `${localId}.${validatedUpload.extension}`
+    await this.objectStorage.put(localStorageKey, payload, mimeType)
+    try { return await this.store.transaction(async (state) => {
       const candidate = candidateOrThrow(state, candidateId)
       let application: ApplicationRecord | undefined
       if (input.applicationId) {
         application = applicationOrThrow(state, input.applicationId)
         if (application.candidateId !== candidate.id) throw new RecruitingWorkflowError('RESUME_CANDIDATE_MISMATCH', '简历与申请的候选人不一致')
       }
-      const id = randomUUID()
+      const id = localId
       const hash = validatedUpload.contentHash
-      const ext = validatedUpload.extension
-      const storageKey = `${id}.${ext}`
-      await mkdir(this.quarantineRoot, { recursive: true })
-      await writeFile(resolve(this.quarantineRoot, storageKey), payload)
+      const storageKey = localStorageKey
       const timestamp = LocalRecruitingStore.timestamp()
       const resume: ResumeRecord = { id, candidateId: candidate.id, ...(application ? { applicationId: application.id } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash, scanStatus: 'quarantined', createdAt: timestamp }
       const task: AnalysisTaskRecord = { id: randomUUID(), resumeId: resume.id, ...(application ? { applicationId: application.id } : {}), status: 'queued', attempts: 0, idempotencyKey: `resume-analysis:${resume.id}:${hash}`, availableAt: timestamp, createdAt: timestamp }
       state.resumes.push(resume)
       state.analysisTasks.push(task)
       return { resume, task }
-    })
+    }) } catch (error) { await this.objectStorage.delete(localStorageKey).catch(() => undefined); throw error }
   }
 
   async getAnalysisTask(id: string): Promise<AnalysisTaskRecord> {
@@ -1092,13 +1099,14 @@ export class RecruitingService {
       try { task = await this.repository.getAnalysisTask(taskId) } catch (error) { if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'REPOSITORY_NOT_FOUND') throw new RecruitingNotFoundError(`未找到分析任务：${taskId}`); throw error }
       if (task.status === 'completed') return mapRepositoryAnalysisTask(task)
       if (task.status === 'processing') throw new RecruitingWorkflowError('ANALYSIS_TASK_BUSY', '分析任务正在处理中', 409)
+      const resume = await this.repository.getResume(task.resumeId)
+      requireCleanResume(resume.scanStatus)
       const startedAt = new Date().toISOString()
       const processing = await this.repository.updateAnalysisTask(taskId, { status: 'processing', attempts: task.attempts + 1, startedAt, lastError: null })
       try {
-        const resume = await this.repository.getResume(processing.resumeId)
         const application = processing.applicationId ? await this.repository.getApplication(processing.applicationId) : undefined
         const job = application ? await this.repository.getJob(application.jobId) : undefined
-        const resumeBytes = await readFile(resolve(this.quarantineRoot, resume.storageKey))
+        const resumeBytes = await this.objectStorage.get(resume.storageKey)
         const content = await extractResumeText(resumeBytes, resume.originalFilename, resume.mimeType)
         const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: resume.originalFilename, mimeType: resume.mimeType, text: content, source: 'upload' }, job: buildJobRequirements(job ? mapRepositoryJobForAnalysis(job) : undefined, job?.id) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), ...(job ? { jobId: job.id } : {}) } })
         await this.repository.createAnalysisResult({ analysisTaskId: processing.id, resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), result: report as unknown as Record<string, unknown>, analyzerVersion: 'resume-intelligence-rule-based-0.1.0', inputHash: resume.contentHash })
@@ -1112,13 +1120,13 @@ export class RecruitingService {
       if (task.status === 'completed') return task
       if (task.status === 'processing') throw new RecruitingWorkflowError('ANALYSIS_TASK_BUSY', '分析任务正在处理中', 409)
       const resume = resumeOrThrow(state, task.resumeId)
+      requireCleanResume(resume.scanStatus)
       const application = task.applicationId ? applicationOrThrow(state, task.applicationId) : undefined
       const job = application ? jobOrThrow(state, application.jobId) : undefined
       task.status = 'processing'; task.attempts += 1; task.startedAt = LocalRecruitingStore.timestamp(); delete task.lastError
       try {
-        const resumeBytes = await readFile(resolve(this.quarantineRoot, resume.storageKey))
+        const resumeBytes = await this.objectStorage.get(resume.storageKey)
         const content = await extractResumeText(resumeBytes, resume.originalFilename, resume.mimeType)
-        resume.scanStatus = 'local_unscanned'
         const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: resume.originalFilename, mimeType: resume.mimeType, text: content, source: 'upload' }, job: buildJobRequirements(job, job?.id) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id, ...(task.applicationId ? { applicationId: task.applicationId } : {}), ...(job ? { jobId: job.id } : {}) } })
         const result: AnalysisResultRecord = { id: randomUUID(), analysisTaskId: task.id, resumeId: resume.id, ...(task.applicationId ? { applicationId: task.applicationId } : {}), result: report as unknown as Record<string, unknown>, analyzerVersion: 'resume-intelligence-rule-based-0.1.0', inputHash: resume.contentHash, humanReviewStatus: 'pending', createdAt: LocalRecruitingStore.timestamp() }
         state.analysisResults = state.analysisResults.filter((item) => item.analysisTaskId !== task.id)

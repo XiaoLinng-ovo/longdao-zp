@@ -1,7 +1,7 @@
 import type { Middleware } from './http.js';
 import { HttpError } from './http.js';
 import { sendSuccess, type ApiMeta } from './response.js';
-import { readJson } from './body.js';
+import { readBody, readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/service.js';
@@ -12,6 +12,10 @@ import { timingSafeEqual } from 'node:crypto';
 import { DingTalkJobSyncError, DingTalkJobSyncService } from './integrations/dingtalk/job-sync.js';
 import { PostgresDingTalkJobSyncRepository } from './integrations/dingtalk/postgres-job-sync.js';
 import { MemoryDingTalkJobSyncRepository } from './integrations/dingtalk/memory-job-sync.js';
+import { createConfiguredDingTalkApprovalClient } from './integrations/dingtalk/approval-client.js';
+import { DingTalkApprovalWorkflow, DingTalkApprovalWorkflowError } from './integrations/dingtalk/approval-workflow.js';
+import { PostgresDingTalkApprovalRepository } from './integrations/dingtalk/postgres-approval-workflow.js';
+import { executeRecruitmentApprovalAction } from './integrations/dingtalk/approval-routing.js';
 import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
 
 const recruiting = new RecruitingService();
@@ -20,6 +24,18 @@ const dingTalkJobSync = new DingTalkJobSyncService(
   process.env.NODE_ENV === 'test' ? new MemoryDingTalkJobSyncRepository() : new PostgresDingTalkJobSyncRepository(createDatabasePool()),
   { platformBaseUrl: process.env.PLATFORM_BASE_URL || 'http://127.0.0.1:5174' },
 );
+const dingTalkApprovalRepository = new PostgresDingTalkApprovalRepository(createDatabasePool());
+const dingTalkApprovalClient = createConfiguredDingTalkApprovalClient();
+const dingTalkApproval = dingTalkApprovalClient
+  && process.env.DINGTALK_CALLBACK_TOKEN?.trim()
+  && process.env.DINGTALK_CALLBACK_AES_KEY?.trim()
+  && process.env.DINGTALK_CALLBACK_CORP_ID?.trim()
+  ? new DingTalkApprovalWorkflow(dingTalkApprovalRepository, dingTalkApprovalClient, {
+      callbackToken: process.env.DINGTALK_CALLBACK_TOKEN.trim(),
+      callbackAesKey: process.env.DINGTALK_CALLBACK_AES_KEY.trim(),
+      callbackCorpId: process.env.DINGTALK_CALLBACK_CORP_ID.trim(),
+    })
+  : undefined;
 const AUTH_COOKIE = 'smartrecruit_session';
 const SESSION_COOKIE_MAX_AGE = 60 * 60 * 12;
 const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin', 'hr_admin', 'interviewer'];
@@ -221,6 +237,23 @@ const routeMiddleware: Middleware = async (context, next) => {
     return
   }
 
+  if (path === '/api/v1/integrations/dingtalk/approvals/callback' && method === 'POST') {
+    if (!dingTalkApproval) throw new HttpError(503, 'DINGTALK_APPROVAL_NOT_CONFIGURED', '钉钉审批回调尚未配置')
+    const signature = context.url.searchParams.get('msg_signature') ?? context.url.searchParams.get('signature') ?? ''
+    const timestamp = context.url.searchParams.get('timestamp') ?? ''
+    const nonce = context.url.searchParams.get('nonce') ?? ''
+    try {
+      const result = await dingTalkApproval.handleCallback({ body: (await readBody(context)).raw, timestamp, nonce, signature })
+      context.res.statusCode = 200
+      context.res.setHeader('content-type', 'application/json; charset=utf-8')
+      context.res.end(JSON.stringify(result.response))
+    } catch (error) {
+      if (error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status, error.code, error.message)
+      throw error
+    }
+    return
+  }
+
   const protectedPaths = [
     '/api/v1/recruitment-requests',
     '/api/v1/jobs',
@@ -272,7 +305,34 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (!suffix && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); setVersionEtag(context, request.version); sendSuccess(context, request); return; }
       if (suffix === 'approval' && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.getRequestApproval(id)); return; }
       if (!suffix && method === 'PATCH') { requireRole(auth, RECRUITMENT_WRITE_ROLES); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); assertVersion(parseIfMatch(context), request.version); const result = await recruiting.updateRequest(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
-      if (method === 'POST') { const requestAction = actionFrom(`/${suffix}`, '') ?? suffix.replaceAll('-', '_'); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); requireRole(auth, ['approve', 'reject'].includes(requestAction) ? RECRUITMENT_APPROVAL_ROLES : RECRUITMENT_WRITE_ROLES); sendSuccess(context, await recruiting.requestAction(id, requestAction, (await readJson(context)).reason, auth.user.id)); return; }
+      if (method === 'POST') {
+        const requestAction = actionFrom(`/${suffix}`, '') ?? suffix.replaceAll('-', '_');
+        const request = await recruiting.getRequest(id);
+        assertDepartmentScope(auth, request.departmentId);
+        requireRole(auth, ['approve', 'reject'].includes(requestAction) ? RECRUITMENT_APPROVAL_ROLES : RECRUITMENT_WRITE_ROLES);
+        const reason = (await readJson(context)).reason;
+        if (!dingTalkApproval) { sendSuccess(context, await recruiting.requestAction(id, requestAction, reason, auth.user.id)); return; }
+        try {
+          const result = await executeRecruitmentApprovalAction({
+            requestId: request.id, action: requestAction, actorId: auth.user.id,
+            request: { title: request.title, departmentId: request.departmentId, headcount: request.headcount },
+            performLocalAction: () => recruiting.requestAction(id, requestAction, reason, auth.user.id),
+            getCurrentInstanceId: async () => {
+              const approval = await recruiting.getRequestApproval(id)
+              if (!approval.current) throw new DingTalkApprovalWorkflowError('APPROVAL_INSTANCE_REQUIRED', '当前需求无可用审批实例', 409)
+              return approval.current.id
+            },
+            resolveOriginatorUserId: (internalUserId) => dingTalkApprovalRepository.resolveExternalUserId(internalUserId),
+            startExternalApproval: (approvalInput) => dingTalkApproval.start(approvalInput),
+            assertLocalDecisionAllowed: (subjectType, subjectId) => dingTalkApproval.assertLocalDecisionAllowed(subjectType, subjectId),
+          })
+          sendSuccess(context, result)
+        } catch (error) {
+          if (error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status, error.code, error.message)
+          throw error
+        }
+        return;
+      }
     }
     if (path === '/api/v1/jobs' && method === 'GET') {
       const jobs = await recruiting.listJobs(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('recruitmentRequestId') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);

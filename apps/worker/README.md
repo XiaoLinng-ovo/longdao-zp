@@ -1,16 +1,17 @@
 # SmartRecruit Pro Worker
 
-`apps/worker` 是 SmartRecruit Pro 的异步任务运行时骨架。它只使用 TypeScript 和 Node.js 标准库，当前**不连接 Redis、PostgreSQL、MinIO、ClamAV 或 OpenAI**，用于先冻结任务边界、重试策略和健康检查协议。
+`apps/worker` 是 SmartRecruit Pro 的异步任务运行时。启用 `WORKER_DB_POLL=true` 后使用 PostgreSQL 租约领取持久化任务；同时配置 `CLAMAV_HOST` 后，会先扫描隔离区简历，只有 `clean` 文件才允许进入分析。
 
 ## 当前能力
 
 - 任务信封：`id`、`type`、`payload`、`attempts`、`maxAttempts`、`idempotencyKey`、时间元数据；
 - 已注册任务类型：`resume-analysis`；
 - `resume-analysis` 处理器：验证候选人申请/简历输入，支持内联文本或注入文本加载器，并通过分析器端口返回安全的分析结果；
-- 默认分析器是骨架实现，只返回可持久化的输入摘要，不冒充完整的 `resume-intelligence` 报告；下一阶段可注入 `packages/resume-intelligence` 适配器；
+- 默认分析器使用 `packages/resume-intelligence` 生成可解释的规则报告，结果保持 `advisoryOnly`；
 - 失败分类：校验、未找到、冲突、超时、限流、依赖不可用、网络、内部错误和未知错误；
 - 只对明确的瞬态失败（超时、限流、依赖不可用、网络）自动判断可重试；
-- 进程内幂等存储，用于测试和单进程演示。生产环境应替换为 Redis/数据库实现，并使用原子 `SETNX`/唯一约束；
+- PostgreSQL 模式使用任务租约和唯一幂等键；未启用数据库轮询时仍保留进程内执行器用于测试；
+- ClamAV 使用 clamd `INSTREAM` 协议，状态按 `quarantined -> scanning -> clean/infected/failed` 单向推进；
 - `/health` 和 `/ready` 原生 HTTP 健康检查；
 - `SIGINT`/`SIGTERM` 优雅停止入口。
 
@@ -47,6 +48,11 @@ Worker 不会因为分析结果自动淘汰、录用或发放 Offer。
 | `WORKER_HEALTH_HOST` | `127.0.0.1` | 健康检查监听地址 |
 | `WORKER_HEALTH_PORT` | `4001` | 健康检查监听端口，`0` 表示随机端口 |
 | `WORKER_SHUTDOWN_TIMEOUT_MS` | `10000` | 预留优雅停止超时 |
+| `WORKER_DB_POLL` | `false` | 是否从 PostgreSQL 领取持久化分析及扫描任务 |
+| `CLAMAV_HOST` | 未配置 | clamd 主机；未配置时不启动扫描循环 |
+| `CLAMAV_PORT` | `3310` | clamd TCP 端口 |
+| `CLAMAV_TIMEOUT_MS` | `30000` | 单次扫描超时 |
+| `RECRUITING_QUARANTINE_ROOT` | `data/resumes/quarantine` | API 与 Worker 共享的隔离文件绝对路径 |
 
 ## 独立运行
 
@@ -65,7 +71,7 @@ GET http://127.0.0.1:4001/health
 GET http://127.0.0.1:4001/ready
 ```
 
-当前没有队列消费循环，因此启动进程只提供运行时和健康检查。后续接入 Redis 时，应新增 queue adapter，而不是让任务处理器直接依赖 Redis。
+生产运行至少配置 PostgreSQL、共享隔离目录和 ClamAV。当前任务调度使用 PostgreSQL 租约轮询，Redis 仍保留为后续队列适配边界。
 
 ## 文件边界
 
@@ -74,6 +80,8 @@ GET http://127.0.0.1:4001/ready
 - `src/handlers/resume-analysis.ts`：简历分析任务处理器及分析器/文本加载器端口；
 - `src/runner.ts`：任务分发、尝试次数和幂等执行；
 - `src/health.ts`：健康状态和 HTTP 探针；
+- `src/db`：PostgreSQL 任务租约、状态持久化和轮询；
+- `src/security`：ClamAV 客户端和简历扫描循环；
 - `src/worker.ts`：Worker 运行时和生命周期；
 - `src/index.ts`：公共导出和进程启动入口；
 - `tests/worker.test.ts`：原生 `node:test` 测试。

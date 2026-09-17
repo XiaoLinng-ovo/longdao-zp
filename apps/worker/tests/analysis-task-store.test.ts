@@ -171,4 +171,15 @@ void describe('PostgresAnalysisTaskStore SQL contract', () => {
     assert.match(client.calls[0]?.text ?? '', /scan_status = 'quarantined'/)
     assert.deepEqual(client.calls[0]?.values, ['resume-1', 'clean'])
   })
+
+  it('atomically claims the oldest quarantined resume for scanning', async () => {
+    const client = new MockClient(rows({ id: 'resume-1', storage_key: 'resume.pdf' }))
+    const store = new PostgresAnalysisTaskStore(new MockPool(client))
+
+    const claimed = await store.claimNextResumeForScan()
+
+    assert.deepEqual(claimed, { resumeId: 'resume-1', storageKey: 'resume.pdf' })
+    assert.match(client.calls[1]?.text ?? '', /FOR UPDATE SKIP LOCKED/)
+    assert.match(client.calls[1]?.text ?? '', /scan_status = 'quarantined'/)
+  })
 })

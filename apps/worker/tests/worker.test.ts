@@ -146,5 +146,14 @@ void describe('worker health', () => {
     const readyAfter = await fetch(`${base}/ready`)
     assert.equal(readyAfter.status, 200)
   })
+
+  it('loads ClamAV scanning only when a host is configured', () => {
+    const disabled = loadConfig({}, 'test-host')
+    const enabled = loadConfig({ CLAMAV_HOST: 'clamav', CLAMAV_PORT: '3311', CLAMAV_TIMEOUT_MS: '45000' }, 'test-host')
+    assert.equal(disabled.clamavHost, undefined)
+    assert.equal(enabled.clamavHost, 'clamav')
+    assert.equal(enabled.clamavPort, 3311)
+    assert.equal(enabled.clamavTimeoutMs, 45_000)
+  })
 })
 

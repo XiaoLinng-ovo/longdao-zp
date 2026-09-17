@@ -7,6 +7,7 @@ import {
 import { createResumePayloadResolver } from './payload.js'
 import { processNextPersistedResumeAnalysis } from '../handlers/persisted-resume-analysis.js'
 import { createTaskExecutor, type TaskExecutor } from '../runner.js'
+import type { ObjectStorage } from '@smartrecruit-pro/object-storage'
 
 export interface PersistedPollOptions {
   pool: PgPool
@@ -14,6 +15,7 @@ export interface PersistedPollOptions {
   leaseDurationMs: number
   pollIntervalMs: number
   quarantineRoot?: string
+  storage?: ObjectStorage
   executor?: TaskExecutor
   store?: PostgresAnalysisTaskStore
   /** Injectable logger keeps tests quiet and production output structured. */
@@ -32,7 +34,10 @@ export function startPersistedPoll(options: PersistedPollOptions): () => void {
     idempotencyStore: new PostgresIdempotencyStore(store),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
-  const resolver = createResumePayloadResolver(store, options.quarantineRoot === undefined ? {} : { quarantineRoot: options.quarantineRoot })
+  const resolver = createResumePayloadResolver(store, {
+    ...(options.quarantineRoot === undefined ? {} : { quarantineRoot: options.quarantineRoot }),
+    ...(options.storage === undefined ? {} : { storage: options.storage }),
+  })
   const logger = options.logger ?? console
   let running = false
 

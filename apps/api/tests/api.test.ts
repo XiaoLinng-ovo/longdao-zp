@@ -366,7 +366,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(typeof response.body.data.offerAcceptance.accepted, 'number')
   })
 
-  it('creates a quarantined resume, runs analysis, and persists an advisory result', async () => {
+  it('creates a quarantined resume and refuses analysis until malware scanning passes', async () => {
     const candidates = await get('/api/v1/candidates')
     const candidate = candidates.body.data[0]
     const application = candidate.applications[0]
@@ -395,27 +395,15 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.match(binaryCreated.body.data.resume.storageKey, /^[0-9a-f-]+\.doc$/)
 
     const processed = await requestJson('POST', '/api/v1/analysis-tasks/' + created.body.data.task.id, {})
-    assert.equal(processed.status, 200)
-    assert.equal(processed.body.data.status, 'completed')
-    const result = await get(`/api/v1/analysis-tasks/${created.body.data.task.id}/result`)
-    assert.equal(result.status, 200)
-    assert.equal(result.body.data.result.safety.advisoryOnly, true)
-    assert.equal(result.body.data.result.safety.applicationStatusMutation, 'none')
-    assert.equal(result.body.data.result.provenance.engine, 'deterministic-rules')
-    assert.ok(Array.isArray(result.body.data.result.assessment.matchedRequirements))
-    const resultId = result.body.data.id
-    assert.equal((await get(`/api/v1/analysis-results/${resultId}`)).body.data.id, resultId)
-    const reviewed = await requestJson('PATCH', `/api/v1/analysis-results/${resultId}`, { status: 'accepted', comment: '人工确认' })
-    assert.equal(reviewed.status, 200)
-    assert.equal(reviewed.body.data.humanReviewStatus, 'accepted')
-    assert.equal(reviewed.body.data.result.humanReview.status, 'accepted')
+    assert.equal(processed.status, 409)
+    assert.equal(processed.body.error.code, 'RESUME_SCAN_NOT_CLEAN')
 
     const detail = await get(`/api/v1/candidates/${candidate.id}`)
     assert.equal(detail.status, 200)
     assert.ok(Array.isArray(detail.body.data.analysisTasks))
     const detailTask = detail.body.data.analysisTasks.find((task: any) => task.id === created.body.data.task.id)
     assert.ok(detailTask)
-    assert.equal(detailTask.status, 'completed')
+    assert.equal(detailTask.status, 'queued')
   })
 
   it('rejects unsafe resume filenames before persisting the upload', async () => {

@@ -13,6 +13,10 @@ export interface WorkerConfig {
   healthPort: number
   shutdownTimeoutMs: number
   pollPostgres: boolean
+  clamavHost?: string
+  clamavPort: number
+  clamavTimeoutMs: number
+  quarantineRoot?: string
 }
 
 function readInteger(
@@ -44,6 +48,8 @@ export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   hostname: string = os.hostname(),
 ): WorkerConfig {
+  const clamavHost = env.CLAMAV_HOST?.trim() || undefined
+  const quarantineRoot = env.RECRUITING_QUARANTINE_ROOT?.trim() || undefined
   return {
     appName: env.APP_NAME?.trim() || 'smartrecruit-pro-worker',
     appVersion: env.APP_VERSION?.trim() || '0.1.0',
@@ -57,5 +63,9 @@ export function loadConfig(
     healthPort: readPort(env, 'WORKER_HEALTH_PORT', 4001),
     shutdownTimeoutMs: readInteger(env, 'WORKER_SHUTDOWN_TIMEOUT_MS', 10_000, { minimum: 1 }),
     pollPostgres: env.WORKER_DB_POLL?.trim() === 'true',
+    ...(clamavHost === undefined ? {} : { clamavHost }),
+    clamavPort: readPort(env, 'CLAMAV_PORT', 3310),
+    clamavTimeoutMs: readInteger(env, 'CLAMAV_TIMEOUT_MS', 30_000, { minimum: 1 }),
+    ...(quarantineRoot === undefined ? {} : { quarantineRoot }),
   }
 }

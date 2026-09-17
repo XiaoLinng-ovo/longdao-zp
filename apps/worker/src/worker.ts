@@ -5,6 +5,11 @@ import { HealthStateStore, startHealthServer } from './health.js'
 import { createTaskExecutor, type TaskExecutor } from './runner.js'
 import { createWorkerPool, loadWorkerPoolConfig } from './db/pool.js'
 import { startPersistedPoll } from './db/persisted-poll.js'
+import { createPostgresAnalysisTaskStore } from './db/analysis-task-store.js'
+import { ClamdClient } from './security/clamd-client.js'
+import { startResumeScanPoll } from './security/resume-scan.js'
+import { resolve } from 'node:path'
+import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pro/object-storage'
 
 export interface WorkerRuntime {
   readonly config: WorkerConfig
@@ -19,6 +24,7 @@ export interface StartWorkerOptions {
   now?: () => string
   /** Pool used when DB polling is enabled; creates one from env when omitted. */
   pool?: PgPool
+  storage?: ObjectStorage
 }
 
 export async function startWorker(config: WorkerConfig, options: StartWorkerOptions = {}): Promise<WorkerRuntime> {
@@ -28,7 +34,9 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
   const healthServer = await startHealthServer(config, health)
 
   let stopPoll: (() => void) | undefined
+  let stopScanPoll: (() => void) | undefined
   let pool: PgPool | undefined
+  const storage = options.storage ?? createObjectStorageFromEnv(process.env, config.quarantineRoot ?? resolve(process.cwd(), '../../data/resumes/quarantine'))
 
   if (config.pollPostgres) {
     pool = options.pool ?? createWorkerPool(loadWorkerPoolConfig())
@@ -38,7 +46,20 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
       leaseDurationMs: config.leaseDurationMs,
       pollIntervalMs: config.pollIntervalMs,
       now,
+      storage,
     })
+    if (config.clamavHost) {
+      stopScanPoll = startResumeScanPoll({
+        store: createPostgresAnalysisTaskStore(pool),
+        scanner: new ClamdClient({
+          host: config.clamavHost,
+          port: config.clamavPort,
+          timeoutMs: config.clamavTimeoutMs,
+        }),
+        storage,
+        pollIntervalMs: config.pollIntervalMs,
+      })
+    }
     health.setDependency('postgres', 'ok')
   }
 
@@ -50,6 +71,7 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
     closed = true
     health.setState('stopping')
     stopPoll?.()
+    stopScanPoll?.()
     if (pool) { try { await pool.end() } catch { /* pool already closed */ } }
     await new Promise<void>((resolve, reject) => {
       healthServer.close((error) => (error ? reject(error) : resolve()))

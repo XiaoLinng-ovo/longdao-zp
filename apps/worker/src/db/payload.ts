@@ -1,11 +1,12 @@
-import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { PostgresAnalysisTaskStore, type AnalysisTaskRecord } from './analysis-task-store.js'
 import type { ResumeAnalysisTaskPayload } from '../handlers/resume-analysis.js'
 import { extractResumeText } from '../resume-text-extractor.js'
+import { createLocalObjectStorage, type ObjectStorage } from '@smartrecruit-pro/object-storage'
 
 export interface ResumePayloadResolverOptions {
   quarantineRoot?: string
+  storage?: ObjectStorage
 }
 
 /**
@@ -21,7 +22,9 @@ export function createResumePayloadResolver(
 
   return async (task) => {
     const source = await store.getResumeAnalysisSource(task.resumeId)
-    const content = await readFile(resolve(quarantineRoot, source.storageKey))
+    const content = options.storage
+      ? await options.storage.get(source.storageKey)
+      : await createLocalObjectStorage(quarantineRoot).get(source.storageKey)
     const text = await extractResumeText(content, source.originalFilename, source.mimeType)
     const jobId = task.applicationId ? await store.getApplicationJob(task.applicationId) : undefined
 
