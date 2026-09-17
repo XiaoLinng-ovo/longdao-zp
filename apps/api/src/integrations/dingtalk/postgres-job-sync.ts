@@ -47,7 +47,7 @@ export class PostgresDingTalkJobSyncRepository implements DingTalkJobSyncReposit
       const requestId = randomUUID(); const jobId = randomUUID()
       const requestNo = `REQ-DING-${randomUUID().slice(0, 8).toUpperCase()}`
       const jobCode = `JOB-DING-${randomUUID().slice(0, 8).toUpperCase()}`
-      await client.query(`INSERT INTO recruitment_requests (id, request_no, title, department_id, requested_by, headcount, reason, status, version) VALUES ($1, $2, $3, $4, $5, $6, '钉钉快速发布，详情待平台完善', 'approved', 1)`, [requestId, requestNo, input.title, department.rows[0].id, creator, input.headcount])
+      await client.query(`INSERT INTO recruitment_requests (id, request_no, title, department_id, requested_by, headcount, reason, status, version) VALUES ($1, $2, $3, $4, $5, $6, '钉钉快速发布，详情待平台完善', 'draft', 1)`, [requestId, requestNo, input.title, department.rows[0].id, creator, input.headcount])
       await client.query(`INSERT INTO jobs (id, job_no, recruitment_request_id, department_id, title, status, headcount, created_by) VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7)`, [jobId, jobCode, requestId, department.rows[0].id, input.title, input.headcount, creator])
       await client.query(`INSERT INTO external_entity_mappings (provider, external_type, external_id, internal_type, internal_id, metadata) VALUES ($1, 'job', $2, 'job', $3, $4::jsonb)`, [provider, input.externalJobId, jobId, JSON.stringify({ creatorUserId: input.creatorUserId })])
       await client.query('COMMIT')
