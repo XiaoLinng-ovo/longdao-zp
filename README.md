@@ -4,7 +4,7 @@
 
 当前状态是“新版 API/Web 闭环 + PostgreSQL 生产底座接入中”：需求、岗位、候选人、申请、面试和 Offer 主流程已有实现，认证已支持 PostgreSQL Session、scrypt 迁移、CSRF、Origin 校验和登录限流。规范化业务表迁移、文件扫描、Redis Worker 和生产部署仍在继续。角色已包含 `admin`、`hr_admin`、`recruiter`、`hiring_manager`、`approver`、`interviewer`。
 
-详细现状与下一阶段请参阅 [`docs/superpowers/gaps/2026-09-15-project-progress-and-stack.md`](docs/superpowers/gaps/2026-09-15-project-progress-and-stack.md) 及 [`docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md`](docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md)。
+当前最终总设计请参阅 [`docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md`](docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md)；最初产品设计基线请参阅 [`docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md`](docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md)。
 
 ## 本地运行
 
