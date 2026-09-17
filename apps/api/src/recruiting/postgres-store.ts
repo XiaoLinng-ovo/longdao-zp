@@ -1,13 +1,15 @@
 import { LocalRecruitingStore } from './store.js'
 
 /**
- * RecruitingService is not yet wired to the normalized PostgreSQL repository.
- * Keep the local adapter for tests and fail closed elsewhere so no caller can
- * accidentally recreate the removed JSON state bridge.
+ * Legacy state-store factory retained for the test-only compatibility path.
+ *
+ * RecruitingService uses the normalized PostgreSQL repository directly in
+ * non-test environments. Keeping this factory fail-closed outside tests
+ * prevents accidental reintroduction of the removed JSON state bridge.
  */
 export function createRecruitingStore(): LocalRecruitingStore {
   if (process.env.NODE_ENV === 'test') {
     return new LocalRecruitingStore()
   }
-  throw new Error('Normalized PostgreSQL recruiting repository is not wired into RecruitingService yet')
+  throw new Error('Local recruiting store is test-only; production uses the normalized PostgreSQL repository')
 }

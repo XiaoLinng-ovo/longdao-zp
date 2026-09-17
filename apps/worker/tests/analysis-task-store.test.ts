@@ -99,6 +99,21 @@ void describe('PostgresAnalysisTaskStore SQL contract', () => {
     assert.equal(client.released, true)
   })
 
+  it('only claims resumes whose virus scan status is clean', async () => {
+    const client = new MockClient(rows(taskRow))
+    const store = new PostgresAnalysisTaskStore(new MockPool(client))
+
+    await store.claimNextTask({
+      maxAttempts: 3,
+      leaseDurationMs: 60_000,
+      now: '2026-09-10T00:00:00.000Z',
+    })
+
+    const claimSql = client.calls[1]?.text ?? ''
+    assert.match(claimSql, /JOIN resumes AS r ON r\.id = at\.resume_id/)
+    assert.match(claimSql, /r\.scan_status = 'clean'/)
+  })
+
   it('writes the result and completed status in one transaction with parameterized JSON', async () => {
     const completedTask = { ...taskRow, completed_at: '2026-09-10T00:00:10.000Z', available_at: '2026-09-10T00:00:10.000Z', status: 'completed' as const }
     const client = new MockClient(rows(taskRow), rows(resultRow), rows(completedTask))
@@ -143,5 +158,17 @@ void describe('PostgresAnalysisTaskStore SQL contract', () => {
     assert.equal(result?.analysisTaskId, 'task-1')
     assert.deepEqual(client.calls[0]?.values, ['idem-1'])
     assert.match(client.calls[0]?.text ?? '', /INNER JOIN analysis_tasks AS at/)
+  })
+
+  it('advances resume scan status monotonically before analysis is claimable', async () => {
+    const client = new MockClient(rows({ id: 'resume-1', scan_status: 'clean' }))
+    const store = new PostgresAnalysisTaskStore(new MockPool(client))
+
+    const status = await store.updateResumeScanStatus('resume-1', 'clean')
+
+    assert.equal(status, 'clean')
+    assert.match(client.calls[0]?.text ?? '', /UPDATE resumes\s+SET scan_status = \$2/)
+    assert.match(client.calls[0]?.text ?? '', /scan_status = 'quarantined'/)
+    assert.deepEqual(client.calls[0]?.values, ['resume-1', 'clean'])
   })
 })

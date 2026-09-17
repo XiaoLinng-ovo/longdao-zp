@@ -13,7 +13,7 @@
     "dev": "npm run build && node --watch dist/src/index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.16.0 <21 || >=22.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@types/pg": "^8.23.1",
+    "mammoth": "^1.12.3",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.23.0"
   }
 }

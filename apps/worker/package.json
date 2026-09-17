@@ -20,7 +20,10 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@smartrecruit-pro/resume-intelligence": "workspace:*",
     "@types/pg": "^8.23.1",
+    "mammoth": "^1.12.3",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.23.0"
   }
 }

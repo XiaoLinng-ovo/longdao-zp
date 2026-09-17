@@ -3,6 +3,7 @@ import type { IdempotencyRecord, IdempotencyStore } from '../runner.js'
 
 export type AnalysisTaskStatus = 'queued' | 'processing' | 'completed' | 'failed'
 export type HumanReviewStatus = 'pending' | 'accepted' | 'needs_correction' | 'not_required'
+export type ResumeScanStatus = 'quarantined' | 'scanning' | 'clean' | 'infected' | 'failed'
 
 export interface PgQueryResult<Row extends Record<string, unknown> = Record<string, unknown>> {
   rows: Row[]
@@ -100,6 +101,10 @@ interface ResumeSourceRow extends Record<string, unknown> {
 
 interface JobApplicationRow extends Record<string, unknown> {
   job_id: string | null
+}
+interface ResumeScanRow extends Record<string, unknown> {
+  id: string
+  scan_status: ResumeScanStatus
 }
 export class AnalysisTaskNotFoundError extends Error {
   readonly code = 'ANALYSIS_TASK_NOT_FOUND'
@@ -259,10 +264,12 @@ export class PostgresAnalysisTaskStore {
         `WITH candidate AS (
            SELECT at.id AS task_id
            FROM analysis_tasks AS at
+           INNER JOIN resumes AS r ON r.id = at.resume_id
            WHERE (
              (at.status = 'queued' AND at.available_at <= $1::timestamptz)
              OR (at.status = 'processing' AND at.available_at <= $1::timestamptz)
            )
+             AND r.scan_status = 'clean'
              AND at.attempts < $3::integer
            ORDER BY at.available_at ASC, at.created_at ASC
            FOR UPDATE SKIP LOCKED
@@ -370,6 +377,41 @@ export class PostgresAnalysisTaskStore {
       client.release()
     }
   }
+
+  /**
+   * Advances a resume scan state in PostgreSQL. Terminal scan states cannot be
+   * overwritten, preventing a late scanner result from reopening a quarantined
+   * or rejected file.
+   */
+  async updateResumeScanStatus(resumeId: string, status: Exclude<ResumeScanStatus, 'quarantined'>): Promise<ResumeScanStatus> {
+    const client = await this.pool.connect()
+    try {
+      const updated = await client.query<ResumeScanRow>(
+        `UPDATE resumes
+         SET scan_status = $2
+         WHERE id = $1
+           AND (
+             (scan_status = 'quarantined' AND $2 IN ('scanning', 'clean', 'infected', 'failed'))
+             OR (scan_status = 'scanning' AND $2 IN ('clean', 'infected', 'failed'))
+           )
+         RETURNING id, scan_status`,
+        [resumeId, status],
+      )
+      if (updated.rows[0]) return updated.rows[0].scan_status
+
+      const current = await client.query<ResumeScanRow>(
+        'SELECT id, scan_status FROM resumes WHERE id = $1',
+        [resumeId],
+      )
+      const row = current.rows[0]
+      if (!row) throw new AnalysisTaskNotFoundError(resumeId)
+      if (row.scan_status === status) return row.scan_status
+      throw new Error(`Invalid resume scan status transition: ${row.scan_status} -> ${status}`)
+    } finally {
+      client.release()
+    }
+  }
+
   async completeTask(input: CompleteTaskInput): Promise<{ task: AnalysisTaskRecord; result: AnalysisResultRecord }> {
     const completedAt = timestamp(input.completedAt)
     const humanReviewStatus = input.humanReviewStatus ?? 'pending'

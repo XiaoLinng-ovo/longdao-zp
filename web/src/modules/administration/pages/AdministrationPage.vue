@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, type AdminCheckRow, type WorkflowEvent } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
@@ -10,6 +10,15 @@ const events = ref<WorkflowEvent[]>([])
 const subjectType = ref<WorkflowEvent['subjectType'] | ''>('')
 const loading = ref(true)
 const error = ref('')
+const users = ref<AdminUser[]>([])
+const roles = ref<AdminRole[]>([])
+const settings = ref<AdminSettings>({})
+const failedTasks = ref<AdminAnalysisTask[]>([])
+const auditLogs = ref<AdminAuditLog[]>([])
+const savingUser = ref<string | null>(null)
+const savingRole = ref<string | null>(null)
+const savingSettings = ref(false)
+const settingsDraft = ref<Record<string, string>>({})
 
 const subjectLabels: Record<WorkflowEvent['subjectType'], string> = {
   recruitment_request: '招聘需求',
@@ -54,17 +63,44 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [checks, audit] = await Promise.all([
+    const [checks, audit, adminUsers, adminRoles, adminSettings, tasks, logs] = await Promise.all([
       listAdminChecks(),
       loadWorkflowEvents(subjectType.value || undefined, 80),
+      listAdminUsers(), listAdminRoles(), getAdminSettings(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
     ])
     rows.value = checks
     events.value = audit
+    users.value = adminUsers; roles.value = adminRoles; settings.value = adminSettings; failedTasks.value = tasks; auditLogs.value = logs
+    settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '读取系统配置失败'
   } finally {
     loading.value = false
   }
+}
+
+async function saveUser(user: AdminUser) {
+  savingUser.value = user.id; error.value = ''
+  try { const saved = await updateAdminUser(user.id, { displayName: user.displayName, isActive: user.isActive, role: user.role, departmentCode: user.departmentCode }); users.value = users.value.map((item) => item.id === user.id ? saved : item) }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存用户失败' }
+  finally { savingUser.value = null }
+}
+
+async function saveRole(role: AdminRole) {
+  savingRole.value = role.id; error.value = ''
+  try { const saved = await updateAdminRole(role.id, { name: role.name }); roles.value = roles.value.map((item) => item.id === role.id ? saved : item) }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存角色失败' }
+  finally { savingRole.value = null }
+}
+
+async function saveSettings() {
+  savingSettings.value = true; error.value = ''
+  try {
+    const patch: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(settingsDraft.value)) { try { patch[key] = JSON.parse(value) } catch { patch[key] = value } }
+    settings.value = await updateAdminSettings(patch)
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : '保存系统设置失败' }
+  finally { savingSettings.value = false }
 }
 
 async function changeSubject() {
@@ -81,6 +117,37 @@ onMounted(refresh)
   <div v-if="loading" class="loading-note">正在读取系统配置与审计记录...</div>
   <div v-else-if="error" class="error-note" role="alert">{{ error }} <button class="btn btn-ghost" type="button" @click="refresh">重试</button></div>
   <template v-else>
+    <section class="section">
+      <h3 class="section-title">用户与角色</h3>
+      <div class="table-wrap">
+        <table><thead><tr><th>用户</th><th>角色</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><input v-model="user.role" aria-label="用户角色" /></td><td><input v-model="user.departmentCode" aria-label="用户部门" /></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
+          <tr v-if="!users.length"><td colspan="5" class="table-empty">暂无用户</td></tr>
+        </tbody></table>
+      </div>
+      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>角色代码</th><th>角色名称</th><th>操作</th></tr></thead><tbody>
+        <tr v-for="role in roles" :key="role.id"><td>{{ role.code }}</td><td><span>{{ role.name }}</span> <input v-model="role.name" aria-label="角色名称" /></td><td><button class="btn btn-primary" type="button" :disabled="savingRole === role.id" @click="saveRole(role)">{{ savingRole === role.id ? '保存中...' : '保存' }}</button></td></tr>
+        <tr v-if="!roles.length"><td colspan="3" class="table-empty">暂无角色</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading"><h3 class="section-title">系统设置</h3><button class="btn btn-primary" type="button" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button></div>
+      <div class="form-grid form-panel"><div v-for="(_, key) in settingsDraft" :key="key" class="form-field"><label :for="`setting-${key}`">{{ key }}</label><input :id="`setting-${key}`" v-model="settingsDraft[key]" /><small>{{ settingsDraft[key] }}</small></div><div v-if="!Object.keys(settingsDraft).length" class="table-empty">暂无系统设置</div></div>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>任务</th><th>简历</th><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
+        <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.id }}</td><td>{{ task.resumeId }}</td><td>{{ task.attempts }}</td><td>{{ task.lastError || '—' }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="5" class="table-empty">暂无失败任务</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">管理审计日志</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源</th><th>操作人</th><th>请求 ID</th></tr></thead><tbody>
+        <tr v-for="log in auditLogs" :key="log.id"><td>{{ new Date(log.createdAt).toLocaleString() }}</td><td>{{ log.action }}</td><td>{{ log.resourceType }}{{ log.resourceId ? ` / ${log.resourceId}` : '' }}</td><td>{{ log.actorEmail || log.actorId || '—' }}</td><td>{{ log.requestId || '—' }}</td></tr><tr v-if="!auditLogs.length"><td colspan="5" class="table-empty">暂无管理审计日志</td></tr>
+      </tbody></table></div>
+    </section>
+
     <section class="section">
       <h3 class="section-title">系统运行检查</h3>
       <div class="table-wrap">

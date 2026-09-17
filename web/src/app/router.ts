@@ -16,9 +16,9 @@ export function installAuthGuard(router: Router): void {
 
     if (!authSession.user) return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
 
-    if (to.meta.adminOnly && !['admin', 'hr_admin'].includes(authSession.user.role)) return { name: 'dashboard' }
+    if (to.meta.adminOnly && !['admin', 'hr_admin'].includes(authSession.user.role)) return { name: 'forbidden', query: { from: to.fullPath } }
     const allowedRoles = to.meta.roles as string[] | undefined
-    if (allowedRoles && !allowedRoles.includes(authSession.user.role)) return { name: 'dashboard' }
+    if (allowedRoles && !allowedRoles.includes(authSession.user.role)) return { name: 'forbidden', query: { from: to.fullPath } }
     return true
   })
 }

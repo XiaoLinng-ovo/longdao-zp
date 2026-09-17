@@ -54,8 +54,8 @@ async function seedResumeAnalysis(pool: Pool, quarantineRoot: string): Promise<S
     [candidateId, `CAN-${randomUUID().slice(0, 8).toUpperCase()}`, '集成测试候选人'],
   )
   await pool.query(
-    `INSERT INTO resumes (id, candidate_id, storage_key, original_filename, mime_type, size_bytes, content_hash)
-     VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)`,
+    `INSERT INTO resumes (id, candidate_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash)
+     VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, 'clean', $7)`,
     [resumeId, candidateId, `${resumeId}.txt`, 'resume.txt', 'text/plain', Buffer.byteLength(resumeText, 'utf8'), null],
   )
   await pool.query(

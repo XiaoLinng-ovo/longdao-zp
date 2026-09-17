@@ -84,6 +84,7 @@ export class TaskExecutor {
   private readonly handlers: TaskHandlerMap
   private readonly idempotencyStore: IdempotencyStore
   private readonly now: () => string
+  private readonly inFlight = new Map<string, Promise<TaskExecutionResult>>()
 
   constructor(options: TaskExecutorOptions = {}) {
     this.handlers = {
@@ -96,6 +97,30 @@ export class TaskExecutor {
   async execute<TResult = unknown>(input: unknown): Promise<TaskExecutionResult<TResult>> {
     validateTaskEnvelope(input)
     const task = input as TaskEnvelope<TaskType, unknown>
+    const existing = this.inFlight.get(task.idempotencyKey)
+    if (existing) {
+      const completed = (await existing) as TaskExecutionResult<TResult>
+      if (completed.status === 'completed' || completed.status === 'skipped') {
+        return {
+          ...completed,
+          status: 'skipped',
+          taskId: task.id,
+          idempotencyKey: task.idempotencyKey,
+          skippedReason: 'idempotency_duplicate',
+        }
+      }
+      return completed
+    }
+    const pending = this.executeOwned<TResult>(task)
+    this.inFlight.set(task.idempotencyKey, pending as Promise<TaskExecutionResult>)
+    try {
+      return await pending
+    } finally {
+      if (this.inFlight.get(task.idempotencyKey) === pending) this.inFlight.delete(task.idempotencyKey)
+    }
+  }
+
+  private async executeOwned<TResult = unknown>(task: TaskEnvelope<TaskType, unknown>): Promise<TaskExecutionResult<TResult>> {
     if (!isSupportedTaskType(task.type)) {
       const failure = classifyFailure(new WorkerFailure(`Unsupported task type: ${task.type}`, {
         category: 'validation',

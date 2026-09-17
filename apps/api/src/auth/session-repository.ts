@@ -55,6 +55,7 @@ export class PostgresSessionRepository implements SessionRepository {
          LEFT JOIN departments d ON d.id = u.department_id
          LEFT JOIN LATERAL (SELECT r.code AS role FROM user_roles x JOIN roles r ON r.id = x.role_id WHERE x.user_id = u.id ORDER BY r.code LIMIT 1) ur ON true
         WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
+          AND u.is_active = true
         LIMIT 1`, [hash(token)])
     const row = result.rows[0]
     if (!row) return undefined

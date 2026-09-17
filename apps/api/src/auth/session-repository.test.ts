@@ -34,6 +34,7 @@ describe('PostgresSessionRepository', () => {
     const session = await repository.findSessionByToken('secret')
     assert.equal(session?.sessionId, row.id)
     assert.match(pool.calls[0]!.sql, /token_hash = \$1/i)
+    assert.match(pool.calls[0]!.sql, /u\.is_active = true/i)
     assert.match(pool.calls[1]!.sql, /UPDATE sessions SET last_seen_at/i)
   })
 

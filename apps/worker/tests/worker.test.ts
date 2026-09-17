@@ -62,6 +62,32 @@ void describe('worker task runtime', () => {
     assert.equal(calls, 1)
     assert.equal(first.result?.safety.advisoryOnly, true)
     assert.equal(first.result?.safety.applicationStatusMutation, 'none')
+    assert.equal(first.result?.analysis.engine, 'deterministic-rules')
+    assert.ok(first.result?.analysis.report.assessment)
+  })
+
+  it('does not invoke the handler twice for concurrent duplicate deliveries', async () => {
+    let calls = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const executor = createTaskExecutor({
+      handlers: {
+        'resume-analysis': async () => {
+          calls += 1
+          await gate
+          return { taskType: 'resume-analysis', status: 'completed', safety: { advisoryOnly: true, applicationStatusMutation: 'none' } } as ResumeAnalysisResult
+        },
+      },
+    })
+    const task = createTask({ type: 'resume-analysis', payload: basePayload, maxAttempts: 3, idempotencyKey: 'idem-concurrent' })
+    const firstPromise = executor.execute<ResumeAnalysisResult>(task)
+    const secondPromise = executor.execute<ResumeAnalysisResult>(task)
+    await new Promise((resolve) => setImmediate(resolve))
+    release()
+    const [first, second] = await Promise.all([firstPromise, secondPromise])
+    assert.equal(first.status, 'completed')
+    assert.equal(second.status, 'skipped')
+    assert.equal(calls, 1)
   })
 
   it('returns a retryable result for transient handler failures', async () => {

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { PostgresAnalysisTaskStore, type AnalysisTaskRecord } from './analysis-task-store.js'
 import type { ResumeAnalysisTaskPayload } from '../handlers/resume-analysis.js'
+import { extractResumeText } from '../resume-text-extractor.js'
 
 export interface ResumePayloadResolverOptions {
   quarantineRoot?: string
@@ -20,7 +21,8 @@ export function createResumePayloadResolver(
 
   return async (task) => {
     const source = await store.getResumeAnalysisSource(task.resumeId)
-    const text = await readFile(resolve(quarantineRoot, source.storageKey), 'utf8')
+    const content = await readFile(resolve(quarantineRoot, source.storageKey))
+    const text = await extractResumeText(content, source.originalFilename, source.mimeType)
     const jobId = task.applicationId ? await store.getApplicationJob(task.applicationId) : undefined
 
     return {

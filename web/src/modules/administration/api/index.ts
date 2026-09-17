@@ -11,6 +11,26 @@ export interface AdminCheckRow {
   detail: string
 }
 
+export interface AdminUser {
+  id: string
+  email: string
+  displayName: string
+  role: string
+  departmentCode: string | null
+  isActive: boolean
+  lastLoginAt: string | null
+  createdAt: string
+}
+
+export interface AdminRole { id: string; code: string; name: string }
+export type AdminSettings = Record<string, unknown>
+export interface AdminAnalysisTask {
+  id: string; resumeId: string; applicationId?: string; status: 'queued' | 'processing' | 'completed' | 'failed'; attempts: number; idempotencyKey: string; lastError?: string; availableAt: string; startedAt?: string; completedAt?: string; createdAt: string
+}
+export interface AdminAuditLog {
+  id: string; actorId: string | null; actorEmail: string | null; action: string; resourceType: string; resourceId: string | null; requestId: string | null; metadata: Record<string, unknown>; createdAt: string
+}
+
 interface ReadyPayload {
   status: string
   checks: Record<string, string>
@@ -43,4 +63,36 @@ export async function listAdminChecks(): Promise<AdminCheckRow[]> {
 
 export async function loadWorkflowEvents(subjectType?: WorkflowEvent['subjectType'], limit = 50): Promise<WorkflowEvent[]> {
   return loadSharedWorkflowEvents(subjectType, limit)
+}
+
+export async function listAdminUsers(): Promise<AdminUser[]> {
+  return (await apiClient.getJson<AdminUser[]>('/admin/users')).data
+}
+
+export async function updateAdminUser(id: string, patch: Partial<Pick<AdminUser, 'displayName' | 'isActive' | 'departmentCode' | 'role'>> & { password?: string }): Promise<AdminUser> {
+  return (await apiClient.patchJson<AdminUser>(`/admin/users/${encodeURIComponent(id)}`, patch)).data
+}
+
+export async function listAdminRoles(): Promise<AdminRole[]> {
+  return (await apiClient.getJson<AdminRole[]>('/admin/roles')).data
+}
+
+export async function updateAdminRole(id: string, patch: { name?: string }): Promise<AdminRole> {
+  return (await apiClient.patchJson<AdminRole>(`/admin/roles/${encodeURIComponent(id)}`, patch)).data
+}
+
+export async function getAdminSettings(): Promise<AdminSettings> {
+  return (await apiClient.getJson<AdminSettings>('/admin/settings')).data
+}
+
+export async function updateAdminSettings(patch: AdminSettings): Promise<AdminSettings> {
+  return (await apiClient.patchJson<AdminSettings>('/admin/settings', patch)).data
+}
+
+export async function listFailedAnalysisTasks(): Promise<AdminAnalysisTask[]> {
+  return (await apiClient.getJson<AdminAnalysisTask[]>('/admin/analysis-tasks?status=failed')).data
+}
+
+export async function listAdminAuditLogs(limit = 50): Promise<AdminAuditLog[]> {
+  return (await apiClient.getJson<AdminAuditLog[]>(`/admin/audit-logs?limit=${encodeURIComponent(String(limit))}`)).data
 }

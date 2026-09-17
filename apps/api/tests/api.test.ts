@@ -13,6 +13,8 @@ let testDirectory: string;
 let authHeader: Record<string, string> = {};
 const previousQuarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT;
 const previousNodeEnv = process.env.NODE_ENV;
+const previousDingTalkToken = process.env.DINGTALK_INTEGRATION_TOKEN;
+const previousPlatformBaseUrl = process.env.PLATFORM_BASE_URL;
 
 function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
   return new Promise((resolve, reject) => {
@@ -68,6 +70,8 @@ async function login(): Promise<void> {
 
 before(async () => {
   process.env.NODE_ENV = 'test';
+  process.env.DINGTALK_INTEGRATION_TOKEN = 'test-dingtalk-token';
+  process.env.PLATFORM_BASE_URL = 'https://recruit.example.test';
   testDirectory = await mkdtemp(join(tmpdir(), 'recruiting-api-test-'));
   process.env.RECRUITING_QUARANTINE_ROOT = join(testDirectory, 'resumes');
   const { createHttpServer } = await import('../src/server.js');
@@ -82,10 +86,33 @@ after(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   if (previousQuarantineRoot === undefined) delete process.env.RECRUITING_QUARANTINE_ROOT; else process.env.RECRUITING_QUARANTINE_ROOT = previousQuarantineRoot;
   if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
+  if (previousDingTalkToken === undefined) delete process.env.DINGTALK_INTEGRATION_TOKEN; else process.env.DINGTALK_INTEGRATION_TOKEN = previousDingTalkToken;
+  if (previousPlatformBaseUrl === undefined) delete process.env.PLATFORM_BASE_URL; else process.env.PLATFORM_BASE_URL = previousPlatformBaseUrl;
   await rm(testDirectory, { recursive: true, force: true });
 });
 
 describe('Phase 1 API', { concurrency: false }, () => {
+  it('accepts authenticated DingTalk job events and replays them idempotently', async () => {
+    const event = { eventId: 'evt-api-001', externalJobId: 'ding-job-api-001', title: '高级后端工程师', departmentCode: 'dept-tech', headcount: 2, creatorUserId: 'ding-user-001' };
+
+    const unauthorized = await requestJson('POST', '/api/v1/integrations/dingtalk/jobs', event, { authorization: 'Bearer wrong-token' });
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.body.error.code, 'DINGTALK_AUTH_REQUIRED');
+
+    const malformed = await requestJson('POST', '/api/v1/integrations/dingtalk/jobs', { ...event, headcount: 0 }, { authorization: 'Bearer test-dingtalk-token' });
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.body.error.code, 'DINGTALK_JOB_INVALID');
+
+    const created = await requestJson('POST', '/api/v1/integrations/dingtalk/jobs', event, { authorization: 'Bearer test-dingtalk-token' });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.data.status, 'draft');
+    assert.match(created.body.data.completeUrl, /^https:\/\/recruit\.example\.test\/jobs\//);
+
+    const replayed = await requestJson('POST', '/api/v1/integrations/dingtalk/jobs', event, { authorization: 'Bearer test-dingtalk-token' });
+    assert.equal(replayed.status, 200);
+    assert.equal(replayed.body.data.status, 'replayed');
+    assert.equal(replayed.body.data.jobId, created.body.data.jobId);
+  });
   it('limits hiring managers to recruiting data in their department', async () => {
     await loginAs('manager@smartrecruit.local', 'manager123');
 
@@ -389,6 +416,17 @@ describe('Phase 1 API', { concurrency: false }, () => {
     const detailTask = detail.body.data.analysisTasks.find((task: any) => task.id === created.body.data.task.id)
     assert.ok(detailTask)
     assert.equal(detailTask.status, 'completed')
+  })
+
+  it('rejects unsafe resume filenames before persisting the upload', async () => {
+    const response = await requestJson('POST', '/api/v1/resumes', {
+      candidateId: 'candidate-8821',
+      originalFilename: '../resume.txt',
+      mimeType: 'text/plain',
+      content: 'unsafe filename',
+    })
+    assert.equal(response.status, 400)
+    assert.equal(response.body.error.code, 'VALIDATION_ERROR')
   })
 
   it('runs the interview feedback lock and application advancement flow', async () => {

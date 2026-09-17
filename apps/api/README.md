@@ -19,6 +19,7 @@ HTTP Server
 | GET | `/api/v1/health` | 进程存活检查 |
 | GET | `/api/v1/ready` | Phase 1 配置就绪检查 |
 | GET | `/api/v1/me` | 当前用户；未认证时返回 401 |
+| POST | `/api/v1/integrations/dingtalk/jobs` | 钉钉简化发布岗位，创建平台待完善岗位 |
 
 ### 统一响应结构
 
@@ -56,6 +57,8 @@ HTTP Server
 - `HOST=127.0.0.1`
 - `PORT=3100`
 - `NODE_ENV=development`
+- `DINGTALK_INTEGRATION_TOKEN`：钉钉服务端调用专用 Bearer Token；未配置时接口保持关闭
+- `PLATFORM_BASE_URL=http://127.0.0.1:5174`：返回给钉钉的岗位完善页面根地址
 
 端口设置为 `0` 可用于测试时让操作系统分配临时端口。
 
@@ -84,6 +87,33 @@ npm run dev -- --host 127.0.0.1 --port 5174
 Vite 已将 `/api` 代理到 `http://127.0.0.1:3100`。
 
 招聘平台 Web 地址：`http://127.0.0.1:5174/`。
+
+## 钉钉简化发布岗位
+
+钉钉侧只采集岗位名称、部门编码、招聘人数和创建人，其余 JD、任职要求、工作地点等内容回到招聘平台补充。该接口不使用网站登录态，也不接受 Cookie；钉钉宜搭、连接器或企业内部应用应在服务端保存并发送集成 Token。
+
+```powershell
+$env:DINGTALK_INTEGRATION_TOKEN = '<generate-a-long-random-token>'
+$env:PLATFORM_BASE_URL = 'https://recruit.example.com'
+```
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/v1/integrations/dingtalk/jobs \
+  -H "Authorization: Bearer <DINGTALK_INTEGRATION_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventId": "evt-001",
+    "externalJobId": "ding-job-001",
+    "title": "高级后端工程师",
+    "departmentCode": "dept-tech",
+    "headcount": 2,
+    "creatorUserId": "ding-user-001"
+  }'
+```
+
+首次调用创建一条 `approved` 招聘需求和一条 `draft` 岗位，并返回 `completeUrl`；相同 `eventId` 和相同负载只回放原结果，不会重复创建。相同 `eventId` 携带不同负载返回 `409 DINGTALK_EVENT_CONFLICT`。`departmentCode` 必须已存在于平台 `departments.code`；可通过 `external_entity_mappings` 预先把钉钉用户 ID 映射到平台用户，未映射时岗位仍可创建，但创建人为空。
+
+这部分是平台侧真实 HTTP 接入点。正式上线还需要在钉钉宜搭/连接器/企业内部应用中配置该 URL、Token 和字段映射，并从钉钉实际发起一次请求完成联调验收；本阶段不包含钉钉 OAuth 登录或加密事件回调。
 
 ## 本地 PostgreSQL 启动
 
@@ -164,7 +194,7 @@ curl -H "authorization: <token>" "http://127.0.0.1:3100/api/v1/candidates?page=2
 
 - 请求体统一由 `src/body.ts` 的 `readBody` 读取并缓存（1 MB 上限），因此指纹与路由内 `readJson` 使用同一份解析结果。
 - 可调参数在 `src/idempotency.ts` 顶部：`DEFAULT_IDEMPOTENCY_TTL_MS`（默认 24h）、`DEFAULT_IDEMPOTENCY_MAX_ENTRIES`（默认 1000）、`IDEMPOTENCY_ENABLED=false` 可整体关闭；`/api/v1/auth/*` 与 GET/HEAD 不参与幂等。
-- 当前为单进程内存实现（`MemoryIdempotencyStore`），重启即失效；多实例/需持久化时替换为 PostgreSQL 实现（唯一键 + 指纹 + 响应体），中间件与调用方无需改动。
+- `NODE_ENV=test` 使用单进程内存实现；开发和生产环境使用 `PostgresIdempotencyStore` 持久化到 `idempotency_records`，支持跨实例和重启重放。
 
 ```bash
 curl -X POST http://127.0.0.1:3100/api/v1/candidates \
@@ -202,5 +232,5 @@ node scripts/verify-v1-flow.mjs        # 在真实 PostgreSQL 上跑完整 V1 �
 - `job_description_versions` 无 `language` 列，读取时统一按 `zh-CN` 返回。
 - `candidates` 无标签列，`/api/v1/candidate-tags` 在 PostgreSQL 模式返回空数组。
 - 简历仍落本地隔离目录；MinIO / ClamAV / Redis 未接入，Worker 仍用 PostgreSQL 租约轮询。
-- 幂等仍为单进程内存实现，重启失效（迁移里已有 `idempotency_records` 表待用）。
-- 管理后台接口（`/api/v1/admin/*`）尚未实现。
+- 幂等记录已在非测试环境写入 PostgreSQL；部署前必须执行包含 `idempotency_records` 的 migration。
+- 管理后台接口已提供用户、角色、系统设置、分析任务与审计日志查询/维护能力，并由 `admin / hr_admin` 角色保护。

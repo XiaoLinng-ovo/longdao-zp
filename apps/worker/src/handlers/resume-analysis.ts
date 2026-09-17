@@ -1,5 +1,6 @@
 import { WorkerFailure } from '../errors.js'
 import type { TaskEnvelope, TaskHandler, TaskHandlerContext } from '../task.js'
+import { buildRuleBasedReport, type AnalysisReport } from '@smartrecruit-pro/resume-intelligence'
 
 export interface ResumeAnalysisTaskPayload {
   applicationId?: string
@@ -45,8 +46,8 @@ export interface ResumeAnalysisResult {
   }
   analysis: {
     engine: string
-    analyzerStatus: 'skeleton'
     generatedAt: string
+    report: AnalysisReport
   }
   safety: {
     advisoryOnly: true
@@ -120,14 +121,26 @@ async function defaultTextLoader(
   })
 }
 
-/**
- * This is intentionally a small default analyzer. It validates and summarizes the
- * input but does not claim to produce the full resume-intelligence report. The
- * production adapter can be injected without changing the task envelope or runner.
- */
 async function defaultAnalyzer(input: ResumeAnalysisInput): Promise<ResumeAnalysisResult> {
   const { task, content, context } = input
   const normalizedText = content.text.replace(/\s+/gu, ' ').trim()
+  const report = buildRuleBasedReport({
+    resume: {
+      documentId: task.payload.resumeId,
+      fileName: content.fileName,
+      text: content.text,
+      ...(content.mimeType === undefined ? {} : { mimeType: content.mimeType }),
+      ...(task.payload.source === undefined ? {} : { source: task.payload.source }),
+    },
+    job: { ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }), title: '', requirements: [] },
+    subject: {
+      resumeId: task.payload.resumeId,
+      ...(task.payload.applicationId === undefined ? {} : { applicationId: task.payload.applicationId }),
+      ...(task.payload.candidateId === undefined ? {} : { candidateId: task.payload.candidateId }),
+      ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
+    },
+    generatedAt: context.now(),
+  })
   const result: ResumeAnalysisResult = {
     taskType: 'resume-analysis',
     status: 'completed',
@@ -138,9 +151,9 @@ async function defaultAnalyzer(input: ResumeAnalysisInput): Promise<ResumeAnalys
       normalizedTextLength: normalizedText.length,
     },
     analysis: {
-      engine: 'resume-intelligence-port',
-      analyzerStatus: 'skeleton',
+      engine: report.provenance.engine,
       generatedAt: context.now(),
+      report,
     },
     safety: {
       advisoryOnly: true,

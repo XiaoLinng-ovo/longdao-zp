@@ -8,10 +8,18 @@ import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/
 import { createDatabasePool } from './db/connection.js';
 import { authService } from './auth/middleware.js';
 import type { Role } from './auth/types.js';
+import { timingSafeEqual } from 'node:crypto';
+import { DingTalkJobSyncError, DingTalkJobSyncService } from './integrations/dingtalk/job-sync.js';
+import { PostgresDingTalkJobSyncRepository } from './integrations/dingtalk/postgres-job-sync.js';
+import { MemoryDingTalkJobSyncRepository } from './integrations/dingtalk/memory-job-sync.js';
 import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
 
 const recruiting = new RecruitingService();
 const adminService = new AdminService(createDatabasePool());
+const dingTalkJobSync = new DingTalkJobSyncService(
+  process.env.NODE_ENV === 'test' ? new MemoryDingTalkJobSyncRepository() : new PostgresDingTalkJobSyncRepository(createDatabasePool()),
+  { platformBaseUrl: process.env.PLATFORM_BASE_URL || 'http://127.0.0.1:5174' },
+);
 const AUTH_COOKIE = 'smartrecruit_session';
 const SESSION_COOKIE_MAX_AGE = 60 * 60 * 12;
 const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin', 'hr_admin', 'interviewer'];
@@ -88,6 +96,16 @@ function assertVersion(expected: number | undefined, actual: number): void {
 
 function setVersionEtag(context: Parameters<Middleware>[0], version: number): void {
   context.res.setHeader('etag', `"${version}"`)
+}
+
+function requireDingTalkToken(context: Parameters<Middleware>[0]): void {
+  const configured = process.env.DINGTALK_INTEGRATION_TOKEN?.trim()
+  const authorization = Array.isArray(context.req.headers.authorization) ? '' : context.req.headers.authorization?.trim()
+  const match = authorization?.match(/^Bearer\s+(.+)$/i)
+  const provided = match?.[1]?.trim()
+  if (!configured || !provided) throw new HttpError(401, 'DINGTALK_AUTH_REQUIRED', '钉钉集成未授权')
+  const actual = Buffer.from(provided); const expected = Buffer.from(configured)
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(401, 'DINGTALK_AUTH_REQUIRED', '钉钉集成未授权')
 }
 
 /* ------------------------------------------------------------------ *
@@ -181,6 +199,26 @@ const routeMiddleware: Middleware = async (context, next) => {
       method: context.auth.method,
     });
     return;
+  }
+
+  if (path === '/api/v1/integrations/dingtalk/jobs' && method !== 'POST') {
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', '仅支持 POST 请求');
+  }
+
+  if (path === '/api/v1/integrations/dingtalk/jobs' && method === 'POST') {
+    const contentType = Array.isArray(context.req.headers['content-type']) ? '' : context.req.headers['content-type'] ?? '';
+    if (!/^application\/json(?:\s*;|\s*$)/i.test(contentType.trim())) {
+      throw new HttpError(415, 'UNSUPPORTED_MEDIA_TYPE', '钉钉岗位同步仅支持 application/json');
+    }
+    requireDingTalkToken(context)
+    try {
+      const result = await dingTalkJobSync.publish(await readJson(context) as never)
+      sendSuccess(context, result, result.status === 'draft' ? 201 : 200)
+    } catch (error) {
+      if (error instanceof DingTalkJobSyncError) throw new HttpError(error.status, error.code, error.message)
+      throw error
+    }
+    return
   }
 
   const protectedPaths = [
@@ -336,5 +374,3 @@ export const notFoundMiddleware: Middleware = async (context) => {
 };
 
 export default routeMiddleware;
-
-

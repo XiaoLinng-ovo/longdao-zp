@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest'
-import { createAppRouter, navigationItems, getNavigationItemsForRole } from './router'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { createAppRouter, installAuthGuard, navigationItems, getNavigationItemsForRole } from './router'
+import { authSession } from '../modules/auth/session'
 
 const expectedRoutes = [
   {
@@ -61,6 +62,11 @@ const expectedRoutes = [
 ] as const
 
 describe('application router', () => {
+  beforeEach(() => {
+    authSession.ready = true
+    authSession.user = null
+    authSession.loading = false
+  })
   it('exposes every recruiting route with navigation metadata', () => {
     const router = createAppRouter()
     const routeByPath = new Map(router.getRoutes().map((route) => [route.path, route]))
@@ -94,5 +100,26 @@ describe('application router', () => {
     expect(adminRoute?.meta.adminOnly).toBe(true)
     expect(getNavigationItemsForRole('recruiter').some((item) => item.name === 'administration')).toBe(false)
     expect(getNavigationItemsForRole('admin').some((item) => item.name === 'administration')).toBe(true)
+  })
+
+  it('redirects unauthenticated users to login and preserves the destination', async () => {
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    await router.push('/reports')
+
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/reports')
+  })
+
+  it('shows a dedicated forbidden page when an authenticated user lacks access', async () => {
+    authSession.user = { id: 'u1', name: '招聘专员', email: 'recruiter@example.com', role: 'recruiter', departmentId: 'd1' }
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    await router.push('/administration')
+
+    expect(router.currentRoute.value.name).toBe('forbidden')
+    expect(router.currentRoute.value.query.from).toBe('/administration')
   })
 })

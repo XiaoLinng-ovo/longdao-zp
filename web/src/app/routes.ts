@@ -125,6 +125,16 @@ export const appRoutes: AppRouteRecord[] = [
     },
   },
   {
+    path: '/forbidden',
+    name: 'forbidden',
+    component: () => import('../shared/components/ForbiddenPage.vue'),
+    meta: {
+      title: '无权限', navLabel: '无权限', icon: '⛔', group: '系统', crumb: '系统 / 无权限',
+      hideInNav: true,
+      hideShell: true,
+    },
+  },
+  {
     path: '/reports',
     name: 'reports',
     component: () => import('../modules/reports/pages/ReportOverviewPage.vue'),

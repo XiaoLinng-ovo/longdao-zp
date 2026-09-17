@@ -1,11 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAdminChecks, loadWorkflowEvents } from './index'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs } from './index'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
 
 describe('管理后台 API', () => {
+  it('加载管理用户、角色、设置、失败任务和审计日志', async () => {
+    getJson.mockImplementation(async (path) => ({ ok: true, data: path.includes('settings') ? { aiBaseUrl: 'https://gateway.local' } : [], requestId: 'test' }) as never)
+    await listAdminUsers(); await listAdminRoles(); await getAdminSettings(); await listFailedAnalysisTasks(); await listAdminAuditLogs(20)
+    expect(getJson).toHaveBeenCalledWith('/admin/users')
+    expect(getJson).toHaveBeenCalledWith('/admin/roles')
+    expect(getJson).toHaveBeenCalledWith('/admin/settings')
+    expect(getJson).toHaveBeenCalledWith('/admin/analysis-tasks?status=failed')
+    expect(getJson).toHaveBeenCalledWith('/admin/audit-logs?limit=20')
+  })
+
+  it('更新系统设置使用 PATCH 并返回服务端设置', async () => {
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { timezone: 'Asia/Shanghai' }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    const result = await updateAdminSettings({ timezone: 'Asia/Shanghai' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/settings', { timezone: 'Asia/Shanghai' })
+    expect(result.timezone).toBe('Asia/Shanghai')
+  })
   it('汇总 ready 与 health 为配置检查项', async () => {
     getJson.mockImplementation(async (path) => {
       if (path === '/ready') return { ok: true, data: { status: 'ready', checks: { configuration: 'ok' } }, requestId: 'test' } as never
