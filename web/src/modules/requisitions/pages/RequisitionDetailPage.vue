@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { actionRequisition, getRequisition, updateRequisition, type ApiRequisition, type RequisitionAction } from '../api'
+import { actionRequisition, getRequisition, loadDepartments, updateRequisition, type ApiDepartment, type ApiRequisition, type RequisitionAction } from '../api'
 import { REQ_ACTION_HINT, REQ_ACTION_LABEL, REQ_REASON_REQUIRED, conversionHint, describeApproval, requisitionActionsFor, requisitionStatusLabel, validateRequisitionForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
@@ -32,6 +32,7 @@ const loadingAudit = ref(false)
 const showEdit = ref(false)
 const editForm = ref({ title: '', departmentId: '', headcount: 1, employmentType: 'full_time', workMode: 'hybrid', location: '', justification: '' })
 const editError = ref('')
+const departments = ref<ApiDepartment[]>([])
 const savingDetail = ref(false)
 const editable = computed(() => request.value ? (request.value.status === 'draft' || request.value.status === 'rejected') : false)
 
@@ -113,6 +114,8 @@ async function refresh() {
   clearFlags()
   try {
     request.value = await getRequisition(id.value)
+    departments.value = await loadDepartments()
+    if (request.value.departmentId && !departments.value.some((item) => item.code === request.value?.departmentId)) departments.value.push({ id: `legacy-${request.value.departmentId}`, code: request.value.departmentId, name: request.value.department, isActive: false })
     await Promise.all([loadAssociatedJobs(request.value.id), loadAuditEvents(request.value.id)])
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取招聘需求失败').message
@@ -284,7 +287,7 @@ onMounted(refresh)
     <div v-if="editError" class="error-note">{{ editError }}</div>
     <div class="form-grid">
       <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="editForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><input v-model="editForm.departmentId" /></div>
+      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="">请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}（{{ department.code }}）{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
       <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="editForm.headcount" type="number" min="1" /></div>
       <div class="form-field"><label>用工类型 <span class="required">*</span></label><select v-model="editForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
       <div class="form-field"><label>工作模式 <span class="required">*</span></label><select v-model="editForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>

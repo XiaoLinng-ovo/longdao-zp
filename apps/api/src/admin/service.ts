@@ -18,6 +18,18 @@ export interface AdminRoleRecord {
   name: string;
 }
 
+export interface AdminDepartmentRecord {
+  id: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminDepartmentCreate { code?: string; name?: string }
+export interface AdminDepartmentUpdate { name?: string; isActive?: boolean }
+
 export interface AdminAuditRecord {
   id: string;
   actorId: string | null;
@@ -83,6 +95,11 @@ function toAudit(row: Record<string, unknown>): AdminAuditRecord {
   };
 }
 
+function toDepartment(row: Record<string, unknown>): AdminDepartmentRecord {
+  const date = (value: unknown): string => value instanceof Date ? value.toISOString() : String(value)
+  return { id: String(row.id), code: String(row.code), name: String(row.name), isActive: Boolean(row.is_active), createdAt: date(row.created_at), updatedAt: date(row.updated_at) }
+}
+
 /**
  * 管理后台服务：用户/角色/系统设置/审计日志的查询与维护。
  * 只做管理域操作，不触碰招聘领域状态机；写操作都会写 audit_logs（系统审计），
@@ -145,6 +162,46 @@ export class AdminService {
   async listRoles(): Promise<AdminRoleRecord[]> {
     const result = await this.pool.query('SELECT id, code, name FROM roles ORDER BY code');
     return result.rows.map((row) => ({ id: String(row.id), code: String(row.code), name: String(row.name) }));
+  }
+
+  async listDepartments(activeOnly = false): Promise<AdminDepartmentRecord[]> {
+    const result = await this.pool.query(`SELECT id, code, name, is_active, created_at, updated_at FROM departments ${activeOnly ? 'WHERE is_active = true' : ''} ORDER BY name, code`)
+    return result.rows.map(toDepartment)
+  }
+
+  async createDepartment(input: AdminDepartmentCreate, actorId: string, requestId?: string): Promise<AdminDepartmentRecord> {
+    const code = String(input.code ?? '').trim()
+    const name = String(input.name ?? '').trim()
+    if (!/^[a-z][a-z0-9-]{2,63}$/.test(code)) throw new AdminValidationError('部门编码必须是 3-64 位小写字母、数字或短横线')
+    if (!name) throw new AdminValidationError('部门名称不能为空')
+    try {
+      const result = await this.pool.query('INSERT INTO departments (code, name, is_active) VALUES ($1, $2, true) RETURNING id, code, name, is_active, created_at, updated_at', [code, name])
+      const department = toDepartment(result.rows[0])
+      await this.appendAudit(actorId, 'admin.department.create', 'department', department.id, requestId, { code, name })
+      return department
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') throw new AdminValidationError(`部门编码已存在：${code}`)
+      throw error
+    }
+  }
+
+  async updateDepartment(id: string, patch: AdminDepartmentUpdate, actorId: string, requestId?: string): Promise<AdminDepartmentRecord> {
+    const current = await this.pool.query('SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1', [id])
+    if (!current.rows[0]) throw new AdminNotFoundError(`未找到部门：${id}`)
+    const sets: string[] = []
+    const values: unknown[] = []
+    if (patch.name !== undefined) {
+      const name = String(patch.name).trim()
+      if (!name) throw new AdminValidationError('部门名称不能为空')
+      sets.push(`name = $${values.push(name)}`)
+    }
+    if (patch.isActive !== undefined) sets.push(`is_active = $${values.push(Boolean(patch.isActive))}`)
+    if (!sets.length) return toDepartment(current.rows[0])
+    values.push(id)
+    const result = await this.pool.query(`UPDATE departments SET ${sets.join(', ')}, updated_at = now() WHERE id = $${values.length} RETURNING id, code, name, is_active, created_at, updated_at`, values)
+    const department = toDepartment(result.rows[0])
+    await this.appendAudit(actorId, 'admin.department.update', 'department', department.id, requestId, { changed: Object.keys(patch), code: department.code })
+    return department
   }
 
   async updateRole(id: string, patch: AdminRoleUpdate, actorId: string, requestId?: string): Promise<AdminRoleRecord> {

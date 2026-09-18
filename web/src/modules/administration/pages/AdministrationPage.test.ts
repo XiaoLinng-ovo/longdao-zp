@@ -2,13 +2,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AdministrationPage from './AdministrationPage.vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs } from '../api'
 
-vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn() }))
+vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn() }))
 const mockedChecks = vi.mocked(listAdminChecks)
 const mockedEvents = vi.mocked(loadWorkflowEvents)
 const mockedUsers = vi.mocked(listAdminUsers)
 const mockedRoles = vi.mocked(listAdminRoles)
+const mockedDepartments = vi.mocked(listAdminDepartments)
 const mockedSettings = vi.mocked(getAdminSettings)
 const mockedFailedTasks = vi.mocked(listFailedAnalysisTasks)
 const mockedAuditLogs = vi.mocked(listAdminAuditLogs)
@@ -25,7 +26,7 @@ describe('管理后台页面', () => {
   it('展示系统检查与流程审计记录，而不是空占位', async () => {
     mockedChecks.mockResolvedValue(checks)
     mockedEvents.mockResolvedValue([event])
-    mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([]); mockedSettings.mockResolvedValue({}); mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
+    mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([]); mockedDepartments.mockResolvedValue([]); mockedSettings.mockResolvedValue({}); mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
     root = document.createElement('div'); document.body.appendChild(root)
     app = createApp(AdministrationPage); app.mount(root)
     await flush()
@@ -38,7 +39,7 @@ describe('管理后台页面', () => {
   it('加载并展示用户、角色、系统设置、失败任务和管理审计', async () => {
     mockedChecks.mockResolvedValue([]); mockedEvents.mockResolvedValue([])
     mockedUsers.mockResolvedValue([{ id: 'u1', email: 'admin@example.com', displayName: '管理员', role: 'admin', departmentCode: 'HQ', isActive: true, lastLoginAt: null, createdAt: '2026-09-01T00:00:00Z' }])
-    mockedRoles.mockResolvedValue([{ id: 'r1', code: 'admin', name: '系统管理员' }])
+    mockedRoles.mockResolvedValue([{ id: 'r1', code: 'admin', name: '系统管理员' }]); mockedDepartments.mockResolvedValue([{ id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z' }])
     mockedSettings.mockResolvedValue({ timezone: 'Asia/Shanghai' })
     mockedFailedTasks.mockResolvedValue([{ id: 't1', resumeId: 'res-1', status: 'failed', attempts: 2, idempotencyKey: 'k', lastError: '解析失败', availableAt: '2026-09-01T00:00:00Z', createdAt: '2026-09-01T00:00:00Z' }])
     mockedAuditLogs.mockResolvedValue([{ id: 'a1', actorId: 'u1', actorEmail: 'admin@example.com', action: 'admin.settings.update', resourceType: 'system_settings', resourceId: null, requestId: 'req-1', metadata: {}, createdAt: '2026-09-01T00:00:00Z' }])

@@ -23,6 +23,7 @@ export interface AdminUser {
 }
 
 export interface AdminRole { id: string; code: string; name: string }
+export interface AdminDepartment { id: string; code: string; name: string; isActive: boolean; createdAt: string; updatedAt: string }
 export type AdminSettings = Record<string, unknown>
 export interface AdminAnalysisTask {
   id: string; resumeId: string; applicationId?: string; status: 'queued' | 'processing' | 'completed' | 'failed'; attempts: number; idempotencyKey: string; lastError?: string; availableAt: string; startedAt?: string; completedAt?: string; createdAt: string
@@ -75,6 +76,18 @@ export async function updateAdminUser(id: string, patch: Partial<Pick<AdminUser,
 
 export async function listAdminRoles(): Promise<AdminRole[]> {
   return (await apiClient.getJson<AdminRole[]>('/admin/roles')).data
+}
+
+export async function listAdminDepartments(): Promise<AdminDepartment[]> {
+  return (await apiClient.getJson<AdminDepartment[]>('/admin/departments')).data
+}
+
+export async function createAdminDepartment(input: { code: string; name: string }): Promise<AdminDepartment> {
+  return (await apiClient.postJson<AdminDepartment>('/admin/departments', input)).data
+}
+
+export async function updateAdminDepartment(id: string, patch: { name?: string; isActive?: boolean }): Promise<AdminDepartment> {
+  return (await apiClient.patchJson<AdminDepartment>(`/admin/departments/${encodeURIComponent(id)}`, patch)).data
 }
 
 export async function updateAdminRole(id: string, patch: { name?: string }): Promise<AdminRole> {

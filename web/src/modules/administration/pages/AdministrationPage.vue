@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
@@ -12,6 +12,10 @@ const loading = ref(true)
 const error = ref('')
 const users = ref<AdminUser[]>([])
 const roles = ref<AdminRole[]>([])
+const departments = ref<AdminDepartment[]>([])
+const departmentDraft = ref({ code: '', name: '' })
+const savingDepartment = ref<string | null>(null)
+const creatingDepartment = ref(false)
 const settings = ref<AdminSettings>({})
 const failedTasks = ref<AdminAnalysisTask[]>([])
 const auditLogs = ref<AdminAuditLog[]>([])
@@ -63,14 +67,14 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [checks, audit, adminUsers, adminRoles, adminSettings, tasks, logs] = await Promise.all([
+    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, tasks, logs] = await Promise.all([
       listAdminChecks(),
       loadWorkflowEvents(subjectType.value || undefined, 80),
-      listAdminUsers(), listAdminRoles(), getAdminSettings(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
+      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
     ])
     rows.value = checks
     events.value = audit
-    users.value = adminUsers; roles.value = adminRoles; settings.value = adminSettings; failedTasks.value = tasks; auditLogs.value = logs
+    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; failedTasks.value = tasks; auditLogs.value = logs
     settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '读取系统配置失败'
@@ -91,6 +95,20 @@ async function saveRole(role: AdminRole) {
   try { const saved = await updateAdminRole(role.id, { name: role.name }); roles.value = roles.value.map((item) => item.id === role.id ? saved : item) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : '保存角色失败' }
   finally { savingRole.value = null }
+}
+
+async function saveDepartment(department: AdminDepartment) {
+  savingDepartment.value = department.id; error.value = ''
+  try { const saved = await updateAdminDepartment(department.id, { name: department.name, isActive: department.isActive }); departments.value = departments.value.map((item) => item.id === department.id ? saved : item) }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存部门失败' }
+  finally { savingDepartment.value = null }
+}
+
+async function addDepartment() {
+  creatingDepartment.value = true; error.value = ''
+  try { departments.value = [await createAdminDepartment(departmentDraft.value), ...departments.value]; departmentDraft.value = { code: '', name: '' } }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '新增部门失败' }
+  finally { creatingDepartment.value = false }
 }
 
 async function saveSettings() {
@@ -121,13 +139,22 @@ onMounted(refresh)
       <h3 class="section-title">用户与角色</h3>
       <div class="table-wrap">
         <table><thead><tr><th>用户</th><th>角色</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><input v-model="user.role" aria-label="用户角色" /></td><td><input v-model="user.departmentCode" aria-label="用户部门" /></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
+          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><input v-model="user.role" aria-label="用户角色" /></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}（{{ department.code }}）</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
           <tr v-if="!users.length"><td colspan="5" class="table-empty">暂无用户</td></tr>
         </tbody></table>
       </div>
       <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>角色代码</th><th>角色名称</th><th>操作</th></tr></thead><tbody>
         <tr v-for="role in roles" :key="role.id"><td>{{ role.code }}</td><td><span>{{ role.name }}</span> <input v-model="role.name" aria-label="角色名称" /></td><td><button class="btn btn-primary" type="button" :disabled="savingRole === role.id" @click="saveRole(role)">{{ savingRole === role.id ? '保存中...' : '保存' }}</button></td></tr>
         <tr v-if="!roles.length"><td colspan="3" class="table-empty">暂无角色</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading"><h3 class="section-title">部门管理</h3></div>
+      <div class="inline-actions" style="margin-bottom:12px"><input v-model="departmentDraft.code" placeholder="部门编码，如 dept-ops" /><input v-model="departmentDraft.name" placeholder="部门名称" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
+      <div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody>
+        <tr v-for="department in departments" :key="department.id"><td><code>{{ department.code }}</code></td><td><input v-model="department.name" aria-label="部门名称" /></td><td><label><input v-model="department.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingDepartment === department.id" @click="saveDepartment(department)">{{ savingDepartment === department.id ? '保存中...' : '保存' }}</button></td></tr>
+        <tr v-if="!departments.length"><td colspan="4" class="table-empty">暂无部门</td></tr>
       </tbody></table></div>
     </section>
 

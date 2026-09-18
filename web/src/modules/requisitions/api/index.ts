@@ -22,6 +22,8 @@ export interface ApiRequisition {
   updatedAt: string
 }
 
+export interface ApiDepartment { id: string; code: string; name: string; isActive: boolean; createdAt?: string; updatedAt?: string }
+
 export type RequisitionAction = 'submit' | 'approve' | 'reject' | 'withdraw' | 'close' | 'resubmit' | 'cancel' | 'convert'
 
 export interface CreateRequisitionInput {
@@ -108,6 +110,10 @@ function toRow(row: ApiRequisition): RequisitionView {
 export async function loadRequisitions(): Promise<Requisition[]> {
   const response = await apiClient.getJson<ApiRequisition[]>('/recruitment-requests')
   return response.data.map(toViewModel)
+}
+
+export async function loadDepartments(): Promise<ApiDepartment[]> {
+  return (await apiClient.getJson<ApiDepartment[]>('/departments')).data
 }
 
 export async function loadRequisitionRows(): Promise<RequisitionView[]> {

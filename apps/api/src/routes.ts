@@ -263,6 +263,7 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   const protectedPaths = [
+    '/api/v1/departments',
     '/api/v1/recruitment-requests',
     '/api/v1/jobs',
     '/api/v1/candidates',
@@ -298,6 +299,8 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (!validateCsrf(headerToken, cookieToken)) throw new HttpError(403, 'CSRF_TOKEN_INVALID', 'CSRF Token 无效');
     }
     const auth = requireAuth(context);
+
+    if (path === '/api/v1/departments' && method === 'GET') { sendSuccess(context, await adminService.listDepartments(true)); return; }
 
     if (path === '/api/v1/recruitment-requests' && method === 'GET') {
       const requests = await recruiting.listRequests(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);
@@ -378,6 +381,10 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/reports/cycle-time' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).recruitmentCycle); return; }
 
     if (path === '/api/v1/admin/users' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await adminService.listUsers()); return; }
+    if (path === '/api/v1/admin/departments' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listDepartments()); return; }
+    if (path === '/api/v1/admin/departments' && method === 'POST') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return; }
+    const adminDepartmentMatch = path.match(/^\/api\/v1\/admin\/departments\/([^/]+)$/);
+    if (adminDepartmentMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateDepartment(adminDepartmentMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
     const adminUserMatch = path.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
     if (adminUserMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateUser(adminUserMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
     if (path === '/api/v1/admin/roles' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listRoles()); return; }
