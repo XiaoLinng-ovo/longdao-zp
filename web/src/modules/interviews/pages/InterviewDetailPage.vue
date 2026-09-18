@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
@@ -16,13 +16,6 @@ import {
   RECOMMENDATION_LABEL,
   type ApiInterviewDetail,
   type FeedbackRecommendation,
-  createLiveInterviewSession,
-  uploadLiveInterviewChunk,
-  endLiveInterviewSession,
-  type LiveInterviewSegment,
-  analyzeLiveSegment,
-  correctLiveSegmentRole,
-  type LiveAnswerAnalysis,
 } from '../api'
 
 const route = useRoute()
@@ -49,34 +42,6 @@ const showConclude = ref(false)
 const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
-const liveSessionId = ref('')
-const liveStatus = ref<'idle' | 'starting' | 'recording' | 'paused' | 'stopping' | 'failed'>('idle')
-const liveSegments = ref<LiveInterviewSegment[]>([])
-const liveError = ref('')
-const currentQuestion = ref('请先做一下自我介绍，并重点说明与你应聘岗位相关的经历。')
-const analyzingSegmentId = ref('')
-const liveAnalyses = ref<Record<string, LiveAnswerAnalysis>>({})
-let liveRecorder: MediaRecorder | undefined
-
-function toBase64(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onloadend = () => resolve(String(reader.result).split(',')[1] || ''); reader.onerror = () => reject(reader.error || new Error('读取录音片段失败')); reader.readAsDataURL(blob) }) }
-async function startLiveInterview() {
-  if (!detail.value || liveStatus.value === 'recording' || liveStatus.value === 'starting') return
-  liveError.value = ''; liveStatus.value = 'starting'
-  try {
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) throw new Error('当前浏览器不支持麦克风录音')
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const session = await createLiveInterviewSession(detail.value.id); liveSessionId.value = session.id
-    liveRecorder = new MediaRecorder(stream)
-    liveRecorder.ondataavailable = async (event) => { if (!event.data.size || !liveSessionId.value) return; try { const items = await uploadLiveInterviewChunk(liveSessionId.value, await toBase64(event.data), event.data.type || 'audio/webm'); liveSegments.value.push(...items) } catch (cause) { liveError.value = cause instanceof Error ? cause.message : '语音片段上传失败'; liveStatus.value = 'failed' } }
-    liveRecorder.onstop = () => stream.getTracks().forEach((track) => track.stop())
-    liveRecorder.start(4000); liveStatus.value = 'recording'
-  } catch (cause) { liveError.value = cause instanceof Error ? cause.message : '无法启动现场面试录音'; liveStatus.value = 'failed' }
-}
-function pauseLiveInterview() { if (liveRecorder?.state === 'recording') { liveRecorder.pause(); liveStatus.value = 'paused' } else if (liveRecorder?.state === 'paused') { liveRecorder.resume(); liveStatus.value = 'recording' } }
-async function stopLiveInterview() { if (!liveRecorder || !liveSessionId.value) return; liveStatus.value = 'stopping'; liveRecorder.stop(); await endLiveInterviewSession(liveSessionId.value); liveStatus.value = 'idle' }
-async function setSegmentRole(segment: LiveInterviewSegment, role: 'interviewer' | 'candidate') { try { const updated=await correctLiveSegmentRole(segment.id,role); Object.assign(segment,updated) } catch(cause) { liveError.value=cause instanceof Error?cause.message:'修正说话人失败' } }
-async function analyzeSegment(segment: LiveInterviewSegment) { if(!currentQuestion.value.trim()||analyzingSegmentId.value)return; analyzingSegmentId.value=segment.id; liveError.value=''; try { const result=await analyzeLiveSegment(segment.id,currentQuestion.value.trim()); liveAnalyses.value={...liveAnalyses.value,[segment.id]:result}; currentQuestion.value=result.nextQuestion } catch(cause) { liveError.value=cause instanceof Error?cause.message:'回答分析失败' } finally { analyzingSegmentId.value='' } }
-
 const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
 
 function clearFlags() { error.value = ''; feedback.value = '' }
@@ -197,7 +162,6 @@ async function submitConclude() {
 }
 
 onMounted(load)
-onUnmounted(() => { if (liveRecorder && liveRecorder.state !== 'inactive') liveRecorder.stop() })
 </script>
 
 <template>
@@ -241,27 +205,6 @@ onUnmounted(() => { if (liveRecorder && liveRecorder.state !== 'inactive') liveR
           <span v-if="detail.status === 'cancelled'" class="list-muted">已取消面试</span>
         </div>
         <div v-if="feedback" class="feedback success" style="margin-top:10px">{{ feedback }}</div>
-      </div>
-
-      <div class="card live-interview-card">
-        <div class="section-title">AI 现场面试</div>
-        <p class="list-muted">自动采集现场语音并按说话人分段。AI 仅提供分析建议，不会自动淘汰或录用。</p>
-        <div class="inline-actions">
-          <button v-if="liveStatus === 'idle' || liveStatus === 'failed'" class="btn btn-primary" type="button" @click="startLiveInterview">开始 AI 面试</button>
-          <button v-if="liveStatus === 'recording' || liveStatus === 'paused'" class="btn btn-ghost" type="button" @click="pauseLiveInterview">{{ liveStatus === 'paused' ? '继续录音' : '暂停录音' }}</button>
-          <button v-if="liveStatus === 'recording' || liveStatus === 'paused'" class="btn btn-ghost" type="button" @click="stopLiveInterview">结束 AI 面试</button>
-          <span class="live-state" :data-state="liveStatus">{{ liveStatus === 'recording' ? '正在录音' : liveStatus === 'paused' ? '已暂停' : liveStatus === 'starting' ? '正在启动' : liveStatus === 'stopping' ? '正在保存' : liveStatus === 'failed' ? '启动失败' : '未启动' }}</span>
-        </div>
-        <div v-if="liveError" class="feedback error" role="alert">{{ liveError }}</div>
-        <div class="form-field live-question"><label>当前问题</label><textarea v-model="currentQuestion" rows="2" /></div>
-        <div v-if="liveSegments.length" class="live-transcript">
-          <article v-for="segment in liveSegments" :key="segment.id" class="live-segment" :data-role="segment.role">
-            <strong>{{ segment.role === 'candidate' ? '候选人' : segment.role === 'interviewer' ? '面试官' : '待确认' }}</strong><span>{{ segment.text }}</span><small>{{ Math.round(segment.confidence * 100) }}% 置信</small>
-            <div class="segment-actions"><button class="btn btn-ghost" type="button" @click="setSegmentRole(segment,'interviewer')">标为面试官</button><button class="btn btn-ghost" type="button" @click="setSegmentRole(segment,'candidate')">标为候选人</button><button v-if="segment.role === 'candidate' && segment.confidence >= .6" class="btn btn-primary" type="button" :disabled="!!analyzingSegmentId" @click="analyzeSegment(segment)">{{ analyzingSegmentId === segment.id ? '分析中...' : '分析回答' }}</button></div>
-            <div v-if="liveAnalyses[segment.id]" class="segment-analysis"><strong>AI 分析</strong><p>{{ liveAnalyses[segment.id]!.summary }}</p><div class="analysis-scores"><span v-for="score in liveAnalyses[segment.id]!.scores" :key="score.dimension">{{ score.dimension }} {{ score.score }}/10</span></div><p><b>证据：</b>{{ liveAnalyses[segment.id]!.evidence.join('；') || '无' }}</p><p><b>建议下一题：</b>{{ liveAnalyses[segment.id]!.nextQuestion }}</p></div>
-          </article>
-        </div>
-        <div v-else class="list-muted">启动后这里会显示带角色标签的实时转写。</div>
       </div>
 
       <div class="card">
@@ -353,21 +296,3 @@ onUnmounted(() => { if (liveRecorder && liveRecorder.state !== 'inactive') liveR
     </div>
   </div>
 </template>
-
-<style scoped>
-.live-interview-card { grid-column: 1 / -1; }
-.live-state { font-size: 13px; color: var(--text-muted); }
-.live-state[data-state="recording"] { color: #b91c1c; font-weight: 700; }
-.live-transcript { display: grid; gap: 8px; margin-top: 14px; max-height: 360px; overflow: auto; }
-.live-segment { display: grid; grid-template-columns: 76px minmax(0, 1fr) 72px; gap: 10px; align-items: start; padding: 10px 12px; border-left: 3px solid #94a3b8; background: #f8fafc; }
-.live-segment[data-role="interviewer"] { border-color: #2563eb; }
-.live-segment[data-role="candidate"] { border-color: #0f766e; }
-.live-segment small { color: var(--text-muted); text-align: right; }
-.live-question { margin-top: 14px; }
-.segment-actions, .segment-analysis { grid-column: 2 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
-.segment-analysis { display: block; padding: 10px; border: 1px solid #dbeafe; background: #fff; }
-.segment-analysis p { margin: 6px 0; }
-.analysis-scores { display: flex; gap: 8px; flex-wrap: wrap; color: #0f766e; font-weight: 600; }
-@media (max-width: 720px) { .live-segment { grid-template-columns: 68px minmax(0, 1fr); } .live-segment small { grid-column: 2; text-align: left; } }
-</style>
-
