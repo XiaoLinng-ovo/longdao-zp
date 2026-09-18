@@ -235,6 +235,7 @@ onUnmounted(() => { if (liveRecorder && liveRecorder.state !== 'inactive') liveR
       <div class="card">
         <div class="section-title">面试操作</div>
         <div class="inline-actions" style="flex-wrap: wrap">
+          <button v-if="detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">进入 AI 面试室</button>
           <button v-if="detail.feedbackStatus !== 'locked' && detail.status !== 'cancelled'" class="btn btn-primary" type="button" :disabled="acting" @click="openFeedback">填写并锁定反馈</button>
           <button v-if="detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openConclude">完成面试</button>
           <span v-if="detail.status === 'cancelled'" class="list-muted">已取消面试</span>

@@ -83,6 +83,14 @@ export const appRoutes: AppRouteRecord[] = [
     },
   },
   {
+    path: '/interviews/:id/live',
+    name: 'interview-live',
+    component: () => import('../modules/interviews/pages/LiveInterviewPage.vue'),
+    meta: {
+      title: 'AI 面试室', navLabel: 'AI 面试室', icon: '④', group: '面试', crumb: '面试 / AI 面试室',
+    },
+  },
+  {
     path: '/interviews/:id',
     name: 'interview-detail',
     component: () => import('../modules/interviews/pages/InterviewDetailPage.vue'),
