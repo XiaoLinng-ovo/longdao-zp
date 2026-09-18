@@ -39,6 +39,18 @@ describe('PostgresDingTalkApprovalRepository', () => {
     assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
   })
 
+  it('cancels an unlinked offer instance and returns its offer to draft atomically', async () => {
+    const pool = new FakePool([[], [{ id: 'instance-1', subject_type: 'offer', subject_id: 'offer-1' }], [], [], [], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+
+    await repository.cancelPendingStart({ internalInstanceId: 'instance-1', reason: 'DingTalk unavailable' })
+
+    const update = pool.calls.find(({ sql }) => sql.includes('UPDATE offers'))
+    assert.ok(update)
+    assert.match(update.sql, /approval_status = 'cancelled'/)
+    assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
+  })
+
   it('persists a callback decision transactionally and records its receipt', async () => {
     const pool = new FakePool([[], [{ status: 'processing' }], [{ id: 'instance-1', subject_type: 'recruitment_request', subject_id: 'request-1', status: 'pending' }], [{ id: 'step-1' }], [], [], [], [], []])
     const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
@@ -46,6 +58,29 @@ describe('PostgresDingTalkApprovalRepository', () => {
     assert.ok(pool.calls.some(({ sql }) => sql.includes('UPDATE recruitment_requests')))
     assert.ok(pool.calls.some(({ sql }) => sql.includes('INSERT INTO approval_records')))
     assert.equal(pool.calls.at(-1)?.sql, 'COMMIT')
+  })
+
+  it('applies an approved callback to the linked offer', async () => {
+    const pool = new FakePool([[], [{ status: 'processing' }], [{ id: 'instance-1', subject_type: 'offer', subject_id: 'offer-1', status: 'pending' }], [{ id: 'step-1' }], [], [], [], [], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+
+    assert.deepEqual(await repository.applyDecision({ eventId: 'event-offer-1', processInstanceId: 'ding-offer-1', decision: 'approved', rawPayload: {} }), { replayed: false })
+
+    const update = pool.calls.find(({ sql }) => sql.includes('UPDATE offers'))
+    assert.ok(update)
+    assert.deepEqual(update.values, ['offer-1', 'approved', 'approved'])
+    assert.match(update.sql, /status = \$2, approval_status = \$3/)
+  })
+
+  it('applies a rejected callback by returning the offer to draft', async () => {
+    const pool = new FakePool([[], [{ status: 'processing' }], [{ id: 'instance-1', subject_type: 'offer', subject_id: 'offer-1', status: 'pending' }], [], [], [], [], [], []])
+    const repository = new PostgresDingTalkApprovalRepository(pool as unknown as Pool)
+
+    await repository.applyDecision({ eventId: 'event-offer-2', processInstanceId: 'ding-offer-2', decision: 'rejected', rawPayload: {} })
+
+    const update = pool.calls.find(({ sql }) => sql.includes('UPDATE offers'))
+    assert.ok(update)
+    assert.deepEqual(update.values, ['offer-1', 'draft', 'rejected'])
   })
 
   it('treats an already completed callback receipt as a replay', async () => {

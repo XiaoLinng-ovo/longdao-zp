@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { anonymizeText, buildResumeAnalysisPrompt, buildRuleBasedReport, parseResume } from '../src/index.js'
+import { anonymizeText, buildResumeAnalysisPrompt, buildRuleBasedReport, parseLlmResumeSuggestion, parseResume } from '../src/index.js'
 
 const resume = `张三
 zhangsan@example.com
@@ -52,4 +52,16 @@ test('builds a privacy-aware LLM prompt', () => {
   const prompt = buildResumeAnalysisPrompt({ anonymizedResumeText: '[NAME] [EMAIL]', job })
   assert.equal(prompt.includes('不得自动淘汰'), true)
   assert.equal(prompt.includes('[EMAIL]'), true)
+})
+
+test('validates the structured LLM suggestion contract', () => {
+  const suggestion = parseLlmResumeSuggestion({
+    summary: '建议人工复核', strengths: ['TypeScript'], risks: [],
+    matchedRequirements: [], conflicts: [], interviewQuestions: ['请介绍项目'], confidence: 0.8,
+  })
+  assert.equal(suggestion.confidence, 0.8)
+  assert.throws(() => parseLlmResumeSuggestion({ summary: 42 }), /summary/u)
+  assert.throws(() => parseLlmResumeSuggestion({
+    summary: 'x', strengths: [], risks: [], matchedRequirements: [], conflicts: [], interviewQuestions: [], confidence: 2,
+  }), /confidence/u)
 })

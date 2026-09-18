@@ -155,5 +155,19 @@ void describe('worker health', () => {
     assert.equal(enabled.clamavPort, 3311)
     assert.equal(enabled.clamavTimeoutMs, 45_000)
   })
+
+  it('loads one OpenAI-compatible model only when all required settings exist', () => {
+    const disabled = loadConfig({ OPENAI_BASE_URL: 'https://llm.example/v1' }, 'test-host')
+    const enabled = loadConfig({
+      OPENAI_BASE_URL: 'https://llm.example/v1/',
+      OPENAI_API_KEY: 'secret',
+      OPENAI_MODEL: 'resume-model',
+      OPENAI_TIMEOUT_MS: '45000',
+    }, 'test-host')
+    assert.equal(disabled.openai, undefined)
+    assert.deepEqual(enabled.openai, {
+      baseUrl: 'https://llm.example/v1/', apiKey: 'secret', model: 'resume-model', timeoutMs: 45_000,
+    })
+  })
 })
 

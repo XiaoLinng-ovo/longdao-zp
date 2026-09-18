@@ -438,6 +438,51 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(updated.body.data.find((item: any) => item.id === application.id).status, 'offer_approval')
   })
 
+  it('generates advisory interview questions without changing application status', async () => {
+    const interview = (await get('/api/v1/interviews')).body.data[0]; assert.ok(interview)
+    const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === interview.applicationId); assert.ok(application)
+
+    const originalFetch = globalThis.fetch
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    process.env.OPENAI_BASE_URL = 'https://model.example.test/v1'
+    process.env.OPENAI_API_KEY = 'test-key'
+    process.env.OPENAI_MODEL = 'test-model'
+    globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: [{ category: 'technical', difficulty: 'medium', question: '请说明如何设计幂等接口？', rationale: '验证岗位所需能力', groundedIn: ['岗位要求：接口设计'], scoringRubric: [{ criterion: '方案完整', points: 10 }] }] }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    try {
+      const response = await requestJson('POST', `/api/v1/interviews/${interview.id}/questions`, {
+        jobTitle: '后端工程师', jobRequirements: ['接口设计'], anonymizedResume: '具有五年后端开发经验', analysisSummary: ['熟悉接口设计'], questionCount: 1,
+      })
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.advisoryOnly, true)
+      assert.equal(response.body.data.applicationStatusMutation, 'none')
+      assert.equal(response.body.data.questions.length, 1)
+      const after = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === application.id)
+      assert.equal(after.status, application.status)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+      if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+      if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+    }
+  })
+
+  it('standardizes interview question errors and enforces interview roles', async () => {
+    const interview = (await get('/api/v1/interviews')).body.data[0]
+    assert.ok(interview)
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    delete process.env.OPENAI_BASE_URL; delete process.env.OPENAI_API_KEY; delete process.env.OPENAI_MODEL
+    const unavailable = await requestJson('POST', `/api/v1/interviews/${interview.id}/questions`, { jobTitle: '工程师', jobRequirements: ['开发'], anonymizedResume: '匿名简历', analysisSummary: [], questionCount: 1 })
+    assert.equal(unavailable.status, 503)
+    assert.equal(unavailable.body.error.code, 'AI_NOT_CONFIGURED')
+    await loginAs('approver@smartrecruit.local', 'approver123')
+    const forbidden = await requestJson('POST', `/api/v1/interviews/${interview.id}/questions`, { jobTitle: '工程师', jobRequirements: ['开发'], anonymizedResume: '匿名简历', analysisSummary: [], questionCount: 1 })
+    assert.equal(forbidden.status, 403)
+    await login()
+    if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+    if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+    if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+  })
+
   it('completes the offer approval, response, and onboarding archive flow', async () => {
     const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'offer_approval')
     assert.ok(application)

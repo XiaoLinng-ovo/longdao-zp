@@ -8,6 +8,7 @@ import { beginTaskAttempt, createTask, hasAttemptsRemaining, isSupportedTaskType
 import { startWorker, type StartWorkerOptions, type WorkerRuntime } from './worker.js'
 import { ClamdClient } from './security/clamd-client.js'
 import { processNextResumeScan, startResumeScanPoll } from './security/resume-scan.js'
+import { createOpenAIResumeAnalyzer } from './handlers/openai-resume-analyzer.js'
 
 export {
   beginTaskAttempt,
@@ -34,6 +35,7 @@ export {
   ClamdClient,
   processNextResumeScan,
   startResumeScanPoll,
+  createOpenAIResumeAnalyzer,
 }
 
 export type {

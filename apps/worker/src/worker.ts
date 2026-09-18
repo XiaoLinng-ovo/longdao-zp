@@ -10,6 +10,8 @@ import { ClamdClient } from './security/clamd-client.js'
 import { startResumeScanPoll } from './security/resume-scan.js'
 import { resolve } from 'node:path'
 import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pro/object-storage'
+import { createOpenAIResumeAnalyzer } from './handlers/openai-resume-analyzer.js'
+import { createResumeAnalysisHandler } from './handlers/resume-analysis.js'
 
 export interface WorkerRuntime {
   readonly config: WorkerConfig
@@ -30,7 +32,14 @@ export interface StartWorkerOptions {
 export async function startWorker(config: WorkerConfig, options: StartWorkerOptions = {}): Promise<WorkerRuntime> {
   const now = options.now ?? (() => new Date().toISOString())
   const health = new HealthStateStore(config, now)
-  const executor = options.executor ?? createTaskExecutor({ now })
+  const executor = options.executor ?? createTaskExecutor({
+    now,
+    ...(config.openai === undefined ? {} : {
+      handlers: {
+        'resume-analysis': createResumeAnalysisHandler({ analyze: createOpenAIResumeAnalyzer(config.openai) }),
+      },
+    }),
+  })
   const healthServer = await startHealthServer(config, health)
 
   let stopPoll: (() => void) | undefined
@@ -47,6 +56,7 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
       pollIntervalMs: config.pollIntervalMs,
       now,
       storage,
+      executor,
     })
     if (config.clamavHost) {
       stopScanPoll = startResumeScanPoll({

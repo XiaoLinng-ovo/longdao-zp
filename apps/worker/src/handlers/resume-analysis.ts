@@ -1,6 +1,6 @@
 import { WorkerFailure } from '../errors.js'
 import type { TaskEnvelope, TaskHandler, TaskHandlerContext } from '../task.js'
-import { buildRuleBasedReport, type AnalysisReport } from '@smartrecruit-pro/resume-intelligence'
+import { buildRuleBasedReport, type AnalysisReport, type LlmResumeSuggestion } from '@smartrecruit-pro/resume-intelligence'
 
 export interface ResumeAnalysisTaskPayload {
   applicationId?: string
@@ -48,6 +48,7 @@ export interface ResumeAnalysisResult {
     engine: string
     generatedAt: string
     report: AnalysisReport
+    suggestion?: LlmResumeSuggestion
   }
   safety: {
     advisoryOnly: true

@@ -62,6 +62,12 @@ export class PostgresDingTalkApprovalRepository implements DingTalkApprovalRepos
            WHERE id = $1::uuid AND status = 'pending_approval'`,
           [instance.subject_id],
         )
+      } else if (instance.subject_type === 'offer') {
+        await client.query(
+          `UPDATE offers SET status = 'draft', approval_status = 'cancelled', version = version + 1, updated_at = now()
+           WHERE id = $1::uuid AND status = 'pending_approval'`,
+          [instance.subject_id],
+        )
       }
       await client.query('COMMIT')
     } catch (error) {
@@ -109,6 +115,13 @@ export class PostgresDingTalkApprovalRepository implements DingTalkApprovalRepos
         await client.query(`UPDATE approval_instances SET status = $2, completed_at = now(), updated_at = now() WHERE id = $1::uuid`, [instance.id, input.decision])
         if (instance.subject_type === 'recruitment_request') {
           await client.query(`UPDATE recruitment_requests SET status = $2, version = version + 1, updated_at = now() WHERE id = $1::uuid AND status = 'pending_approval'`, [instance.subject_id, input.decision])
+        } else if (instance.subject_type === 'offer') {
+          const offerStatus = input.decision === 'approved' ? 'approved' : 'draft'
+          await client.query(
+            `UPDATE offers SET status = $2, approval_status = $3, version = version + 1, updated_at = now()
+             WHERE id = $1::uuid AND status = 'pending_approval'`,
+            [instance.subject_id, offerStatus, input.decision],
+          )
         }
       }
       await client.query(`UPDATE external_event_receipts SET status = 'completed', result = $3::jsonb, processed_at = now() WHERE provider = $1 AND event_id = $2`, [provider, input.eventId, JSON.stringify({ processInstanceId: input.processInstanceId, decision: input.decision })])

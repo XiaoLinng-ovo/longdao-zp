@@ -17,6 +17,12 @@ export interface WorkerConfig {
   clamavPort: number
   clamavTimeoutMs: number
   quarantineRoot?: string
+  openai?: {
+    baseUrl: string
+    apiKey: string
+    model: string
+    timeoutMs: number
+  }
 }
 
 function readInteger(
@@ -50,6 +56,9 @@ export function loadConfig(
 ): WorkerConfig {
   const clamavHost = env.CLAMAV_HOST?.trim() || undefined
   const quarantineRoot = env.RECRUITING_QUARANTINE_ROOT?.trim() || undefined
+  const openaiBaseUrl = env.OPENAI_BASE_URL?.trim()
+  const openaiApiKey = env.OPENAI_API_KEY?.trim()
+  const openaiModel = env.OPENAI_MODEL?.trim()
   return {
     appName: env.APP_NAME?.trim() || 'smartrecruit-pro-worker',
     appVersion: env.APP_VERSION?.trim() || '0.1.0',
@@ -67,5 +76,13 @@ export function loadConfig(
     clamavPort: readPort(env, 'CLAMAV_PORT', 3310),
     clamavTimeoutMs: readInteger(env, 'CLAMAV_TIMEOUT_MS', 30_000, { minimum: 1 }),
     ...(quarantineRoot === undefined ? {} : { quarantineRoot }),
+    ...(openaiBaseUrl && openaiApiKey && openaiModel ? {
+      openai: {
+        baseUrl: openaiBaseUrl,
+        apiKey: openaiApiKey,
+        model: openaiModel,
+        timeoutMs: readInteger(env, 'OPENAI_TIMEOUT_MS', 30_000, { minimum: 1 }),
+      },
+    } : {}),
   }
 }

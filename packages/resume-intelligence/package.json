@@ -23,6 +23,6 @@
     "typecheck:test": "node scripts/tsc.mjs -p tsconfig.test.json --noEmit",
     "build": "node scripts/tsc.mjs -p tsconfig.build.json",
     "test:build": "node scripts/tsc.mjs -p tsconfig.test-build.json",
-    "test": "npm run test:build && node --test dist-test/tests/resume-intelligence.test.js"
+    "test": "npm run build && npm run test:build && node --test dist-test/tests/resume-intelligence.test.js"
   }
 }
