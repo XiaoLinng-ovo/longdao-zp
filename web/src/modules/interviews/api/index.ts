@@ -164,6 +164,7 @@ export interface LiveInterviewSegment { id: string; sessionId: string; speakerId
 export interface LiveInterviewSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string }
 export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[] }
 export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data }
+export async function findActiveLiveInterviewSession(interviewId: string): Promise<LiveInterviewView | null> { return (await apiClient.getJson<LiveInterviewView | null>(`/interviews/${interviewId}/live-sessions`)).data }
 export async function loadLiveInterviewSession(sessionId: string): Promise<LiveInterviewView> { return (await apiClient.getJson<LiveInterviewView>(`/interview-live-sessions/${sessionId}`)).data }
 export async function uploadLiveInterviewChunk(sessionId: string, audioBase64: string, contentType: string, chunkOffsetMs: number): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-sessions/${sessionId}/segments`, { audioBase64, contentType, chunkOffsetMs })).data }
 export async function endLiveInterviewSession(sessionId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/end`, {})).data }
