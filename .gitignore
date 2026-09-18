@@ -1,25 +1,45 @@
+# ===== 本地状态与运行时数据 =====
 data/state.json
-data/*.tmp
 data/api-state.json
-data/api-state.json.*.tmp
 data/auth-sessions.json*
+data/*.tmp
+data/api-state.json.*.tmp
 data/_probe.txt
 data/resumes/quarantine/
 apps/api/data/auth-sessions.json*
 apps/api/data/*.tmp
+
+# ===== 日志 =====
 *.log
+
+# ===== 草稿 / 临时 / 补丁脚本 =====
 *.bak
 *_current.txt
 *_typecheck.out
+_*.txt
 _*.diff
 patch-*.mjs
 patch-*.ps1
 inspect-*.mjs
 generate-test-resume.mjs
+
+# 散落的审查 / 梳理输出
+*_view.txt
+*梳理*.md
+
+# 测试简历样例
 测试简历*.docx
+
+# 本地 agent 计划工作流草稿（正式文档在 docs/superpowers/，不受影响）
+.superpowers/
+
+# ===== 依赖 =====
 node_modules/
 
+# ===== 环境变量（含真实密钥，禁止提交） =====
 .env
+
+# ===== 构建产物 =====
 .wrangler/
 .pnpm-store/
 web/dist/
