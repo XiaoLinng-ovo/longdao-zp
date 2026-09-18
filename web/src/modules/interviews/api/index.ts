@@ -160,7 +160,8 @@ export async function concludeInterview(id: string, outcome: 'continue' | 'offer
   return (await apiClient.postJson(`/interviews/${id}/conclude`, { outcome })).data
 }
 
-export interface LiveInterviewSegment { id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string }
+export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none' }
+export interface LiveInterviewSegment { id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
 export interface LiveInterviewSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string }
 export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[] }
 export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data }
@@ -168,6 +169,5 @@ export async function findActiveLiveInterviewSession(interviewId: string): Promi
 export async function loadLiveInterviewSession(sessionId: string): Promise<LiveInterviewView> { return (await apiClient.getJson<LiveInterviewView>(`/interview-live-sessions/${sessionId}`)).data }
 export async function uploadLiveInterviewChunk(sessionId: string, audioBase64: string, contentType: string, chunkOffsetMs: number): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-sessions/${sessionId}/segments`, { audioBase64, contentType, chunkOffsetMs })).data }
 export async function endLiveInterviewSession(sessionId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/end`, {})).data }
-export async function correctLiveSegmentRole(segmentId: string, role: 'interviewer' | 'candidate'): Promise<LiveInterviewSegment> { return (await apiClient.postJson<LiveInterviewSegment>(`/interview-live-segments/${segmentId}/role`, { role })).data }
-export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none' }
+export async function correctLiveSegmentRole(segmentId: string, role: 'interviewer' | 'candidate', segmentIds: string[] = [segmentId]): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-segments/${segmentId}/role`, { role, segmentIds })).data }
 export async function analyzeLiveSegment(segmentId: string, question: string, segmentIds: string[] = [segmentId]): Promise<LiveAnswerAnalysis> { return (await apiClient.postJson<LiveAnswerAnalysis>(`/interview-live-segments/${segmentId}/analyze`, { question, segmentIds, priorContext: [] })).data }
