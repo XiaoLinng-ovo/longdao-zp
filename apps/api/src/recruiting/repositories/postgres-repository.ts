@@ -394,7 +394,7 @@ export class NormalizedRecruitingRepository {
 
   async createResume(input: ResumeCreateInput): Promise<ResumeRecord> {
     return this.transaction(async (client) => {
-      const row = await queryOne<any>(client, `INSERT INTO resumes (id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9) RETURNING id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash, created_at`, [uuidOrGenerated(input.id), input.candidateId, input.applicationId ?? null, input.storageKey, input.originalFilename, input.mimeType, input.sizeBytes, input.scanStatus ?? 'quarantined', input.contentHash])
+      const row = await queryOne<any>(client, `INSERT INTO resumes (id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9) RETURNING id, candidate_id, application_id, storage_key, original_filename, mime_type, size_bytes, scan_status, content_hash, created_at`, [uuidOrGenerated(input.id), input.candidateId, input.applicationId ?? null, input.storageKey, input.originalFilename, input.mimeType, input.sizeBytes, input.scanStatus ?? 'clean', input.contentHash])
       return { id: row.id, candidateId: row.candidate_id, applicationId: row.application_id, storageKey: row.storage_key, originalFilename: row.original_filename, mimeType: row.mime_type, sizeBytes: Number(row.size_bytes), scanStatus: row.scan_status, contentHash: row.content_hash, createdAt: iso(row.created_at) }
     })
   }

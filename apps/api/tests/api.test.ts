@@ -366,7 +366,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(typeof response.body.data.offerAcceptance.accepted, 'number')
   })
 
-  it('creates a quarantined resume and refuses analysis until malware scanning passes', async () => {
+  it('creates a clean resume and analyzes it without a scanner dependency', async () => {
     const candidates = await get('/api/v1/candidates')
     const candidate = candidates.body.data[0]
     const application = candidate.applications[0]
@@ -378,7 +378,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
       content: `${candidate.fullName}\nJava Spring Boot PostgreSQL\n8 years experience`
     })
     assert.equal(created.status, 201)
-    assert.equal(created.body.data.resume.scanStatus, 'quarantined')
+    assert.equal(created.body.data.resume.scanStatus, 'clean')
     assert.equal(created.body.data.task.status, 'queued')
 
     const binaryContent = '\u4f60\u597d123'
@@ -395,15 +395,14 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.match(binaryCreated.body.data.resume.storageKey, /^[0-9a-f-]+\.doc$/)
 
     const processed = await requestJson('POST', '/api/v1/analysis-tasks/' + created.body.data.task.id, {})
-    assert.equal(processed.status, 409)
-    assert.equal(processed.body.error.code, 'RESUME_SCAN_NOT_CLEAN')
+    assert.equal(processed.status, 200)
 
     const detail = await get(`/api/v1/candidates/${candidate.id}`)
     assert.equal(detail.status, 200)
     assert.ok(Array.isArray(detail.body.data.analysisTasks))
     const detailTask = detail.body.data.analysisTasks.find((task: any) => task.id === created.body.data.task.id)
     assert.ok(detailTask)
-    assert.equal(detailTask.status, 'queued')
+    assert.equal(detailTask.status, 'completed')
   })
 
   it('rejects unsafe resume filenames before persisting the upload', async () => {

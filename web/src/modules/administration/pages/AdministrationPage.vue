@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
@@ -23,6 +23,20 @@ const savingUser = ref<string | null>(null)
 const savingRole = ref<string | null>(null)
 const savingSettings = ref(false)
 const settingsDraft = ref<Record<string, string>>({})
+const dingTalkSettings = ref<DingTalkEnvSettings>({})
+const dingTalkDraft = ref<Record<string, string>>({})
+const savingDingTalk = ref(false)
+const resumeVirusScanEnabled = ref(false)
+const savingResumeVirusScan = ref(false)
+
+const dingTalkFields = [
+  { key: 'DINGTALK_APP_KEY', label: 'AppKey', secret: false, help: '钉钉开放平台 → 应用开发 → 企业内部应用 → 凭证与基础信息。', href: 'https://open.dingtalk.com/document/orgapp/obtain-the-appkey-and-appsecret' },
+  { key: 'DINGTALK_APP_SECRET', label: 'AppSecret', secret: true, help: '与 AppKey 同一页面获取；请勿提交到代码仓库。', href: 'https://open.dingtalk.com/document/orgapp/obtain-the-appkey-and-appsecret' },
+  { key: 'DINGTALK_INTEGRATION_TOKEN', label: '岗位同步 Token', secret: true, help: '由钉钉宜搭/连接器调用本平台岗位接口时使用，自行生成一段高强度随机字符串。', href: 'https://open.dingtalk.com/document/orgapp/overview-of-the-dingtalk-server-side-api' },
+  { key: 'DINGTALK_CALLBACK_TOKEN', label: '回调 Token', secret: true, help: '钉钉应用 → 事件与回调 → HTTP 回调中配置并复制。', href: 'https://open.dingtalk.com/document/orgapp/event订阅' },
+  { key: 'DINGTALK_CALLBACK_AES_KEY', label: '回调加密 AES Key', secret: true, help: '同一 HTTP 回调配置页面生成或复制 43 位加密 Key。', href: 'https://open.dingtalk.com/document/orgapp/event订阅' },
+  { key: 'DINGTALK_CALLBACK_CORP_ID', label: '企业 CorpId', secret: false, help: '钉钉管理后台 → 设置 → 企业信息 → CorpId。', href: 'https://open.dingtalk.com/document/orgapp/query-the-enterprise-corp-id' },
+] as const
 
 const subjectLabels: Record<WorkflowEvent['subjectType'], string> = {
   recruitment_request: '招聘需求',
@@ -67,20 +81,28 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, tasks, logs] = await Promise.all([
+    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, tasks, logs] = await Promise.all([
       listAdminChecks(),
       loadWorkflowEvents(subjectType.value || undefined, 80),
-      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
+      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
     ])
     rows.value = checks
     events.value = audit
-    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; failedTasks.value = tasks; auditLogs.value = logs
+    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; failedTasks.value = tasks; auditLogs.value = logs
     settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
+    dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '读取系统配置失败'
   } finally {
     loading.value = false
   }
+}
+
+async function saveResumeVirusScan() {
+  savingResumeVirusScan.value = true; error.value = ''
+  try { resumeVirusScanEnabled.value = (await updateResumeVirusScanSetting(resumeVirusScanEnabled.value)).enabled }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存简历病毒扫描设置失败' }
+  finally { savingResumeVirusScan.value = false }
 }
 
 async function saveUser(user: AdminUser) {
@@ -119,6 +141,16 @@ async function saveSettings() {
     settings.value = await updateAdminSettings(patch)
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '保存系统设置失败' }
   finally { savingSettings.value = false }
+}
+
+async function saveDingTalkSettings() {
+  savingDingTalk.value = true; error.value = ''
+  try {
+    const patch = Object.fromEntries(Object.entries(dingTalkDraft.value).filter(([, value]) => value.trim() !== ''))
+    dingTalkSettings.value = await updateDingTalkSettings(patch)
+    dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : '保存钉钉配置失败' }
+  finally { savingDingTalk.value = false }
 }
 
 async function changeSubject() {
@@ -161,6 +193,18 @@ onMounted(refresh)
     <section class="section">
       <div class="section-heading"><h3 class="section-title">系统设置</h3><button class="btn btn-primary" type="button" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button></div>
       <div class="form-grid form-panel"><div v-for="(_, key) in settingsDraft" :key="key" class="form-field"><label :for="`setting-${key}`">{{ key }}</label><input :id="`setting-${key}`" v-model="settingsDraft[key]" /><small>{{ settingsDraft[key] }}</small></div><div v-if="!Object.keys(settingsDraft).length" class="table-empty">暂无系统设置</div></div>
+      <div class="settings-toggle"><div><strong>简历病毒扫描</strong><p class="muted">开启后，新上传简历会先进入隔离区并由 ClamAV 扫描；默认关闭。</p></div><label><input v-model="resumeVirusScanEnabled" type="checkbox" :disabled="savingResumeVirusScan" @change="saveResumeVirusScan" /> {{ resumeVirusScanEnabled ? '已开启' : '已关闭' }}</label></div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading"><div><h3 class="section-title">钉钉集成配置</h3><p class="muted">保存后写入 <code>ENV_FILE_PATH</code> 指定的 .env 文件，并立即对当前 API 进程生效。</p></div><button class="btn btn-primary" type="button" :disabled="savingDingTalk" @click="saveDingTalkSettings">{{ savingDingTalk ? '保存中...' : '保存钉钉配置' }}</button></div>
+      <div class="form-grid form-panel">
+        <div v-for="field in dingTalkFields" :key="field.key" class="form-field">
+          <label :for="`dingtalk-${field.key}`">{{ field.label }} <code>{{ field.key }}</code></label>
+          <input :id="`dingtalk-${field.key}`" v-model="dingTalkDraft[field.key]" :type="field.secret ? 'password' : 'text'" :placeholder="dingTalkSettings[field.key]?.configured ? '已配置，留空表示不修改' : '未配置'" autocomplete="new-password" />
+          <small>{{ field.help }} <a :href="field.href" target="_blank" rel="noreferrer">查看钉钉官方文档</a></small>
+        </div>
+      </div>
     </section>
 
     <section class="section">

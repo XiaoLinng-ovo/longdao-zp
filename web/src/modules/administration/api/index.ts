@@ -25,6 +25,9 @@ export interface AdminUser {
 export interface AdminRole { id: string; code: string; name: string }
 export interface AdminDepartment { id: string; code: string; name: string; isActive: boolean; createdAt: string; updatedAt: string }
 export type AdminSettings = Record<string, unknown>
+export interface DingTalkEnvSetting { value: string; configured: boolean; masked: boolean }
+export type DingTalkEnvSettings = Record<string, DingTalkEnvSetting>
+export interface ResumeVirusScanSetting { enabled: boolean }
 export interface AdminAnalysisTask {
   id: string; resumeId: string; applicationId?: string; status: 'queued' | 'processing' | 'completed' | 'failed'; attempts: number; idempotencyKey: string; lastError?: string; availableAt: string; startedAt?: string; completedAt?: string; createdAt: string
 }
@@ -100,6 +103,22 @@ export async function getAdminSettings(): Promise<AdminSettings> {
 
 export async function updateAdminSettings(patch: AdminSettings): Promise<AdminSettings> {
   return (await apiClient.patchJson<AdminSettings>('/admin/settings', patch)).data
+}
+
+export async function getDingTalkSettings(): Promise<DingTalkEnvSettings> {
+  return (await apiClient.getJson<DingTalkEnvSettings>('/admin/dingtalk-settings')).data
+}
+
+export async function updateDingTalkSettings(patch: Record<string, string>): Promise<DingTalkEnvSettings> {
+  return (await apiClient.patchJson<DingTalkEnvSettings>('/admin/dingtalk-settings', patch)).data
+}
+
+export async function getResumeVirusScanSetting(): Promise<ResumeVirusScanSetting> {
+  return (await apiClient.getJson<ResumeVirusScanSetting>('/admin/resume-virus-scan')).data
+}
+
+export async function updateResumeVirusScanSetting(enabled: boolean): Promise<ResumeVirusScanSetting> {
+  return (await apiClient.patchJson<ResumeVirusScanSetting>('/admin/resume-virus-scan', { enabled })).data
 }
 
 export async function listFailedAnalysisTasks(): Promise<AdminAnalysisTask[]> {

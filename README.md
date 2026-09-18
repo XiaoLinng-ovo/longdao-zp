@@ -2,9 +2,35 @@
 
 这是一个面向单组织内部招聘团队的招聘流程平台。当前唯一运行主线是 `web/` + `apps/api/` + `apps/worker/`，共享契约位于 `packages/`。
 
-当前状态是“新版 API/Web 闭环 + PostgreSQL 生产底座接入中”：需求、岗位、候选人、申请、面试和 Offer 主流程已有实现，认证已支持 PostgreSQL Session、scrypt 迁移、CSRF、Origin 校验和登录限流。规范化业务表迁移、文件扫描、Redis Worker 和生产部署仍在继续。角色已包含 `admin`、`hr_admin`、`recruiter`、`hiring_manager`、`approver`、`interviewer`。
+当前状态是“API/Web + PostgreSQL 可运行闭环”：需求、岗位、候选人、申请、简历、面试和 Offer 主流程已有实现，认证已支持 PostgreSQL Session、scrypt、CSRF、Origin 校验和登录限流。角色包含 `admin`、`hr_admin`、`recruiter`、`hiring_manager`、`approver`、`interviewer`。
 
 当前最终总设计请参阅 [`docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md`](docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md)；最初产品设计基线请参阅 [`docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md`](docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md)。
+
+## 换一台电脑的首次运行
+
+要求：Node.js 20.16+（或 22.3+）、pnpm、Docker Desktop，以及可访问的 PostgreSQL。先复制环境变量模板，不要把真实密钥提交到 Git：
+
+```powershell
+Copy-Item .env.example .env
+pnpm install
+docker compose -f deploy/docker-compose.yml up -d postgres minio
+pnpm start
+```
+
+`pnpm start` 会按顺序完成 API 构建、PostgreSQL migration、开发数据初始化，然后启动 API。默认 API 地址为 `http://127.0.0.1:3100`。另开终端启动前端：
+
+```powershell
+$env:VITE_API_BASE_URL = 'http://127.0.0.1:3100'
+pnpm --dir web dev --host 127.0.0.1 --port 5174
+```
+
+浏览器访问 `http://127.0.0.1:5174`。如果 PostgreSQL 不在本机，请在 `.env` 中设置 `DATABASE_URL`，或设置 `PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`。`DATABASE_URL` 优先。
+
+也可以直接运行仓库自带的 Windows 启动脚本（它使用本地开发端口并启动 API、Worker、Web）：
+
+```powershell
+.\start-local.ps1
+```
 
 ## 本地运行
 
@@ -26,6 +52,12 @@ docker run -d --name smartrecruit-pro -p 3000:3000 -v smartrecruit-data:/app/dat
 ```
 
 服务器放行 TCP `3000` 端口后，通过 `http://服务器地址:3000` 访问。生产环境建议在前面配置 Nginx/Caddy 的 HTTPS 反向代理，并将 `/app/data` 挂载到可靠磁盘或改接数据库。
+
+## 简历上传与病毒扫描说明
+
+当前默认业务线路已关闭 ClamAV 简历扫描门禁，简历上传后状态为 `clean`，可以立即进入解析和分析；不会再因为 `quarantined`、`scanning` 或 `failed` 阻塞简历分析。明确被标记为 `infected` 的文件仍会被拒绝。上传格式、大小、扩展名、MIME 匹配、路径安全和对象存储校验仍然保留。
+
+新电脑首次连接已有 PostgreSQL 时，migration `0016` 会把历史扫描遗留状态统一修复，migration `0017` 会把数据库默认状态设为 `clean`。不要直接启动旧的 `apps/api/dist`，应使用 `pnpm start`，确保源码和 migration 一起更新。
 
 ## 配置
 
@@ -58,6 +90,13 @@ Web 与 API 通过同一部署编排运行；跨域场景通过服务器端 `ALL
 
 ## 部署
 
-生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、MinIO、ClamAV、API、Worker 和 Web 组成。整体状态 KV 和旧单页入口已移除。
+生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、MinIO、API、Worker 和 Web 组成。ClamAV/OCR 服务可以按需启动；当前默认简历主流程不依赖 ClamAV。整体状态 KV 和旧单页入口已移除。
+
+## 常见问题
+
+- 页面仍显示旧的 `quarantined`：确认访问的是当前 API（默认 `3100`），停止旧 API 进程后重新执行 `pnpm start`，并确认数据库 migration 已执行。
+- 简历库没有数据：确认前端的 `VITE_API_BASE_URL` 指向实际 API，且 API 与前端使用同一个 PostgreSQL 数据库；不要只启动 Web。
+- API 返回 502：通常是前端代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/health`，再检查 Web 的 `VITE_API_BASE_URL`。
+- 数据库连接失败：检查 PostgreSQL 是否启动、端口和账号是否正确；可先执行 `node scripts/check-postgres-ready.mjs`。
 
 # longdao-jianli

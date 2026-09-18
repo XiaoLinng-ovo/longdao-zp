@@ -29,19 +29,16 @@ afterEach(async () => {
 })
 
 describe('resume analysis scan gate', () => {
-  it('rejects a quarantined resume in the local store before processing starts', async () => {
+  it('allows historical non-infected resume statuses to be analyzed', async () => {
     const { service, store, created } = await createLocalFixture()
 
-    await assert.rejects(
-      service.processAnalysisTask(created.task.id),
-      (error: any) => error?.code === 'RESUME_SCAN_NOT_CLEAN' && error?.status === 409,
-    )
+    await service.processAnalysisTask(created.task.id)
 
     const state = await store.read()
     const task = state.analysisTasks.find((item) => item.id === created.task.id)
-    assert.equal(task?.status, 'queued')
-    assert.equal(task?.attempts, 0)
-    assert.equal(state.analysisResults.length, 0)
+    assert.equal(task?.status, 'completed')
+    assert.equal(task?.attempts, 1)
+    assert.equal(state.analysisResults.length, 1)
   })
 
   it('rejects a non-clean PostgreSQL resume without updating the task', async () => {

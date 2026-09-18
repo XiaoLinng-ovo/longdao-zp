@@ -1,11 +1,11 @@
 # Local infrastructure
 
-Start the Phase 1 infrastructure services from the repository root:
+Start the complete application from the repository root:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-The compose file starts PostgreSQL, Redis, MinIO, ClamAV, and a local PP-StructureV3 OCR service. The first OCR startup downloads Paddle models into the persistent `paddle_models` volume and can take several minutes. Configure API and Worker with `OCR_SERVICE_URL=http://127.0.0.1:8090` when running them on the host, or `http://ocr:8090` when they run inside the Compose network.
+The compose file starts PostgreSQL, Redis, MinIO, a local PP-StructureV3 OCR service, API, Worker, and Web. The first OCR startup downloads Paddle models into the persistent `paddle_models` volume and can take several minutes. Open `http://127.0.0.1:5174` after all services become healthy. The default resume scan gate is disabled.
 
 Development defaults are not production secrets. Set environment variables or use a private `.env` before exposing any service outside localhost.

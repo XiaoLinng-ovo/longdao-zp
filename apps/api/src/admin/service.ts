@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { hashPassword } from '../auth/password.js';
+import { readDingTalkEnvSettings, readResumeVirusScanSetting, resolveEnvFilePath, updateDingTalkEnvSettings, updateResumeVirusScanSetting, type DingTalkEnvPatch } from './dingtalk-env-settings.js';
 
 export interface AdminUserRecord {
   id: string;
@@ -230,6 +231,26 @@ export class AdminService {
     }
     await this.appendAudit(actorId, 'admin.settings.update', 'system_settings', null, requestId, { keys: Object.keys(patch) });
     return this.getSettings();
+  }
+
+  async getDingTalkSettings(): ReturnType<typeof readDingTalkEnvSettings> {
+    return readDingTalkEnvSettings()
+  }
+
+  async updateDingTalkSettings(patch: DingTalkEnvPatch, actorId: string, requestId?: string): ReturnType<typeof updateDingTalkEnvSettings> {
+    const result = await updateDingTalkEnvSettings(resolveEnvFilePath(), patch)
+    await this.appendAudit(actorId, 'admin.dingtalk_settings.update', 'env_file', null, requestId, { keys: Object.keys(patch) })
+    return result
+  }
+
+  async getResumeVirusScanSetting(): Promise<{ enabled: boolean }> {
+    return { enabled: await readResumeVirusScanSetting(resolveEnvFilePath()) }
+  }
+
+  async updateResumeVirusScanSetting(enabled: boolean, actorId: string, requestId?: string): Promise<{ enabled: boolean }> {
+    const result = await updateResumeVirusScanSetting(resolveEnvFilePath(), enabled)
+    await this.appendAudit(actorId, 'admin.resume_virus_scan.update', 'env_file', null, requestId, { enabled })
+    return { enabled: result }
   }
 
   async listAuditLogs(limit = 50): Promise<AdminAuditRecord[]> {

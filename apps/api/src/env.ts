@@ -39,7 +39,8 @@ function findApiRoot(start: string): string {
 export function loadEnvironment(): void {
   const moduleDir = dirname(fileURLToPath(import.meta.url))
   const apiRoot = findApiRoot(moduleDir)
-  const candidates = [resolve(apiRoot, '.env'), resolve(apiRoot, '..', '.env')]
+  const configured = process.env.ENV_FILE_PATH?.trim()
+  const candidates = [configured ? resolve(configured) : undefined, resolve(apiRoot, '.env'), resolve(apiRoot, '..', '.env')].filter((value): value is string => Boolean(value))
   const file = candidates.find((candidate) => existsSync(candidate))
   if (!file) return
   parseEnvFile(readFileSync(file, 'utf8'))

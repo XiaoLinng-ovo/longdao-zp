@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs } from './index'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting } from './index'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
@@ -22,6 +22,24 @@ describe('管理后台 API', () => {
     const result = await updateAdminSettings({ timezone: 'Asia/Shanghai' })
     expect(patchJson).toHaveBeenCalledWith('/admin/settings', { timezone: 'Asia/Shanghai' })
     expect(result.timezone).toBe('Asia/Shanghai')
+  })
+  it('读取并更新钉钉环境配置', async () => {
+    getJson.mockResolvedValue({ ok: true, data: {}, requestId: 'test' } as never)
+    await getDingTalkSettings()
+    expect(getJson).toHaveBeenCalledWith('/admin/dingtalk-settings')
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: {}, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    await updateDingTalkSettings({ DINGTALK_APP_KEY: 'app-key' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/dingtalk-settings', { DINGTALK_APP_KEY: 'app-key' })
+  })
+  it('读取并更新简历病毒扫描开关', async () => {
+    getJson.mockResolvedValue({ ok: true, data: { enabled: false }, requestId: 'test' } as never)
+    expect((await getResumeVirusScanSetting()).enabled).toBe(false)
+    expect(getJson).toHaveBeenCalledWith('/admin/resume-virus-scan')
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { enabled: true }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    expect((await updateResumeVirusScanSetting(true)).enabled).toBe(true)
+    expect(patchJson).toHaveBeenCalledWith('/admin/resume-virus-scan', { enabled: true })
   })
   it('汇总 ready 与 health 为配置检查项', async () => {
     getJson.mockImplementation(async (path) => {

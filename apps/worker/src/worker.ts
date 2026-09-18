@@ -43,7 +43,7 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
   const healthServer = await startHealthServer(config, health)
 
   let stopPoll: (() => void) | undefined
-  let stopScanPoll: (() => void) | undefined
+  let stopResumeScanPoll: (() => void) | undefined
   let pool: PgPool | undefined
   const storage = options.storage ?? createObjectStorageFromEnv(process.env, config.quarantineRoot ?? resolve(process.cwd(), '../../data/resumes/quarantine'))
   try {
@@ -71,19 +71,15 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
       storage,
       executor,
     })
+    health.setDependency('postgres', 'ok')
     if (config.clamavHost) {
-      stopScanPoll = startResumeScanPoll({
+      stopResumeScanPoll = startResumeScanPoll({
         store: createPostgresAnalysisTaskStore(pool),
-        scanner: new ClamdClient({
-          host: config.clamavHost,
-          port: config.clamavPort,
-          timeoutMs: config.clamavTimeoutMs,
-        }),
+        scanner: new ClamdClient({ host: config.clamavHost, port: config.clamavPort, timeoutMs: config.clamavTimeoutMs }),
         storage,
         pollIntervalMs: config.pollIntervalMs,
       })
     }
-    health.setDependency('postgres', 'ok')
   }
 
   health.setState('ready')
@@ -94,7 +90,7 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
     closed = true
     health.setState('stopping')
     stopPoll?.()
-    stopScanPoll?.()
+    stopResumeScanPoll?.()
     if (pool) { try { await pool.end() } catch { /* pool already closed */ } }
     await new Promise<void>((resolve, reject) => {
       healthServer.close((error) => (error ? reject(error) : resolve()))

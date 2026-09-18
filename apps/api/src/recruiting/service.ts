@@ -11,6 +11,7 @@ import { RecruitingWorkflowError, transitionJob, transitionRequest } from './wor
 import { validateResumeUpload } from './file-security.js'
 import { extractResumeText } from './resume-text-extractor.js'
 import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pro/object-storage'
+import { initialResumeScanStatus } from './resume-scan-policy.js'
 
 const resumeIntelligenceDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../packages/resume-intelligence/dist/index.js')
 const { buildRuleBasedReport } = createRequire(import.meta.url)(resumeIntelligenceDist) as { buildRuleBasedReport: typeof import('../../../../packages/resume-intelligence/dist/index.js').buildRuleBasedReport }
@@ -57,9 +58,10 @@ function required(value: unknown, field: string): string {
 }
 
 function requireCleanResume(scanStatus: string): void {
-  if (scanStatus !== 'clean') {
-    throw new RecruitingWorkflowError('RESUME_SCAN_NOT_CLEAN', `简历病毒扫描状态为 ${scanStatus}，仅 clean 状态允许分析`, 409)
-  }
+  // 病毒扫描已从默认业务链路移除。仍拒绝明确感染的文件，避免把
+  // 安全校验误删成“任何文件都可分析”。历史 quarantined/scanning/failed
+  // 状态由迁移归一为 clean，不再阻塞简历分析。
+  if (scanStatus === 'infected') throw new RecruitingWorkflowError('RESUME_SCAN_NOT_CLEAN', '简历被安全检查标记为感染，不能分析', 409)
 }
 function normalizeTags(value: unknown): string[] | undefined {
   if (value === undefined) return undefined
@@ -1002,7 +1004,7 @@ export class RecruitingService {
       let saved: Awaited<ReturnType<NormalizedRecruitingRepository['createResume']>>
       let queued: Awaited<ReturnType<NormalizedRecruitingRepository['createAnalysisTask']>>
       try {
-        saved = await this.repository.createResume({ id, candidateId, ...(input.applicationId ? { applicationId: input.applicationId } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash })
+        saved = await this.repository.createResume({ id, candidateId, ...(input.applicationId ? { applicationId: input.applicationId } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash, scanStatus: initialResumeScanStatus() })
         queued = await this.repository.createAnalysisTask({ resumeId: saved.id, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), idempotencyKey: `resume-analysis:${saved.id}:${hash}` })
       } catch (error) {
         await this.objectStorage.delete(storageKey).catch(() => undefined)
@@ -1024,7 +1026,7 @@ export class RecruitingService {
       const hash = validatedUpload.contentHash
       const storageKey = localStorageKey
       const timestamp = LocalRecruitingStore.timestamp()
-      const resume: ResumeRecord = { id, candidateId: candidate.id, ...(application ? { applicationId: application.id } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash, scanStatus: 'quarantined', createdAt: timestamp }
+      const resume: ResumeRecord = { id, candidateId: candidate.id, ...(application ? { applicationId: application.id } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash, scanStatus: initialResumeScanStatus(), createdAt: timestamp }
       const task: AnalysisTaskRecord = { id: randomUUID(), resumeId: resume.id, ...(application ? { applicationId: application.id } : {}), status: 'queued', attempts: 0, idempotencyKey: `resume-analysis:${resume.id}:${hash}`, availableAt: timestamp, createdAt: timestamp }
       state.resumes.push(resume)
       state.analysisTasks.push(task)

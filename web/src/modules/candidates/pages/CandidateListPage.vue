@@ -189,7 +189,6 @@ async function submitResume() {
       content: await fileToBase64(file),
       encoding: 'base64',
     })
-    // 内联规则分析立即处理；Worker 异步模式中此处保持幂等。
     await processAnalysisTask(created.task.id)
     let result: ApiAnalysisResult
     try {
