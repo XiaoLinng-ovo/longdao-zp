@@ -79,9 +79,22 @@ function createSeedFile(): SessionFile {
 
 export class LocalAuthSessionStore {
   private readonly filePath: string
+  private operationQueue: Promise<void> = Promise.resolve()
 
   constructor(filePath = process.env.AUTH_STORE_PATH || DEFAULT_PATH) {
     this.filePath = filePath
+  }
+
+  private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.operationQueue
+    let release!: () => void
+    this.operationQueue = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+    }
   }
 
   private async readFile(): Promise<SessionFile> {
@@ -118,60 +131,61 @@ export class LocalAuthSessionStore {
   }
 
   async findUserByEmailPassword(email: string, password: string): Promise<SessionUser | undefined> {
-    const file = await this.readFile()
-    const normalizedEmail = email.trim().toLowerCase()
-    const user = file.users.find((item) => item.email.toLowerCase() === normalizedEmail)
-    if (!user) return undefined
-    const encoded = user.passwordHash
-    const isScrypt = encoded.startsWith('scrypt$')
-    const valid = isScrypt ? await verifyPassword(password, encoded) : encoded === sha256(password)
-    if (!valid) return undefined
-    if (!isScrypt) {
-      user.passwordHash = await hashPassword(password)
-      await this.writeFile(file)
-    }
-    return user ? { id: user.id, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId } : undefined
+    return this.exclusive(async () => {
+      const file = await this.readFile()
+      const normalizedEmail = email.trim().toLowerCase()
+      const user = file.users.find((item) => item.email.toLowerCase() === normalizedEmail)
+      if (!user) return undefined
+      const encoded = user.passwordHash
+      const isScrypt = encoded.startsWith('scrypt$')
+      const valid = isScrypt ? await verifyPassword(password, encoded) : encoded === sha256(password)
+      if (!valid) return undefined
+      if (!isScrypt) {
+        user.passwordHash = await hashPassword(password)
+        await this.writeFile(file)
+      }
+      return { id: user.id, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId }
+    })
   }
 
   async createSession(user: SessionUser, ttlMs = SESSION_TTL_MS): Promise<{ session: AuthSession; token: string }> {
-    const file = await this.readFile()
-    const now = Date.now()
-    file.sessions = file.sessions.filter((session) => new Date(session.expiresAt).getTime() > now)
-    const { token, tokenHash } = this.issueToken()
-    const session: AuthSession = {
-      sessionId: randomUUID(),
-      userId: user.id,
-      tokenHash,
-      createdAt: timestamp(),
-      expiresAt: new Date(now + ttlMs).toISOString(),
-      lastSeenAt: timestamp(),
-      user,
-    }
-    file.sessions.push(session)
-    await this.writeFile(file)
-    return { session, token }
+    return this.exclusive(async () => {
+      const file = await this.readFile()
+      const now = Date.now()
+      file.sessions = file.sessions.filter((session) => new Date(session.expiresAt).getTime() > now)
+      const { token, tokenHash } = this.issueToken()
+      const session: AuthSession = {
+        sessionId: randomUUID(), userId: user.id, tokenHash, createdAt: timestamp(),
+        expiresAt: new Date(now + ttlMs).toISOString(), lastSeenAt: timestamp(), user,
+      }
+      file.sessions.push(session)
+      await this.writeFile(file)
+      return { session, token }
+    })
   }
 
   async findSessionByToken(token: string): Promise<AuthSession | undefined> {
     if (!token) return undefined
-    const file = await this.readFile()
-    const tokenHash = sha256(token)
-    const session = file.sessions.find((item) => item.tokenHash === tokenHash)
-    if (!session) return undefined
-    if (new Date(session.expiresAt).getTime() <= Date.now()) return undefined
-    session.lastSeenAt = timestamp()
-    await this.writeFile(file)
-    return session
+    return this.exclusive(async () => {
+      const file = await this.readFile()
+      const tokenHash = sha256(token)
+      const session = file.sessions.find((item) => item.tokenHash === tokenHash)
+      if (!session || new Date(session.expiresAt).getTime() <= Date.now()) return undefined
+      session.lastSeenAt = timestamp()
+      await this.writeFile(file)
+      return session
+    })
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    const file = await this.readFile()
-    file.sessions = file.sessions.filter((session) => session.sessionId !== sessionId)
-    await this.writeFile(file)
+    await this.exclusive(async () => {
+      const file = await this.readFile()
+      file.sessions = file.sessions.filter((session) => session.sessionId !== sessionId)
+      await this.writeFile(file)
+    })
   }
 
   async listSessions(): Promise<AuthSession[]> {
-    const file = await this.readFile()
-    return file.sessions
+    return this.exclusive(async () => (await this.readFile()).sessions)
   }
 }
