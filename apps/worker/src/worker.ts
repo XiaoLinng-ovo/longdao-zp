@@ -46,6 +46,19 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
   let stopScanPoll: (() => void) | undefined
   let pool: PgPool | undefined
   const storage = options.storage ?? createObjectStorageFromEnv(process.env, config.quarantineRoot ?? resolve(process.cwd(), '../../data/resumes/quarantine'))
+  try {
+    health.setDependency('objectStorage', await storage.health() ? 'ok' : 'unavailable')
+  } catch {
+    health.setDependency('objectStorage', 'error')
+  }
+  if (config.clamavHost) {
+    try {
+      await new ClamdClient({ host: config.clamavHost, port: config.clamavPort, timeoutMs: config.clamavTimeoutMs }).ping()
+      health.setDependency('clamav', 'ok')
+    } catch {
+      health.setDependency('clamav', 'unavailable')
+    }
+  }
 
   if (config.pollPostgres) {
     pool = options.pool ?? createWorkerPool(loadWorkerPoolConfig())

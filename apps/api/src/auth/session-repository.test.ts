@@ -65,6 +65,12 @@ it('exposes a unified auth session store factory for postgres environments', asy
   assert.equal(store.constructor.name, 'PostgresSessionRepository')
 })
 
+it('uses PostgreSQL sessions in development when database credentials are configured', async () => {
+  const { createAuthSessionStore } = await import('./auth-service.js')
+  const store = createAuthSessionStore({ PGPASSWORD: 'development-password', NODE_ENV: 'development' })
+  assert.equal(store.constructor.name, 'PostgresSessionRepository')
+})
+
 it('refuses local session fallback in production without database configuration', async () => {
   const { createAuthSessionStore } = await import('./auth-service.js')
   assert.throws(() => createAuthSessionStore({ NODE_ENV: 'production' }), /database configuration/i)

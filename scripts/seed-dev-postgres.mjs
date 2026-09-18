@@ -5,7 +5,7 @@ import { loadDatabaseConfig, createDatabasePool } from '../apps/api/dist/src/db/
 import { hashPassword } from '../apps/api/dist/src/auth/password.js'
 
 // ===== 可调参数（改这里即可裸跑，也可用环境变量覆盖）=====
-const DEFAULT_PASSWORD = process.env.SEED_PASSWORD?.trim() || 'SmartRecruit#2026'
+const OVERRIDE_PASSWORD = process.env.SEED_PASSWORD?.trim()
 const DEFAULT_DEPARTMENTS = [
   { code: 'dept-tech', name: '技术部', parent: null },
   { code: 'dept-hr', name: '人力资源部', parent: null },
@@ -20,12 +20,12 @@ const DEFAULT_ROLES = [
   { code: 'interviewer', name: '面试官' },
 ]
 const DEFAULT_USERS = [
-  { email: 'recruiter@smartrecruit.local', name: '招聘专员', role: 'recruiter', department: 'dept-tech' },
-  { email: 'manager@smartrecruit.local', name: '技术用人经理', role: 'hiring_manager', department: 'dept-tech' },
-  { email: 'approver@smartrecruit.local', name: '审批人', role: 'approver', department: 'dept-hr' },
-  { email: 'hr-admin@smartrecruit.local', name: 'HR 管理员', role: 'hr_admin', department: 'dept-hr' },
-  { email: 'admin@smartrecruit.local', name: '系统管理员', role: 'admin', department: 'dept-hr' },
-  { email: 'interviewer@smartrecruit.local', name: '技术面试官', role: 'interviewer', department: 'dept-tech' },
+  { email: 'recruiter@smartrecruit.local', name: '招聘专员', role: 'recruiter', department: 'dept-tech', password: 'recruiter123' },
+  { email: 'manager@smartrecruit.local', name: '技术用人经理', role: 'hiring_manager', department: 'dept-tech', password: 'manager123' },
+  { email: 'approver@smartrecruit.local', name: '审批人', role: 'approver', department: 'dept-hr', password: 'approver123' },
+  { email: 'hr-admin@smartrecruit.local', name: 'HR 管理员', role: 'hr_admin', department: 'dept-hr', password: 'hr123' },
+  { email: 'admin@smartrecruit.local', name: '系统管理员', role: 'admin', department: 'dept-hr', password: 'admin123' },
+  { email: 'interviewer@smartrecruit.local', name: '技术面试官', role: 'interviewer', department: 'dept-tech', password: 'interviewer123' },
 ]
 
 const config = loadDatabaseConfig()
@@ -51,7 +51,7 @@ try {
   }
 
   for (const user of DEFAULT_USERS) {
-    const passwordHash = await hashPassword(DEFAULT_PASSWORD)
+    const passwordHash = await hashPassword(OVERRIDE_PASSWORD || user.password)
     const result = await pool.query(
       `INSERT INTO users (email, display_name, password_hash, department_id, is_active)
        VALUES ($1, $2, $3, (SELECT id FROM departments WHERE code = $4), true)
@@ -73,7 +73,7 @@ try {
 
   console.log(`种子完成：${config.target}`)
   console.log(`  部门 ${summary.departments} 个 / 角色 ${summary.roles} 个 / 账号 ${summary.users} 个（已绑定角色 ${summary.roleBindings}）`)
-  console.log(`  登录密码：${DEFAULT_PASSWORD}（仅开发环境；可用 SEED_PASSWORD 覆盖）`)
+  console.log(`  登录密码：默认与本地开发账号一致（可用 SEED_PASSWORD 统一覆盖）`)
   for (const user of DEFAULT_USERS) console.log(`  - ${user.email}  角色=${user.role}  部门=${user.department}`)
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)

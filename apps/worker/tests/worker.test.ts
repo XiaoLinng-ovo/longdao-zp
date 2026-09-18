@@ -6,6 +6,7 @@ import { createResumeAnalysisHandler, type ResumeAnalysisResult } from '../src/h
 import { InMemoryIdempotencyStore, createTaskExecutor } from '../src/runner.js'
 import { beginTaskAttempt, createTask, hasAttemptsRemaining, TaskExhaustedError, TaskValidationError } from '../src/task.js'
 import { HealthStateStore, createHealthServer } from '../src/health.js'
+import { startWorker } from '../src/worker.js'
 
 const basePayload = {
   applicationId: 'app-1',
@@ -156,6 +157,11 @@ void describe('worker health', () => {
     assert.equal(enabled.clamavTimeoutMs, 45_000)
   })
 
+  it('reports ClamAV as not configured when no scanner host is set', () => {
+    const state = new HealthStateStore(loadConfig({}, 'test-host'))
+    assert.equal(state.snapshot().externalDependencies.clamav, 'not_configured')
+  })
+
   it('loads one OpenAI-compatible model only when all required settings exist', () => {
     const disabled = loadConfig({ OPENAI_BASE_URL: 'https://llm.example/v1' }, 'test-host')
     const enabled = loadConfig({
@@ -168,6 +174,37 @@ void describe('worker health', () => {
     assert.deepEqual(enabled.openai, {
       baseUrl: 'https://llm.example/v1/', apiKey: 'secret', model: 'resume-model', timeoutMs: 45_000,
     })
+  })
+
+  it('reports selected object storage readiness when the worker starts', async () => {
+    const config = loadConfig({ WORKER_HEALTH_PORT: '0', WORKER_ID: 'storage-health-worker' }, 'test-host')
+    const runtime = await startWorker(config, {
+      storage: {
+        kind: 'local', put: async () => undefined, get: async () => Buffer.alloc(0), delete: async () => undefined,
+        health: async () => true,
+      },
+    })
+    try {
+      assert.equal(runtime.health.snapshot().externalDependencies.objectStorage, 'ok')
+    } finally {
+      await runtime.close()
+    }
+  })
+
+  it('reports unavailable object storage without preventing worker readiness', async () => {
+    const config = loadConfig({ WORKER_HEALTH_PORT: '0', WORKER_ID: 'storage-unavailable-worker' }, 'test-host')
+    const runtime = await startWorker(config, {
+      storage: {
+        kind: 'local', put: async () => undefined, get: async () => Buffer.alloc(0), delete: async () => undefined,
+        health: async () => false,
+      },
+    })
+    try {
+      assert.equal(runtime.health.snapshot().externalDependencies.objectStorage, 'unavailable')
+      assert.equal(runtime.health.snapshot().status, 'ready')
+    } finally {
+      await runtime.close()
+    }
   })
 })
 

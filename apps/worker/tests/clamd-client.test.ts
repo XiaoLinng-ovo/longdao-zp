@@ -33,6 +33,20 @@ test('streams a file to clamd and returns clean', async () => {
   })
 })
 
+async function withClamdPing(run: (port: number) => Promise<void>): Promise<void> {
+  const server = createServer((socket) => {
+    socket.on('data', () => socket.end('PONG\0'))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    await run(address.port)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
 test('returns the detected signature for an infected file', async () => {
   await withClamd('stream: Eicar-Signature FOUND', async (port) => {
     const result = await new ClamdClient({ host: '127.0.0.1', port, timeoutMs: 1_000 }).scan(Buffer.from('virus'))
@@ -46,5 +60,11 @@ test('rejects malformed clamd responses', async () => {
       new ClamdClient({ host: '127.0.0.1', port, timeoutMs: 1_000 }).scan(Buffer.from('resume')),
       /Unexpected clamd response/,
     )
+  })
+})
+
+test('pings a reachable clamd server', async () => {
+  await withClamdPing(async (port) => {
+    await new ClamdClient({ host: '127.0.0.1', port, timeoutMs: 1_000 }).ping()
   })
 })

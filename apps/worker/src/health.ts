@@ -21,6 +21,7 @@ export class HealthStateStore {
     ['redis', 'not_configured'],
     ['postgres', 'not_configured'],
     ['objectStorage', 'not_configured'],
+    ['clamav', 'not_configured'],
   ])
 
   constructor(private readonly config: WorkerConfig, private readonly now: () => string = () => new Date().toISOString()) {}

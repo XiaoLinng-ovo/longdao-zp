@@ -17,6 +17,12 @@ const migration = spawnSync(process.execPath, [resolve(root, 'scripts', 'migrate
 })
 if (migration.status !== 0) process.exit(migration.status ?? 1)
 
+const seed = spawnSync(process.execPath, [resolve(root, 'scripts', 'seed-dev-postgres.mjs')], {
+  cwd: root,
+  stdio: 'inherit',
+})
+if (seed.status !== 0) process.exit(seed.status ?? 1)
+
 const api = spawn(npm, ['--prefix', 'apps/api', 'start'], {
   cwd: root,
   stdio: 'inherit',

@@ -1,6 +1,16 @@
 CREATE TABLE IF NOT EXISTS offers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), application_id uuid NOT NULL REFERENCES applications(id) ON DELETE RESTRICT, status text NOT NULL DEFAULT 'draft', current_version_id uuid, approval_status text NOT NULL DEFAULT 'pending', sent_at timestamptz, responded_at timestamptz, expires_at timestamptz, version integer NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), CHECK (status IN ('draft','pending_approval','approved','sent','accepted','declined','cancelled','expired')));
 CREATE TABLE IF NOT EXISTS offer_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), offer_id uuid NOT NULL REFERENCES offers(id) ON DELETE CASCADE, version integer NOT NULL, position_title text NOT NULL, department_id uuid, employment_type text NOT NULL, start_date date, compensation jsonb NOT NULL DEFAULT '{}'::jsonb, benefits jsonb NOT NULL DEFAULT '[]'::jsonb, content text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (offer_id, version));
-ALTER TABLE offers ADD CONSTRAINT offers_current_version_fk FOREIGN KEY (current_version_id) REFERENCES offer_versions(id) DEFERRABLE INITIALLY DEFERRED;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'offers'::regclass AND conname = 'offers_current_version_fk'
+  ) THEN
+    ALTER TABLE offers ADD CONSTRAINT offers_current_version_fk
+      FOREIGN KEY (current_version_id) REFERENCES offer_versions(id)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS onboarding_records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), application_id uuid NOT NULL REFERENCES applications(id) ON DELETE RESTRICT, offer_id uuid NOT NULL REFERENCES offers(id) ON DELETE RESTRICT, planned_start_date date, status text NOT NULL DEFAULT 'pending', notes text, archived_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (offer_id), CHECK (status IN ('pending','scheduled','completed','cancelled')));
 CREATE INDEX IF NOT EXISTS idx_offers_status ON offers(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_offer_versions_offer ON offer_versions(offer_id, version DESC);

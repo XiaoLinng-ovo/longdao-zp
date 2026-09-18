@@ -56,7 +56,7 @@ export function createS3ObjectStorage(options: { bucket: string; client: Command
     async put(key, body, contentType) { await ensure(); await options.client.send(new PutObjectCommand({ Bucket: options.bucket, Key: key, Body: body, ContentType: contentType, ContentLength: body.byteLength })) },
     async get(key) { const result = await options.client.send(new GetObjectCommand({ Bucket: options.bucket, Key: key })); if (!result.Body) throw new Error(`S3 object ${key} has no body`); return Buffer.from(await result.Body.transformToByteArray()) },
     async delete(key) { await options.client.send(new DeleteObjectCommand({ Bucket: options.bucket, Key: key })) },
-    async health() { try { await options.client.send(new HeadBucketCommand({ Bucket: options.bucket })); return true } catch { return false } },
+    async health() { try { await ensure(); return true } catch { return false } },
   }
 }
 export function createObjectStorageFromEnv(env: NodeJS.ProcessEnv = process.env, defaultRoot = resolve(process.cwd(), '../../data/resumes/quarantine')): ObjectStorage {

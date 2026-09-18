@@ -17,6 +17,31 @@ export class ClamdClient {
     this.timeoutMs = options.timeoutMs ?? 30_000
   }
 
+  ping(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const socket = connect({ host: this.options.host, port: this.port })
+      const response: Buffer[] = []
+      let settled = false
+      const fail = (error: Error): void => {
+        if (settled) return
+        settled = true
+        socket.destroy()
+        reject(error)
+      }
+      socket.setTimeout(this.timeoutMs, () => fail(new Error(`clamd ping timed out after ${this.timeoutMs}ms`)))
+      socket.on('error', fail)
+      socket.on('data', (chunk) => response.push(chunk))
+      socket.on('connect', () => socket.end('zPING\0'))
+      socket.on('end', () => {
+        if (settled) return
+        settled = true
+        const message = Buffer.concat(response).toString('utf8').replace(/\0+$/, '').trim()
+        if (message === 'PONG') return resolve()
+        reject(new Error(`Unexpected clamd ping response: ${message || '<empty>'}`))
+      })
+    })
+  }
+
   scan(content: Buffer): Promise<MalwareScanResult> {
     return new Promise((resolve, reject) => {
       const socket = connect({ host: this.options.host, port: this.port })

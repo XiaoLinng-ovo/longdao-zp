@@ -10,16 +10,29 @@ import { fileURLToPath } from 'node:url'
 // ===== 可调参数 =====
 const DEFAULT_BASE_DEPARTMENT = 'dept-tech'      // 流程所用部门（需存在于 departments.code）
 const DEFAULT_OUTSIDE_DEPARTMENT = 'dept-sales'  // 用于跨部门越权断言
-const DEFAULT_PASSWORD = process.env.SEED_PASSWORD?.trim() || 'SmartRecruit#2026'
+const DEFAULT_PASSWORDS = {
+  'recruiter@smartrecruit.local': 'recruiter123',
+  'approver@smartrecruit.local': 'approver123',
+  'interviewer@smartrecruit.local': 'interviewer123',
+  'manager@smartrecruit.local': 'manager123',
+}
 const DEFAULT_READY_TIMEOUT_MS = 5000
+const DEFAULT_ASYNC_TIMEOUT_MS = 30_000
 
 process.env.NODE_ENV = 'production'
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 process.env.RECRUITING_QUARANTINE_ROOT = process.env.RECRUITING_QUARANTINE_ROOT || resolve(root, 'data', 'resumes', 'quarantine')
+process.env.WORKER_DB_POLL = 'true'
+process.env.WORKER_HEALTH_HOST = '127.0.0.1'
+process.env.WORKER_HEALTH_PORT = '0'
+process.env.CLAMAV_HOST = process.env.CLAMAV_HOST || '127.0.0.1'
+process.env.CLAMAV_PORT = process.env.CLAMAV_PORT || '53310'
 
 const { loadConfig } = await import('../apps/api/dist/src/config.js')
 const { createHttpServer } = await import('../apps/api/dist/src/server.js')
 const { loadDatabaseConfig } = await import('../apps/api/dist/src/db/index.js')
+const { loadConfig: loadWorkerConfig } = await import('../apps/worker/dist/src/config.js')
+const { startWorker } = await import('../apps/worker/dist/src/worker.js')
 
 const database = loadDatabaseConfig()
 const server = createHttpServer(loadConfig({ NODE_ENV: 'production', PORT: '0', HOST: '127.0.0.1' }))
@@ -29,6 +42,7 @@ await new Promise((resolve, reject) => {
 })
 const address = server.address()
 const baseUrl = `http://127.0.0.1:${address.port}`
+const worker = await startWorker(loadWorkerConfig())
 
 let passed = 0
 const failures = []
@@ -54,8 +68,20 @@ async function api(method, path, { body, token, headers = {} } = {}) {
   return { status: response.status, body: parsed, headers: response.headers }
 }
 
+async function waitFor(label, fetchState, predicate, timeoutMs = DEFAULT_ASYNC_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs
+  let last
+  while (Date.now() < deadline) {
+    last = await fetchState()
+    if (predicate(last)) return last
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(`${label} timed out after ${timeoutMs}ms: ${JSON.stringify(last).slice(0, 500)}`)
+}
+
 async function login(email) {
-  const response = await api('POST', '/api/v1/auth/login', { body: { email, password: DEFAULT_PASSWORD } })
+  const password = process.env.SEED_PASSWORD?.trim() || DEFAULT_PASSWORDS[email]
+  const response = await api('POST', '/api/v1/auth/login', { body: { email, password } })
   if (response.status !== 200) throw new Error(`登录失败 ${email}: ${response.status} ${JSON.stringify(response.body).slice(0, 200)}`)
   // 会话 token 只在 Set-Cookie 里（生产模式带 __Host- 前缀），响应体不含 token。
   const cookies = response.headers.getSetCookie()
@@ -126,8 +152,16 @@ try {
   const resume = await api('POST', '/api/v1/resumes', { token: recruiter.token, body: { candidateId, applicationId, originalFilename: 'pg-resume.txt', mimeType: 'text/plain', content: 'PG 验证候选人\nPostgreSQL 8 years' } })
   check('简历进入隔离区并生成分析任务', resume.status === 201 && resume.body.data?.resume?.scanStatus === 'quarantined' && resume.body.data?.task?.status === 'queued', JSON.stringify(resume.body).slice(0, 200))
   const taskId = resume.body.data?.task?.id
-  const processed = await api('POST', `/api/v1/analysis-tasks/${taskId}`, { token: recruiter.token, body: {} })
-  check('分析任务执行完成并写入 analysis_results', processed.status === 200 && processed.body.data?.status === 'completed', JSON.stringify(processed.body).slice(0, 200))
+  const cleanResume = await waitFor('简历 ClamAV 扫描',
+    () => api('GET', `/api/v1/resumes?candidateId=${candidateId}`, { token: recruiter.token }),
+    (response) => response.body.data?.some((item) => item.id === resume.body.data?.resume?.id && item.scanStatus === 'clean'),
+  )
+  check('简历通过 ClamAV 扫描并标记 clean', cleanResume.status === 200, JSON.stringify(cleanResume.body).slice(0, 200))
+  const processed = await waitFor('简历分析',
+    () => api('GET', `/api/v1/analysis-tasks/${taskId}`, { token: recruiter.token }),
+    (response) => response.body.data?.status === 'completed',
+  )
+  check('分析任务由 Worker 执行完成并写入 analysis_results', processed.status === 200 && processed.body.data?.status === 'completed', JSON.stringify(processed.body).slice(0, 200))
   const taskResult = await api('GET', `/api/v1/analysis-tasks/${taskId}/result`, { token: recruiter.token })
   check('分析结果可读且标注“仅建议”', taskResult.status === 200 && taskResult.body.data?.result?.safety?.advisoryOnly === true, JSON.stringify(taskResult.body).slice(0, 200))
   const resultId = taskResult.body.data?.id
@@ -226,5 +260,6 @@ try {
   console.error('\n验证脚本异常中断:', error instanceof Error ? error.message : error)
   process.exitCode = 1
 } finally {
+  await worker.close()
   await new Promise((resolve) => server.close(resolve))
 }

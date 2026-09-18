@@ -13,7 +13,7 @@ export function createAuthSessionStore(env: NodeJS.ProcessEnv = process.env): Au
   if (env.NODE_ENV === 'production' && !hasDatabase) {
     throw new Error('Production authentication requires database configuration')
   }
-  if (env.NODE_ENV === 'production' && hasDatabase) {
+  if (hasDatabase) {
     const pool = createDatabasePool(loadDatabaseConfig(env))
     return new PostgresSessionRepository(pool) as SessionRepository & AuthSessionStore
   }

@@ -47,3 +47,16 @@ test('S3 storage initializes bucket and supports object operations', async () =>
   assert.ok(commands.some((item) => item instanceof PutObjectCommand))
   assert.ok(commands.some((item) => item instanceof DeleteObjectCommand))
 })
+
+test('S3 health initializes a missing quarantine bucket', async () => {
+  const commands: unknown[] = []
+  const client = { async send(command: unknown) {
+    commands.push(command)
+    if (command instanceof HeadBucketCommand) throw Object.assign(new Error('missing'), { name: 'NotFound' })
+    return {}
+  } }
+  const storage = createS3ObjectStorage({ bucket: 'resume-quarantine', client })
+  assert.equal(await storage.health(), true)
+  assert.ok(commands[0] instanceof HeadBucketCommand)
+  assert.ok(commands[1] instanceof CreateBucketCommand)
+})
