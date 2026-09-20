@@ -81,7 +81,7 @@ export function loadConfig(
         baseUrl: openaiBaseUrl,
         apiKey: openaiApiKey,
         model: openaiModel,
-        timeoutMs: readInteger(env, 'OPENAI_TIMEOUT_MS', 30_000, { minimum: 1 }),
+        timeoutMs: readInteger(env, 'OPENAI_TIMEOUT_MS', 120_000, { minimum: 1 }),
       },
     } : {}),
   }

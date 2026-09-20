@@ -35,6 +35,28 @@ function likelyHeaderName(text: string): string | undefined {
   return firstToken && /^[\p{Script=Han}]{2,4}$/u.test(firstToken) ? firstToken : undefined
 }
 
+function extractJsonContent(content: string): string {
+  const trimmed = content.trim()
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/u)
+  if (fence?.[1]) return fence[1].trim()
+  const start = trimmed.indexOf('{')
+  const end = trimmed.lastIndexOf('}')
+  return start >= 0 && end > start ? trimmed.slice(start, end + 1) : trimmed
+}
+
+function textItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    if (typeof item === 'string') return item.trim()
+    if (!item || typeof item !== 'object') return ''
+    const row = item as Record<string, unknown>
+    return ['point', 'label', 'summary', 'evidence', 'requirement', 'question']
+      .map((key) => row[key])
+      .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      .join('：')
+  }).filter(Boolean)
+}
+
 export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions): ResumeAnalyzer {
   const request = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 30_000
@@ -104,11 +126,30 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
       })
     }
     let suggestion
+    let rawContent = ''
     try {
       const payload: unknown = await response.json()
-      suggestion = parseLlmResumeSuggestion(JSON.parse(responseContent(payload)))
+      rawContent = responseContent(payload)
+      const parsed = JSON.parse(extractJsonContent(rawContent)) as Record<string, unknown>
+      if (parsed.summary !== undefined && typeof parsed.summary !== 'string') throw new TypeError('summary must be a string')
+      if (parsed.score !== undefined && typeof parsed.score !== 'number') throw new TypeError('score must be a number')
+      if (parsed.matchScore !== undefined && typeof parsed.matchScore !== 'number') throw new TypeError('matchScore must be a number')
+      for (const key of ['strengths', 'risks', 'matchedRequirements', 'conflicts', 'interviewQuestions'] as const) {
+        if (parsed[key] !== undefined && !Array.isArray(parsed[key])) throw new TypeError(`${key} must be an array`)
+      }
+      if (parsed.confidence !== undefined && typeof parsed.confidence !== 'number') throw new TypeError('confidence must be a number')
+      suggestion = parseLlmResumeSuggestion({
+        summary: typeof parsed.summary === 'string' && parsed.summary.trim() ? parsed.summary : report.assessment.strengths[0] || '已完成模型分析',
+        score: typeof parsed.score === 'number' ? parsed.score : typeof parsed.matchScore === 'number' ? parsed.matchScore : report.assessment.score,
+        strengths: textItems(parsed.strengths),
+        risks: textItems(parsed.risks),
+        matchedRequirements: textItems(parsed.matchedRequirements),
+        conflicts: textItems(parsed.conflicts),
+        interviewQuestions: textItems(parsed.interviewQuestions),
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
+      })
     } catch (error: unknown) {
-      throw new WorkerFailure('Resume analysis model returned invalid structured JSON', {
+      throw new WorkerFailure(`Resume analysis model returned invalid structured JSON: ${error instanceof Error ? error.message : 'unknown'} | ${rawContent.slice(0, 500)}`, {
         category: 'validation', code: 'MODEL_RESPONSE_INVALID', retryable: false, cause: error,
       })
     }

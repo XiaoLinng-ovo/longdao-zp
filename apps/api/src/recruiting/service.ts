@@ -1264,6 +1264,30 @@ export class RecruitingService {
       try {
         saved = await this.repository.createResume({ id, candidateId, ...(input.applicationId ? { applicationId: input.applicationId } : {}), storageKey, originalFilename: filename, mimeType, sizeBytes: payload.length, contentHash: hash, scanStatus: initialResumeScanStatus() })
         queued = await this.repository.createAnalysisTask({ resumeId: saved.id, ...(saved.applicationId ? { applicationId: saved.applicationId } : {}), idempotencyKey: `resume-analysis:${saved.id}:${hash}` })
+        try {
+          const text = await extractResumeText(payload, filename, mimeType)
+          const report = buildRuleBasedReport({ resume: { documentId: saved.id, fileName: filename, mimeType, text, source: 'upload' }, job: buildJobRequirements(undefined) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: saved.id } })
+          const current = await this.repository.getCandidate(candidateId)
+          const patch = extractedCandidatePatch({
+            id: current.id,
+            code: current.businessId,
+            fullName: current.name,
+            ...(current.email ? { email: current.email } : {}),
+            ...(current.phone ? { phone: current.phone } : {}),
+            status: 'active',
+            createdAt: current.createdAt,
+            updatedAt: current.updatedAt,
+          }, report.extraction as ExtractedCandidateProfile)
+          if (Object.keys(patch).length) {
+            await this.repository.updateCandidate(current.id, {
+              ...(patch.fullName ? { name: patch.fullName } : {}),
+              ...(patch.email ? { email: patch.email } : {}),
+              ...(patch.phone ? { phone: patch.phone } : {}),
+            })
+          }
+        } catch {
+          // Background analysis remains the source of truth; this local pass only prevents placeholder identity.
+        }
       } catch (error) {
         await this.objectStorage.delete(storageKey).catch(() => undefined)
         throw error
@@ -1288,6 +1312,17 @@ export class RecruitingService {
       const task: AnalysisTaskRecord = { id: randomUUID(), resumeId: resume.id, ...(application ? { applicationId: application.id } : {}), status: 'queued', attempts: 0, idempotencyKey: `resume-analysis:${resume.id}:${hash}`, availableAt: timestamp, createdAt: timestamp }
       state.resumes.push(resume)
       state.analysisTasks.push(task)
+      try {
+        const text = await extractResumeText(payload, filename, mimeType)
+        const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: filename, mimeType, text, source: 'upload' }, job: buildJobRequirements(undefined) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id } })
+        const patch = extractedCandidatePatch(candidate, report.extraction as ExtractedCandidateProfile)
+        if (patch.fullName) candidate.fullName = patch.fullName
+        if (patch.email) candidate.email = patch.email
+        if (patch.phone) candidate.phone = patch.phone
+        if (Object.keys(patch).length) candidate.updatedAt = timestamp
+      } catch {
+        // Background analysis remains the source of truth; this local pass only prevents placeholder identity.
+      }
       return { resume, task }
     }) } catch (error) { await this.objectStorage.delete(localStorageKey).catch(() => undefined); throw error }
   }

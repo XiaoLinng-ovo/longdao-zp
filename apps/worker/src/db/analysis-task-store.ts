@@ -102,6 +102,25 @@ interface ResumeSourceRow extends Record<string, unknown> {
 interface JobApplicationRow extends Record<string, unknown> {
   job_id: string | null
 }
+
+function extractedCandidateDraft(result: unknown): { fullName?: string; email?: string; phone?: string } | undefined {
+  if (!result || typeof result !== 'object') return undefined
+  const row = result as Record<string, unknown>
+  const analysis = row.analysis && typeof row.analysis === 'object' ? row.analysis as Record<string, unknown> : undefined
+  const report = analysis?.report && typeof analysis.report === 'object' ? analysis.report as Record<string, unknown> : row
+  const extraction = report.extraction && typeof report.extraction === 'object' ? report.extraction as Record<string, unknown> : undefined
+  const candidate = extraction?.candidate && typeof extraction.candidate === 'object' ? extraction.candidate as Record<string, unknown> : undefined
+  if (!candidate) return undefined
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined
+  const fullName = text(candidate.fullName)
+  const email = text(candidate.email)
+  const phone = text(candidate.phone)
+  return {
+    ...(fullName === undefined ? {} : { fullName }),
+    ...(email === undefined ? {} : { email }),
+    ...(phone === undefined ? {} : { phone }),
+  }
+}
 interface ResumeScanRow extends Record<string, unknown> {
   id: string
   scan_status: ResumeScanStatus
@@ -517,6 +536,22 @@ export class PostgresAnalysisTaskStore {
       )
       const result = inserted.rows[0] ? mapResult(inserted.rows[0]) : await this.resultForTask(client, input.taskId)
       if (!result) throw new Error(`Analysis result for task ${input.taskId} could not be stored`)
+
+      const candidate = extractedCandidateDraft(input.result)
+      if (candidate && (candidate.fullName || candidate.email || candidate.phone)) {
+        await client.query(
+          `UPDATE candidates
+           SET name = CASE
+                 WHEN name IN ('待解析候选人', '待解析', '未命名候选人') AND $2 <> '' THEN $2
+                 ELSE name
+               END,
+               email = COALESCE(NULLIF($3, ''), email),
+               phone = COALESCE(NULLIF($4, ''), phone),
+               updated_at = now()
+           WHERE id = (SELECT candidate_id FROM resumes WHERE id = $1)`,
+          [task.resumeId, candidate.fullName ?? '', candidate.email ?? '', candidate.phone ?? ''],
+        )
+      }
 
       const updated = await client.query<TaskRow>(
         `UPDATE analysis_tasks

@@ -135,6 +135,31 @@ void describe('PostgresAnalysisTaskStore SQL contract', () => {
     assert.deepEqual(client.calls.map((call) => call.text === 'BEGIN' || call.text === 'COMMIT'), [true, false, false, false, true])
   })
 
+  it('backfills the candidate profile from the completed analysis result', async () => {
+    const completedTask = { ...taskRow, completed_at: '2026-09-10T00:00:10.000Z', available_at: '2026-09-10T00:00:10.000Z', status: 'completed' as const }
+    const client = new MockClient(rows(taskRow), rows(resultRow), rows(), rows(completedTask))
+    const store = new PostgresAnalysisTaskStore(new MockPool(client))
+
+    await store.completeTask({
+      taskId: 'task-1',
+      attempt: 1,
+      result: {
+        analysis: {
+          report: {
+            extraction: {
+              candidate: { fullName: '张伟', email: 'zhangwei@example.com', phone: '13800138000' },
+            },
+          },
+        },
+      },
+      completedAt: '2026-09-10T00:00:10.000Z',
+    })
+
+    const profileUpdate = client.calls.find((call) => call.text.includes('UPDATE candidates'))
+    assert.ok(profileUpdate)
+    assert.deepEqual(profileUpdate.values, ['resume-1', '张伟', 'zhangwei@example.com', '13800138000'])
+  })
+
   it('rolls back a fenced status update when the attempt is stale', async () => {
     const reclaimedTask = { ...taskRow, attempts: 2, status: 'processing' as const }
     const client = new MockClient(rows(reclaimedTask))
