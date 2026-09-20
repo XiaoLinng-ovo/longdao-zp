@@ -34,7 +34,7 @@ export function createResumePayloadResolver(
       resumeId: source.resumeId,
       candidateId: source.candidateId,
       ...(jobId === undefined ? {} : { jobId }),
-      ...(jobContext === undefined ? {} : { jobTitle: jobContext.title, jobRequirements: jobContext.requirements }),
+      ...(jobContext === undefined ? {} : { jobTitle: jobContext.title, jobRequirements: jobContext.requirements, jobSkills: jobContext.skills }),
       fileName: source.originalFilename,
       mimeType: source.mimeType ?? 'text/plain',
       text,

@@ -60,7 +60,11 @@ const dimensions = computed(() => {
     { label: '技能匹配', value: values.skills },
     { label: '教育背景', value: values.education },
     { label: '潜力', value: values.potential },
-  ].filter((item): item is { label: string; value: number } => typeof item.value === 'number')
+  ].map((item) => ({
+    label: item.label,
+    text: typeof item.value === 'number' ? String(item.value) : '—',
+    missing: typeof item.value !== 'number',
+  }))
 })
 
 function requirementReason(item: { label?: string; rationale?: string; evidence?: Array<{ sourceText?: string; normalizedValue?: string }> }): string {
@@ -238,11 +242,11 @@ onMounted(load)
           </div>
           <div class="score-copy">
             <h4>{{ recommendation }}</h4>
-            <p>评分基于岗位硬性要求、工作经验、技能、教育背景和岗位潜力综合计算。</p>
+            <p>评分按岗位每条任职要求的满足程度加权计算，硬性要求权重更高；维度分用于快速定位差距，岗位未提供该类要求时显示「—」。</p>
             <div class="dimension-list">
-              <div v-for="item in dimensions" :key="item.label" class="dimension-item">
+              <div v-for="item in dimensions" :key="item.label" class="dimension-item" :title="item.missing ? '岗位未提供该类要求' : undefined">
                 <span>{{ item.label }}</span>
-                <strong>{{ item.value }}</strong>
+                <strong>{{ item.text }}</strong>
               </div>
             </div>
           </div>

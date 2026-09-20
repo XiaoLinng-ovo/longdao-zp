@@ -423,7 +423,7 @@ export class PostgresAnalysisTaskStore {
     }
   }
 
-  async getJobAnalysisContext(jobId: string): Promise<{ title: string; requirements: string[] } | undefined> {
+  async getJobAnalysisContext(jobId: string): Promise<{ title: string; requirements: string[]; skills: string[] } | undefined> {
     const client = await this.pool.connect()
     try {
       const result = await client.query<{ title: string; content: Record<string, unknown> | null }>(
@@ -449,7 +449,8 @@ export class PostgresAnalysisTaskStore {
           }).filter(Boolean)
         : []
       const skills = Array.isArray(content.skills) ? content.skills.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []
-      return { title: row.title, requirements: [...requirements, ...skills] }
+      // 技能与任职要求分开返回：技能要按 skill 维度计分，混进要求文本里就永远统计不到。
+      return { title: row.title, requirements, skills }
     } finally {
       client.release()
     }

@@ -1,6 +1,6 @@
 import { WorkerFailure } from '../errors.js'
 import type { TaskEnvelope, TaskHandler, TaskHandlerContext } from '../task.js'
-import { buildRuleBasedReport, type AnalysisReport, type LlmResumeSuggestion } from '@smartrecruit-pro/resume-intelligence'
+import { buildJobRequirements, buildRuleBasedReport, type AnalysisReport, type LlmResumeSuggestion } from '@smartrecruit-pro/resume-intelligence'
 
 export interface ResumeAnalysisTaskPayload {
   applicationId?: string
@@ -9,6 +9,7 @@ export interface ResumeAnalysisTaskPayload {
   jobId?: string
   jobTitle?: string
   jobRequirements?: string[]
+  jobSkills?: string[]
   fileName: string
   mimeType?: string
   /** Inline text is useful for tests and small migration jobs. */
@@ -94,6 +95,12 @@ function validatePayload(payload: ResumeAnalysisTaskPayload): ResumeAnalysisTask
       code: 'INVALID_RESUME_ANALYSIS_PAYLOAD',
     })
   }
+  if (payload.jobSkills !== undefined && (!Array.isArray(payload.jobSkills) || payload.jobSkills.some((item) => typeof item !== 'string'))) {
+    throw new WorkerFailure('jobSkills must be an array of strings when provided', {
+      category: 'validation',
+      code: 'INVALID_RESUME_ANALYSIS_PAYLOAD',
+    })
+  }
 
   if (payload.mimeType !== undefined) requireString(payload.mimeType, 'mimeType')
   if (payload.text !== undefined && typeof payload.text !== 'string') {
@@ -134,17 +141,14 @@ async function defaultTextLoader(
 async function defaultAnalyzer(input: ResumeAnalysisInput): Promise<ResumeAnalysisResult> {
   const { task, content, context } = input
   const normalizedText = content.text.replace(/\s+/gu, ' ').trim()
-  const requirementLabels = task.payload.jobRequirements ?? []
   const job = {
     ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
     title: task.payload.jobTitle ?? '',
-    requirements: requirementLabels.map((label, index) => ({
-      id: `${task.payload.jobId ?? 'job'}-requirement-${index + 1}`,
-      label,
-      kind: 'other' as const,
-      keywords: [label],
-      hard: index === 0,
-    })),
+    requirements: buildJobRequirements({
+      ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
+      ...(task.payload.jobRequirements === undefined ? {} : { requirementLabels: task.payload.jobRequirements }),
+      ...(task.payload.jobSkills === undefined ? {} : { skills: task.payload.jobSkills }),
+    }),
   }
   const report = buildRuleBasedReport({
     resume: {

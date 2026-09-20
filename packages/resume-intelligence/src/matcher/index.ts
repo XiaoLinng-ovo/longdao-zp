@@ -11,6 +11,19 @@ import { normalizeSkillNames, normalizeToken } from '../normalizer/index.js'
 
 export const MATCHER_VERSION = '0.1.0'
 
+/** 学历层次：用于把「本科及以上」这类要求与简历中的教育经历做量化比对。 */
+const EDUCATION_LEVELS: Array<{ pattern: RegExp; level: number; label: string }> = [
+  { pattern: /博士/u, level: 4, label: '博士' },
+  { pattern: /硕士|研究生/u, level: 3, label: '硕士' },
+  { pattern: /本科|学士/u, level: 2, label: '本科' },
+  { pattern: /大专|专科|高职/u, level: 1, label: '大专' },
+]
+
+function educationLevelOf(text: string): { level: number; label: string } {
+  for (const entry of EDUCATION_LEVELS) if (entry.pattern.test(text)) return { level: entry.level, label: entry.label }
+  return { level: 0, label: '未识别' }
+}
+
 function clamp(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
@@ -89,6 +102,24 @@ function requirementEvidence(requirement: JobRequirement, extraction: ResumeExtr
       score,
       evidence: matched ? [{ id: `evidence-${requirement.id}-years`, requirementId: requirement.id, sourceText: `${years} years`, normalizedValue: String(years), relevance: 'supporting', confidence: 0.72 }] : [],
       rationale: matched ? `估算经验 ${years} 年，达到要求 ${requirement.minYears} 年` : `估算经验 ${years} 年，低于要求 ${requirement.minYears} 年`,
+    }
+  }
+
+  // 学历要求必须按层次比对：整句关键字匹配永远不可能命中，会把「本科」这样的明确满足判成 0 分。
+  if (requirement.kind === 'education') {
+    const required = educationLevelOf(requirement.label)
+    // 岗位没写具体层次时退回通用关键字匹配，不做无依据的判定。
+    if (required.level > 0) {
+      const achieved = educationLevelOf(extraction.education.map((record) => [record.evidence, record.degree, record.institution].filter(Boolean).join(' ')).join(' '))
+      const matched = achieved.level >= required.level
+      return {
+        matched,
+        score: matched ? 100 : 0,
+        evidence: matched ? [{ id: `evidence-${requirement.id}-education`, requirementId: requirement.id, sourceText: achieved.label, normalizedValue: achieved.label, relevance: 'supporting', confidence: 0.7 }] : [],
+        rationale: matched
+          ? `学历满足要求：简历为${achieved.label}，要求${required.label}及以上`
+          : `学历低于要求：简历为${achieved.label}，要求${required.label}及以上`,
+      }
     }
   }
 

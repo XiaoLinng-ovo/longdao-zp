@@ -11,9 +11,10 @@ function clamp(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
-function assessDimension(assessments: RequirementAssessment[], kind: RequirementAssessment['kind']): number {
+/** 岗位没有该类要求时返回 null：既不能算 0 分（等价于最差），也不能算满分（等价于无门槛）。 */
+function assessDimension(assessments: RequirementAssessment[], kind: RequirementAssessment['kind']): number | null {
   const values = assessments.filter((assessment) => assessment.kind === kind).map((assessment) => assessment.score)
-  return clamp(average(values, 0))
+  return values.length ? clamp(average(values)) : null
 }
 
 function potentialScore(input: ScoreMatchInput, assessments: RequirementAssessment[]): number {
@@ -47,27 +48,31 @@ export function scoreResumeMatch(input: ScoreMatchInput): MatchAssessment {
   const missingRequirements = assessments.filter((assessment) => !assessment.matched)
   const matchedRequirements = assessments.filter((assessment) => assessment.matched)
   const hard = assessments.filter((assessment) => assessment.hard)
-  const hardRequirement = hard.length ? average(hard.map((assessment) => assessment.score), 0) : 100
+  const hardRequirement = hard.length ? clamp(average(hard.map((assessment) => assessment.score))) : null
   const experience = assessDimension(assessments, 'experience')
   const skills = assessDimension(assessments, 'skill')
   const education = assessDimension(assessments, 'education')
   const potential = potentialScore(input, assessments)
-  const weighted = [
-    { value: hardRequirement, weight: 0.35 },
-    { value: experience, weight: 0.2 },
-    { value: skills, weight: 0.25 },
-    { value: education || 50, weight: 0.1 },
-    { value: potential, weight: 0.1 },
-  ]
-  const score = clamp(weighted.reduce((sum, item) => sum + item.value * item.weight, 0))
   const evidenceCount = assessments.reduce((sum, assessment) => sum + assessment.evidence.length, 0)
   const confidence = Math.max(0.25, Math.min(0.95, 0.45 + Math.min(0.45, evidenceCount * 0.06) - Math.min(0.2, conflicts.length * 0.04)))
   const strengths = matchedRequirements.slice(0, 6).map((assessment) => `${requirementKindLabel(assessment.kind)}匹配：${assessment.label}`)
   const risks = missingRequirements.slice(0, 6).map((assessment) => `${assessment.hard ? '硬性要求冲突' : '待核实'}：${assessment.label}`)
+  const hasRequirements = assessments.length > 0
+  if (!hasRequirements) risks.unshift('岗位未提供任职要求，无法评估岗位匹配度；当前评分仅反映简历自身完整度，请先完善岗位说明书。')
+
+  // 总分按「每一条岗位要求」加权平均，而不是先按维度取均值再平均：
+  // 维度平均会让没被归类的通用要求（以及该维度内的个别失败项）对总分失去影响，
+  // 出现「一半要求没有证据却仍是强匹配」。硬性要求权重更高，未满足时明显拉低总分。
+  const HARD_REQUIREMENT_WEIGHT = 2.5
+  const requirementWeights = assessments.map((assessment) => ({ score: assessment.score, weight: assessment.hard ? HARD_REQUIREMENT_WEIGHT : 1 }))
+  const totalRequirementWeight = requirementWeights.reduce((sum, item) => sum + item.weight, 0)
+  const score = hasRequirements
+    ? clamp(requirementWeights.reduce((sum, item) => sum + item.score * item.weight, 0) / totalRequirementWeight)
+    : clamp(potential)
 
   return {
     score,
-    recommendation: recommendation(score, conflicts),
+    recommendation: hasRequirements ? recommendation(score, conflicts) : 'needs_review',
     dimensions: { hardRequirement, experience, skills, education, potential },
     matchedRequirements,
     conflicts,

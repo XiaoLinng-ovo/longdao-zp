@@ -1,6 +1,7 @@
 import {
   PROMPT_VERSION,
   anonymizeText,
+  buildJobRequirements,
   buildResumeAnalysisPrompt,
   buildRuleBasedReport,
   parseLlmResumeSuggestion,
@@ -61,17 +62,14 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
   const request = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 30_000
   return async ({ task, content, context }): Promise<ResumeAnalysisResult> => {
-    const requirementLabels = task.payload.jobRequirements ?? []
     const job = {
       ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
       title: task.payload.jobTitle ?? '',
-      requirements: requirementLabels.map((label, index) => ({
-        id: `${task.payload.jobId ?? 'job'}-requirement-${index + 1}`,
-        label,
-        kind: 'other' as const,
-        keywords: [label],
-        hard: index === 0,
-      })),
+      requirements: buildJobRequirements({
+        ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
+        ...(task.payload.jobRequirements === undefined ? {} : { requirementLabels: task.payload.jobRequirements }),
+        ...(task.payload.jobSkills === undefined ? {} : { skills: task.payload.jobSkills }),
+      }),
     }
     const report = buildRuleBasedReport({
       resume: {

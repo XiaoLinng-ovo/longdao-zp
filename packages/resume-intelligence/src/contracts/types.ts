@@ -159,10 +159,11 @@ export interface RequirementAssessment {
 }
 
 export interface MatchDimensions {
-  hardRequirement: number
-  experience: number
-  skills: number
-  education: number
+  /** 岗位未提供该类要求时为 null：不能用 0 分表示「没有要求」，否则会被误判成弱匹配。 */
+  hardRequirement: number | null
+  experience: number | null
+  skills: number | null
+  education: number | null
   potential: number
 }
 

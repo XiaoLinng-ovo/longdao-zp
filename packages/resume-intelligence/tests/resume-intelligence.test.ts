@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { anonymizeText, buildResumeAnalysisPrompt, buildRuleBasedReport, extractResume, parseLlmResumeSuggestion, parseResume } from '../src/index.js'
+import { anonymizeText, buildJobRequirements, buildResumeAnalysisPrompt, buildRuleBasedReport, extractResume, inferRequirementKind, minYearsFromLabel, parseLlmResumeSuggestion, parseResume, scoreResumeMatch } from '../src/index.js'
 
 const resume = `张三
 zhangsan@example.com
@@ -78,4 +78,65 @@ test('validates the structured LLM suggestion contract', () => {
   assert.throws(() => parseLlmResumeSuggestion({
     summary: 'x', score: 80, strengths: [], risks: [], matchedRequirements: [], conflicts: [], interviewQuestions: [], confidence: 2,
   }), /confidence/u)
+})
+
+test('infers requirement kinds so each scoring dimension can be evaluated', () => {
+  assert.equal(inferRequirementKind('5 年以上后端开发经验'), 'experience')
+  assert.equal(inferRequirementKind('本科及以上学历，计算机相关专业'), 'education')
+  assert.equal(inferRequirementKind('熟悉 Java、Spring Boot'), 'skill')
+  assert.equal(inferRequirementKind('有良好的沟通能力'), 'other')
+  assert.equal(minYearsFromLabel('5 年以上后端开发经验'), 5)
+  assert.equal(minYearsFromLabel('经验不限'), undefined)
+
+  const requirements = buildJobRequirements({
+    jobId: 'job-1',
+    requirementLabels: ['5 年以上后端开发经验', '本科及以上学历', '熟悉 Java、Spring Boot', '熟悉数据库与分布式系统基础：能够处理性能、并发和稳定性问题'],
+    skills: ['Java/Spring Boot', 'PostgreSQL'],
+  })
+  assert.deepEqual(requirements.map((item) => item.kind), ['skill', 'skill', 'experience', 'education', 'skill', 'other'])
+  assert.deepEqual(requirements.map((item) => item.hard), [false, false, true, false, false, false])
+  assert.equal(requirements[2]?.minYears, 5)
+  assert.deepEqual(requirements[0]?.keywords, ['Java', 'Spring Boot'])
+  assert.deepEqual(requirements[4]?.keywords, ['Java', 'Spring Boot'])
+  assert.deepEqual(requirements[5]?.keywords, ['熟悉数据库与分布式系统基础：能够处理性能、并发和稳定性问题'])
+})
+
+test('scores only the dimensions the job actually asks for', () => {
+  const parsed = parseResume({ fileName: 'resume.txt', mimeType: 'text/plain', text: resume, source: 'test' })
+  const extraction = extractResume(parsed)
+
+  const partial = scoreResumeMatch({ extraction, job: { title: '后端工程师', requirements: [job.requirements[0]!] } })
+  assert.equal(typeof partial.dimensions.skills, 'number')
+  assert.equal(partial.dimensions.experience, null)
+  assert.equal(partial.dimensions.education, null)
+
+  // 岗位没有任何要求时不能伪造出 0 分维度，也不能给出匹配结论。
+  const emptyJob = scoreResumeMatch({ extraction, job: { title: '后端工程师', requirements: [] } })
+  assert.equal(emptyJob.dimensions.hardRequirement, null)
+  assert.equal(emptyJob.dimensions.experience, null)
+  assert.equal(emptyJob.dimensions.skills, null)
+  assert.equal(emptyJob.dimensions.education, null)
+  assert.equal(typeof emptyJob.dimensions.potential, 'number')
+  assert.equal(emptyJob.recommendation, 'needs_review')
+  assert.match(emptyJob.risks[0] ?? '', /岗位未提供任职要求/u)
+})
+
+test('counts every job requirement, including ones outside the four dimensions', () => {
+  const parsed = parseResume({ fileName: 'resume.txt', mimeType: 'text/plain', text: resume, source: 'test' })
+  const extraction = extractResume(parsed)
+  const scored = scoreResumeMatch({
+    extraction,
+    job: {
+      title: '后端工程师',
+      requirements: [
+        { id: 'r1', label: '熟悉 TypeScript、Node.js', kind: 'skill', keywords: ['typescript', 'node.js'], hard: false },
+        // 无法在简历中找到证据的通用要求，必须同样把总分拉下来，否则会出现「一半要求没证据却是强匹配」。
+        { id: 'r2', label: '具备良好的跨部门沟通与协调能力', kind: 'other', keywords: ['具备良好的跨部门沟通与协调能力'], hard: false },
+      ],
+    },
+  })
+  assert.equal(scored.dimensions.skills, 100)
+  assert.ok(scored.score <= 60, `expected a review-worthy score, received ${scored.score}`)
+  assert.notEqual(scored.recommendation, 'strong_match')
+  assert.equal(scored.missingRequirements.length, 1)
 })
