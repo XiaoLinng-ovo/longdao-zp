@@ -41,7 +41,10 @@ const reason = ref('')
 
 const showRevise = ref(false)
 const revising = ref(false)
+const jobOptions = ref<Array<{ id: string; title: string; departmentId?: string; department?: string }>>([])
+const departmentOptions = ref<Array<{ id: string; code?: string; name: string }>>([])
 const reviseForm = ref({
+  jobId: '',
   positionTitle: '',
   departmentId: '',
   employmentType: 'full_time',
@@ -105,6 +108,8 @@ async function load() {
       apiClient.getJson<Array<{ id: string; name: string }>>('/departments'),
     ])
     const application = applicationRes.data.find((item) => item.id === detail.offer.applicationId)
+    jobOptions.value = jobRes.data
+    departmentOptions.value = departmentRes.data
     candidateName.value = candidateRes.data.find((item) => item.id === application?.candidateId)?.fullName || application?.candidateId || '未知候选人'
     jobTitle.value = jobRes.data.find((item) => item.id === application?.jobId)?.title || application?.jobId || '未知岗位'
     applicationCode.value = application?.code || ''
@@ -169,6 +174,7 @@ function openRevise() {
   clearFlags()
   const comp = currentVersion.value.compensation
   reviseForm.value = {
+    jobId: jobOptions.value.find((item) => item.title === currentVersion.value?.positionTitle)?.id ?? '',
     positionTitle: currentVersion.value.positionTitle,
     departmentId: currentVersion.value.departmentId,
     employmentType: currentVersion.value.employmentType,
@@ -185,6 +191,16 @@ function openRevise() {
 
 function splitList(text: string): string[] {
   return text.split(/[，,、\n]/).map((s) => s.trim()).filter(Boolean)
+}
+
+/** 岗位只从已有岗位中选择；选中后带出岗位名称，并保持部门与岗位一致。 */
+function applyJobSelection(jobId: string) {
+  const job = jobOptions.value.find((item) => item.id === jobId)
+  reviseForm.value.jobId = jobId
+  if (!job) return
+  reviseForm.value.positionTitle = job.title
+  const department = departmentOptions.value.find((item) => item.id === job.departmentId || item.code === job.departmentId || item.name === job.department)
+  if (department) reviseForm.value.departmentId = department.id
 }
 
 async function submitRevise() {
@@ -335,8 +351,20 @@ onMounted(load)
       <div class="dialog" role="dialog" aria-modal="true" style="max-width:620px">
         <h3>修订 Offer</h3>
         <div class="form-grid">
-          <div class="form-field"><label>职位名称</label><input v-model="reviseForm.positionTitle" /></div>
-          <div class="form-field"><label>部门</label><input v-model="reviseForm.departmentId" /></div>
+          <div class="form-field">
+            <label>岗位</label>
+            <select :value="reviseForm.jobId" @change="applyJobSelection(($event.target as HTMLSelectElement).value)">
+              <option value="" disabled>选择岗位</option>
+              <option v-for="job in jobOptions" :key="job.id" :value="job.id">{{ job.title }}{{ job.department ? `（${job.department}）` : '' }}</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label>部门</label>
+            <select v-model="reviseForm.departmentId">
+              <option value="" disabled>请选择部门</option>
+              <option v-for="dept in departmentOptions" :key="dept.id" :value="dept.id">{{ dept.name }}</option>
+            </select>
+          </div>
           <div class="form-field">
             <label>用工类型</label>
             <select v-model="reviseForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select>

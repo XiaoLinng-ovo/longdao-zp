@@ -912,7 +912,9 @@ export class NormalizedRecruitingRepository {
 
   // ===== 内部辅助 =====
   private async resolveUserId(executor: Pick<RepositoryClient, 'query'>, value: string | null | undefined, requiredActor = false): Promise<string | null> {
-    return resolveActorId(executor as RepositoryClient, value, { required: requiredActor })
+    // 面试官引用允许用系统用户姓名：安排面试时参与者可以按姓名写，
+    // 反馈提交必须能解析回同一个真实用户，否则「姓名可用、反馈不可用」会前后矛盾。
+    return resolveActorId(executor as RepositoryClient, value, { required: requiredActor, allowDisplayName: true })
   }
 
   private async nextInterviewRound(client: RepositoryClient, applicationId: string): Promise<number> {

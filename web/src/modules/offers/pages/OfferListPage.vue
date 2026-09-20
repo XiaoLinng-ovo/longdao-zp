@@ -21,6 +21,7 @@ import {
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { applicationOptionLabel, employmentTypeLabel } from '../../../shared/utils/labels'
 import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
+import { loadJobs, type JobView } from '../../jobs/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import OfferTable from '../components/OfferTable.vue'
@@ -34,11 +35,13 @@ const actingId = ref('')
 
 const applications = ref<ApiApplication[]>([])
 const departments = ref<ApiDepartment[]>([])
+const jobs = ref<JobView[]>([])
 const detailApplicationCode = ref('')
 const showCreate = ref(false)
 const creating = ref(false)
 const createForm = ref({
   applicationId: '',
+  jobId: '',
   positionTitle: '',
   departmentId: '',
   employmentType: 'full_time',
@@ -60,6 +63,7 @@ const reviseTarget = ref<OfferRow | null>(null)
 const showRevise = ref(false)
 const revising = ref(false)
 const reviseForm = ref({
+  jobId: '',
   positionTitle: '',
   departmentId: '',
   employmentType: 'full_time',
@@ -87,19 +91,32 @@ async function refresh() {
 }
 
 async function ensureApplications() {
-  if (applications.value.length) return
+  if (applications.value.length && jobs.value.length) return
   try {
-    const [apps, depts] = await Promise.all([loadApplicationsForOffer(), loadDepartments().catch(() => [])])
+    const [apps, depts, jobRows] = await Promise.all([loadApplicationsForOffer(), loadDepartments().catch(() => []), loadJobs().catch(() => [])])
     applications.value = apps
     departments.value = depts
+    jobs.value = jobRows
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取申请失败').message
   }
 }
 
+/** 岗位只能从已有岗位中选择：选中后带出岗位名称与所属部门，避免手写产生对不上的数据。 */
+function applyJobSelection(target: 'create' | 'revise', jobId: string) {
+  const job = jobs.value.find((item) => item.id === jobId)
+  const form = target === 'create' ? createForm.value : reviseForm.value
+  form.jobId = jobId
+  if (!job) return
+  form.positionTitle = job.title
+  const department = departments.value.find((item) => item.name === job.department)
+  if (department) form.departmentId = department.id
+}
+
 function resetCreateForm() {
   createForm.value = {
     applicationId: '',
+    jobId: '',
     positionTitle: '',
     departmentId: '',
     employmentType: 'full_time',
@@ -118,6 +135,11 @@ async function openCreate() {
   resetCreateForm()
   showCreate.value = true
   await ensureApplications()
+}
+
+function closeCreate() {
+  if (creating.value) return
+  showCreate.value = false
 }
 
 function splitList(text: string): string[] {
@@ -196,6 +218,7 @@ function openRevise(row: OfferRow) {
   clearFlags()
   reviseTarget.value = row
   reviseForm.value = {
+    jobId: '',
     positionTitle: '',
     departmentId: '',
     employmentType: 'full_time',
@@ -212,6 +235,7 @@ function openRevise(row: OfferRow) {
     if (!d.version) return
     const comp = d.version.compensation
     reviseForm.value = {
+      jobId: jobs.value.find((item) => item.title === d.version?.positionTitle)?.id ?? '',
       positionTitle: d.version.positionTitle,
       departmentId: d.version.departmentId,
       employmentType: d.version.employmentType,
@@ -277,9 +301,11 @@ onMounted(refresh)
   <div v-if="loading" class="loading-note">正在读取 Offer...</div>
   <OfferTable v-else :rows="rows" :acting-id="actingId" @action="runAction" @open="openDetail" @revise="openRevise" />
 
-  <section v-if="showCreate" class="form-panel">
-    <div class="section-title">新建 Offer</div>
-    <div class="form-grid">
+  <div v-if="showCreate" class="overlay" role="presentation" @click.self="closeCreate">
+    <div class="dialog offer-create-dialog" role="dialog" aria-modal="true" aria-labelledby="offer-create-title">
+      <h3 id="offer-create-title">新建 Offer</h3>
+      <div v-if="error" class="error-note">{{ error }}</div>
+      <div class="form-grid">
       <div class="form-field">
         <label>申请</label>
         <select v-model="createForm.applicationId">
@@ -287,7 +313,13 @@ onMounted(refresh)
           <option v-for="app in applications" :key="app.id" :value="app.id">{{ applicationOptionLabel(app) }}</option>
         </select>
       </div>
-      <div class="form-field"><label>职位名称</label><input v-model="createForm.positionTitle" /></div>
+      <div class="form-field">
+        <label>岗位</label>
+        <select :value="createForm.jobId" @change="applyJobSelection('create', ($event.target as HTMLSelectElement).value)">
+          <option value="" disabled>选择岗位</option>
+          <option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.title }}（{{ job.department }}）</option>
+        </select>
+      </div>
       <div class="form-field"><label>部门</label><select v-model="createForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></div>
       <div class="form-field">
         <label>用工类型</label>
@@ -304,18 +336,25 @@ onMounted(refresh)
       <div class="form-field"><label>股权（可选）</label><input v-model="createForm.equity" placeholder="如 2000 RSU" /></div>
       <div class="form-field" style="grid-column:1 / -1"><label>福利（逗号分隔）</label><input v-model="createForm.benefitsText" placeholder="五险一金、带薪年假" /></div>
       <div class="form-field" style="grid-column:1 / -1"><label>Offer 内容</label><textarea v-model="createForm.content" rows="4"></textarea></div>
+      </div>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="creating" @click="closeCreate">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="creating" @click="submitCreate">{{ creating ? '创建中...' : '创建草稿' }}</button>
+      </div>
     </div>
-    <div class="inline-actions" style="margin-top:14px">
-      <button class="btn btn-primary" type="button" :disabled="creating" @click="submitCreate">{{ creating ? '创建中...' : '创建草稿' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="creating" @click="showCreate = false">取消</button>
-    </div>
-  </section>
+  </div>
 
   <div v-if="showRevise && reviseTarget" class="overlay" role="presentation" @click.self="showRevise = false">
     <div class="dialog" role="dialog" aria-modal="true" style="max-width:620px">
       <h3>修订 Offer</h3>
       <div class="form-grid">
-        <div class="form-field"><label>职位名称</label><input v-model="reviseForm.positionTitle" /></div>
+        <div class="form-field">
+          <label>岗位</label>
+          <select :value="reviseForm.jobId" @change="applyJobSelection('revise', ($event.target as HTMLSelectElement).value)">
+            <option value="" disabled>选择岗位</option>
+            <option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.title }}（{{ job.department }}）</option>
+          </select>
+        </div>
         <div class="form-field"><label>部门</label><select v-model="reviseForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></div>
         <div class="form-field">
           <label>用工类型</label>
@@ -358,6 +397,14 @@ onMounted(refresh)
     </div>
   </div>
 </template>
+
+<style scoped>
+.offer-create-dialog {
+  max-width: 860px;
+  max-height: min(86vh, 760px);
+  overflow-y: auto;
+}
+</style>
 
 
 

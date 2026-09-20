@@ -83,6 +83,7 @@ describe('管理后台页面', () => {
     expect(root!.querySelector<HTMLInputElement>('#setting-timezone')?.value).toBe('Asia/Shanghai')
     expect(root.textContent).toContain('解析失败')
     expect(root.textContent).toContain('修改系统设置')
+    expect(root.textContent).toContain('共 1 条，第 1 / 1 页')
   })
 
   const departmentsFixture = [

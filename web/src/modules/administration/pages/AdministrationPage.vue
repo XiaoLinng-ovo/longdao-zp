@@ -8,6 +8,8 @@ import { actionLabel, statusLabel } from '../../../shared/utils/labels'
 
 const rows = ref<AdminCheckRow[]>([])
 const events = ref<WorkflowEvent[]>([])
+const eventsPage = ref(1)
+const eventsPageSize = ref(20)
 const subjectType = ref<WorkflowEvent['subjectType'] | ''>('')
 const loading = ref(true)
 const error = ref('')
@@ -28,6 +30,8 @@ const departmentError = ref('')
 const settings = ref<AdminSettings>({})
 const failedTasks = ref<AdminAnalysisTask[]>([])
 const auditLogs = ref<AdminAuditLog[]>([])
+const auditPage = ref(1)
+const auditPageSize = ref(10)
 const savingUser = ref<string | null>(null)
 const savingSettings = ref(false)
 const settingsDraft = ref<Record<string, string>>({})
@@ -79,6 +83,17 @@ const eventSummary = computed(() => {
   return [...counter.entries()].map(([type, count]) => ({ type, label: subjectLabels[type as WorkflowEvent['subjectType']], count }))
 })
 
+const auditTotalPages = computed(() => Math.max(1, Math.ceil(auditLogs.value.length / auditPageSize.value)))
+const pagedAuditLogs = computed(() => {
+  const start = (auditPage.value - 1) * auditPageSize.value
+  return auditLogs.value.slice(start, start + auditPageSize.value)
+})
+const eventsTotalPages = computed(() => Math.max(1, Math.ceil(events.value.length / eventsPageSize.value)))
+const pagedEvents = computed(() => {
+  const start = (eventsPage.value - 1) * eventsPageSize.value
+  return events.value.slice(start, start + eventsPageSize.value)
+})
+
 const hasSettings = computed(() => Object.keys(settingsDraft.value).length > 0)
 
 function subjectName(event: WorkflowEvent) {
@@ -98,7 +113,8 @@ async function refresh() {
     ])
     rows.value = checks
     events.value = audit
-    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; if (aiConfig) applyAiSettings(aiConfig); failedTasks.value = tasks; auditLogs.value = logs
+    eventsPage.value = 1
+    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; if (aiConfig) applyAiSettings(aiConfig); failedTasks.value = tasks; auditLogs.value = logs; auditPage.value = 1
     settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
     dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
   } catch (cause) {
@@ -400,9 +416,33 @@ onMounted(refresh)
     </section>
 
     <section class="section">
-      <h3 class="section-title">管理审计日志</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作人</th></tr></thead><tbody>
-        <tr v-for="log in auditLogs" :key="log.id"><td>{{ new Date(log.createdAt).toLocaleString() }}</td><td>{{ actionLabel(log.action) }}</td><td>{{ log.actorEmail || '—' }}</td></tr><tr v-if="!auditLogs.length"><td colspan="3" class="table-empty">暂无管理审计日志</td></tr>
-      </tbody></table></div>
+      <div class="section-heading">
+        <h3 class="section-title">管理审计日志</h3>
+        <label class="page-size">
+          <span>每页</span>
+          <select v-model.number="auditPageSize" @change="auditPage = 1">
+            <option :value="10">10 条</option>
+            <option :value="20">20 条</option>
+            <option :value="50">50 条</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>操作</th><th>操作人</th></tr></thead>
+          <tbody>
+            <tr v-for="log in pagedAuditLogs" :key="log.id"><td>{{ new Date(log.createdAt).toLocaleString() }}</td><td>{{ actionLabel(log.action) }}</td><td>{{ log.actorEmail || '—' }}</td></tr>
+            <tr v-if="!auditLogs.length"><td colspan="3" class="table-empty">暂无管理审计日志</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-if="auditLogs.length" class="pagination-bar">
+        <span>共 {{ auditLogs.length }} 条，第 {{ auditPage }} / {{ auditTotalPages }} 页</span>
+        <div class="inline-actions">
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="auditPage <= 1" @click="auditPage -= 1">上一页</button>
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="auditPage >= auditTotalPages" @click="auditPage += 1">下一页</button>
+        </div>
+      </div>
     </section>
 
     <section class="section">
@@ -424,19 +464,29 @@ onMounted(refresh)
     <section class="section">
       <div class="section-heading">
         <h3 class="section-title">流程审计记录</h3>
-        <label class="filter">
-          <span>筛选实体</span>
-          <select v-model="subjectType" @change="changeSubject">
-            <option value="">全部</option>
-            <option value="recruitment_request">招聘需求</option>
-            <option value="job">岗位</option>
-            <option value="offer">Offer</option>
-            <option value="onboarding">入职归档</option>
-            <option value="candidate">候选人</option>
-            <option value="application">职位申请</option>
-            <option value="interview">面试</option>
-          </select>
-        </label>
+        <div class="inline-actions">
+          <label class="filter">
+            <span>筛选实体</span>
+            <select v-model="subjectType" @change="changeSubject">
+              <option value="">全部</option>
+              <option value="recruitment_request">招聘需求</option>
+              <option value="job">岗位</option>
+              <option value="offer">Offer</option>
+              <option value="onboarding">入职归档</option>
+              <option value="candidate">候选人</option>
+              <option value="application">职位申请</option>
+              <option value="interview">面试</option>
+            </select>
+          </label>
+          <label class="page-size">
+            <span>每页</span>
+            <select v-model.number="eventsPageSize" @change="eventsPage = 1">
+              <option :value="10">10 条</option>
+              <option :value="20">20 条</option>
+              <option :value="50">50 条</option>
+            </select>
+          </label>
+        </div>
       </div>
       <div v-if="eventSummary.length" class="audit-summary">
         <span v-for="item in eventSummary" :key="item.type" class="audit-chip">{{ item.label }} · {{ item.count }}</span>
@@ -445,7 +495,7 @@ onMounted(refresh)
         <table>
           <thead><tr><th>时间</th><th>实体类型</th><th>对象</th><th>动作</th><th>状态流转</th><th>操作人</th><th>原因</th></tr></thead>
           <tbody>
-            <tr v-for="event in events" :key="event.id">
+            <tr v-for="event in pagedEvents" :key="event.id">
               <td>{{ new Date(event.createdAt).toLocaleString() }}</td>
               <td>{{ subjectLabels[event.subjectType] }}</td>
               <td><strong>{{ subjectName(event) }}</strong></td>
@@ -458,6 +508,13 @@ onMounted(refresh)
           </tbody>
         </table>
       </div>
+      <div v-if="events.length" class="pagination-bar">
+        <span>共 {{ events.length }} 条，第 {{ eventsPage }} / {{ eventsTotalPages }} 页</span>
+        <div class="inline-actions">
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="eventsPage <= 1" @click="eventsPage -= 1">上一页</button>
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="eventsPage >= eventsTotalPages" @click="eventsPage += 1">下一页</button>
+        </div>
+      </div>
     </section>
   </template>
   <SecurityNotice />
@@ -465,6 +522,10 @@ onMounted(refresh)
 
 <style scoped>
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.page-size { display: inline-flex; align-items: center; gap: 7px; color: var(--muted, #64748b); font-size: 12px; }
+.page-size select { border: 1px solid #cbd5e1; border-radius: 7px; padding: 6px 9px; background: #fff; color: #334155; }
+.pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--muted, #64748b); font-size: 12px; }
+.btn-sm { padding: 4px 8px; font-size: 11.5px; }
 .filter { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-muted, #64748b); }
 .audit-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .audit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 13px; font-weight: 500; }
