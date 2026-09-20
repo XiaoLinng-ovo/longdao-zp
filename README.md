@@ -39,16 +39,18 @@ pnpm start
 `pnpm start` 会按顺序完成 API 构建、PostgreSQL migration、开发数据初始化，然后启动 API。默认 API 地址为 `http://127.0.0.1:3100`。另开终端启动前端：
 
 ```powershell
-pnpm --dir web dev
+npm --prefix web run dev
 ```
 
 浏览器访问 `http://127.0.0.1:5174`。Web 开发服务器会把 `/api` 代理到 `http://127.0.0.1:3100`，API 不在默认地址时用 `VITE_API_PROXY_TARGET` 覆盖。如果 PostgreSQL 不在本机，请在 `.env` 中设置 `DATABASE_URL`，或设置 `PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`。`DATABASE_URL` 优先。
 
-也可以直接运行仓库自带的 Windows 启动脚本（先用 Docker 拉起并等待 PostgreSQL 与 MinIO 就绪，再以本地开发端口启动 API、Worker、Web）：
+Windows 源码环境可以直接双击仓库根目录的 `一键启动.bat`，或者运行：
 
 ```powershell
-.\start-local.ps1
+.\start-all.bat
 ```
+
+该脚本会检查并尝试启动本机 PostgreSQL、准备 `.env`、启动 API/Worker/Web，然后打开浏览器。源码模式下如果未配置 MinIO，会自动使用本地 `data/resumes/quarantine` 目录保存简历文件。
 
 ## Docker 部署
 

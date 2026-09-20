@@ -7,7 +7,8 @@
   "type": "module",
   "scripts": {
     "start": "node scripts/start-api-local.mjs",
-    "dev": "pnpm --dir web dev",
+    "start:all": "node scripts/start-all.mjs",
+    "dev": "npm --prefix web run dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm --filter smartrecruit-pro-web typecheck && pnpm --filter @smartrecruit-pro/contracts typecheck && pnpm --filter @smartrecruit-pro/resume-intelligence typecheck",
     "test": "pnpm -r test"
