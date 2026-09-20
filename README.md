@@ -1,4 +1,4 @@
-# SmartRecruit Pro
+# 龙道招聘系统
 
 这是一个面向单组织内部招聘团队的招聘流程平台。当前唯一运行主线是 `web/` + `apps/api/` + `apps/worker/`，共享契约位于 `packages/`。
 
@@ -6,13 +6,32 @@
 
 当前最终总设计请参阅 [`docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md`](docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md)；最初产品设计基线请参阅 [`docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md`](docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md)。
 
-## 换一台电脑的首次运行
+## 需要安装什么
 
-要求：Node.js 20.16+（或 22.3+）、pnpm、Docker Desktop，以及可访问的 PostgreSQL。先复制环境变量模板，不要把真实密钥提交到 Git：
+必须安装：
+
+| 依赖 | 版本要求 | 作用 | 获取方式 |
+| --- | --- | --- | --- |
+| Node.js | `>=20.16 <21` 或 `>=22.3` | 运行 API / Worker、构建前端 | <https://nodejs.org/>（选 LTS 版） |
+| pnpm | 9 及以上 | 安装依赖、执行脚本 | `corepack enable pnpm`，或 `npm install -g pnpm` |
+| Docker Desktop | 最新稳定版 | 提供 PostgreSQL 与 MinIO（简历对象存储） | <https://www.docker.com/products/docker-desktop/> |
+| Git | 任意 | 拉取 / 推送代码 | <https://git-scm.com/> |
+
+按需安装（不装也能跑通主流程）：
+
+- **OCR 服务（PP-StructureV3）**：只有扫描版 PDF、图片简历需要。`deploy/docker-compose.yml` 已内置 `ocr` 服务，首次启动会下载 Paddle 模型，体积较大、耗时较长。
+- **ClamAV**：只有把 `RESUME_VIRUS_SCAN_ENABLED` 设为 `true`、需要简历病毒隔离时才用，默认关闭。
+- **大模型服务**：只有启用 AI 简历分析时才需要，准备一个 OpenAI 兼容服务的 Base URL 与 API Key（DeepSeek、通义千问、OpenAI 等均可）。密钥只保存在服务端。
+
+如果只用 Docker 部署，本机可以不装 Node 与 pnpm，见下方「Docker 部署」。
+
+## 首次运行
+
+不要把真实密钥提交到 Git，先复制环境变量模板再启动：
 
 ```powershell
-Copy-Item .env.example .env
 pnpm install
+Copy-Item .env.example .env
 docker compose -f deploy/docker-compose.yml up -d postgres minio
 pnpm start
 ```
@@ -20,38 +39,26 @@ pnpm start
 `pnpm start` 会按顺序完成 API 构建、PostgreSQL migration、开发数据初始化，然后启动 API。默认 API 地址为 `http://127.0.0.1:3100`。另开终端启动前端：
 
 ```powershell
-$env:VITE_API_BASE_URL = 'http://127.0.0.1:3100'
-pnpm --dir web dev --host 127.0.0.1 --port 5174
+pnpm --dir web dev
 ```
 
-浏览器访问 `http://127.0.0.1:5174`。如果 PostgreSQL 不在本机，请在 `.env` 中设置 `DATABASE_URL`，或设置 `PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`。`DATABASE_URL` 优先。
+浏览器访问 `http://127.0.0.1:5174`。Web 开发服务器会把 `/api` 代理到 `http://127.0.0.1:3100`，API 不在默认地址时用 `VITE_API_PROXY_TARGET` 覆盖。如果 PostgreSQL 不在本机，请在 `.env` 中设置 `DATABASE_URL`，或设置 `PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`。`DATABASE_URL` 优先。
 
-也可以直接运行仓库自带的 Windows 启动脚本（它使用本地开发端口并启动 API、Worker、Web）：
+也可以直接运行仓库自带的 Windows 启动脚本（先用 Docker 拉起并等待 PostgreSQL 与 MinIO 就绪，再以本地开发端口启动 API、Worker、Web）：
 
 ```powershell
 .\start-local.ps1
 ```
 
-## 本地运行
-
-```powershell
-pnpm start
-```
-
-API 启动会先执行 PostgreSQL migration；另开终端启动 Web：
-
-```powershell
-pnpm --dir web dev
-```
-
 ## Docker 部署
 
+生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、MinIO、API、Worker 和 Web 组成（API/Worker 用 `deploy/Dockerfile.api` 构建，Web 用 `deploy/Dockerfile.web`）：
+
 ```bash
-docker build -t smartrecruit-pro .
-docker run -d --name smartrecruit-pro -p 3000:3000 -v smartrecruit-data:/app/data smartrecruit-pro
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-服务器放行 TCP `3000` 端口后，通过 `http://服务器地址:3000` 访问。生产环境建议在前面配置 Nginx/Caddy 的 HTTPS 反向代理，并将 `/app/data` 挂载到可靠磁盘或改接数据库。
+默认通过 `http://127.0.0.1:5174` 访问 Web，API 在 `http://127.0.0.1:3100`。对外暴露时建议在前面配置 Nginx/Caddy 的 HTTPS 反向代理，并用 `ALLOWED_ORIGINS` 显式声明允许的前端来源。ClamAV/OCR 服务可按需启动；当前默认简历主流程不依赖 ClamAV。
 
 ## 简历上传与病毒扫描说明
 
@@ -61,42 +68,57 @@ docker run -d --name smartrecruit-pro -p 3000:3000 -v smartrecruit-data:/app/dat
 
 ## 配置
 
-- `PORT`：监听端口，默认 `3000`
-- `HOST`：监听地址，默认 `0.0.0.0`
-- `DATA_DIR`：状态数据目录，默认项目下的 `data/`
-- `CORS_ORIGIN`：跨域部署时显式设置允许的前端源；同源部署无需设置
+所有配置都通过服务端环境变量提供：本地开发把 `.env.example` 复制成 `.env` 再改；容器部署用 `.env` 或编排文件里的环境变量覆盖。**不要把 `.env` 提交到 Git。**
+
+### 数据库（必需）
+
+- `DATABASE_URL`：完整连接串，优先级最高，例如 `postgresql://smartrecruit:change-me-in-development@127.0.0.1:15432/smartrecruit`
+- 也可以分开设置 `PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`
+
+### 简历对象存储（必需）
+
+- `S3_ENDPOINT`：MinIO 地址，本地为 `http://127.0.0.1:19000`
+- `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`：访问密钥，本地默认 `smartrecruit` / `change-me-in-development`
+- `S3_QUARANTINE_BUCKET`：存放简历的桶，默认 `resume-quarantine`，首次使用时自动创建
+- `S3_REGION`（默认 `us-east-1`）、`S3_FORCE_PATH_STYLE`（默认 `true`）
+- 不配置 `S3_ENDPOINT` 时回退到本地目录，可用 `RECRUITING_QUARANTINE_ROOT` 指定路径
+
+> 简历上传依赖对象存储可用。只启动 API 而没启动 MinIO 时，上传会失败并提示「简历存储不可用」。
+
+### 服务与安全
+
+- `PORT`：API 监听端口，默认 `3100`
+- `HOST`：API 监听地址，默认 `127.0.0.1`
+- `ALLOWED_ORIGINS`：跨域部署时允许的前端来源白名单（逗号分隔）；仅在配置白名单后对写请求做 Origin 校验
+- `REQUIRE_CSRF`：设为 `false` 可关闭 CSRF 校验，默认开启
+- `WORKER_DB_POLL`：Worker 是否轮询数据库任务，默认关闭
+- `RESUME_VIRUS_SCAN_ENABLED`：是否启用 ClamAV 隔离门禁，默认 `false`
 
 ## API
 
 新版 API 使用 `/api/v1`，业务数据要求 PostgreSQL；不再提供整体状态 JSON 的读写接口。
 
-## 可选：接入大模型简历分析
+## 大模型简历分析
 
-默认不配置模型时，系统继续使用内置演示评分，不会向任何第三方发送简历内容。要启用真实分析，请将前端与本 Node 服务部署在同一域名，并在服务器环境变量中配置：
+默认不配置模型时使用内置规则评分，不会向任何第三方发送简历内容。要启用模型分析，在管理后台「AI 模型」填写并保存，或直接设置服务端环境变量：
 
 ```bash
-LLM_API_KEY=你的模型密钥
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_API_KEY=你的模型密钥
+OPENAI_MODEL=deepseek-chat
+OPENAI_TIMEOUT_MS=30000
 ```
 
-服务使用 OpenAI 兼容的 `chat/completions` 接口，可替换为通义千问、OpenAI 等兼容服务。正式部署时密钥只保存在 API/Worker 服务器环境变量。
+四项齐全才会启用。管理后台保存后写入 `.env`（`ENV_FILE_PATH` 优先，其次 `apps/api/.env`、仓库根 `.env`）并立即对当前进程生效，无需重启；读取接口只返回掩码，不回显密钥原文。
 
-启用后，在「简历库」中选择「导入简历并分析」，上传 PDF/DOCX 或粘贴简历文本即可获得模型生成的匹配评分、优势、风险和建议面试题。
+服务使用 OpenAI 兼容的 `chat/completions` 接口（连通性自检走 `/models`），可替换为 DeepSeek、通义千问、OpenAI 等兼容服务。密钥只保存在 API/Worker 服务器上。
 
-Demo 也支持在右上角「系统配置」选择「直接访问 OpenAI/DeepSeek 兼容服务」，填写 `https://api.deepseek.com/v1`、`https://api.openai.com/v1` 或其他兼容地址，再输入 Key 测试模型列表。该模式会将简历文本从浏览器直接发送到你指定的服务商，仅建议用于演示；生产环境应使用后端代理模式。PDF/DOCX 会在浏览器本地提取文字，原始文件不会上传；老式 DOC 请先转换为 DOCX 或 PDF。模型未配置、请求失败或返回不符合格式时，系统自动退回默认评分，招聘流程不会中断。
-
-Web 与 API 通过同一部署编排运行；跨域场景通过服务器端 `ALLOWED_ORIGINS` 显式配置。未配置时，前端默认按同源 API 工作。
-
-## 部署
-
-生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、MinIO、API、Worker 和 Web 组成。ClamAV/OCR 服务可以按需启动；当前默认简历主流程不依赖 ClamAV。整体状态 KV 和旧单页入口已移除。
+启用后，在「简历库」上传 PDF/DOCX/图片简历即可获得模型生成的匹配评分、优势、风险和建议面试题；模型未配置、请求失败或返回格式不符时自动退回规则评分，招聘流程不会中断。
 
 ## 常见问题
 
 - 页面仍显示旧的 `quarantined`：确认访问的是当前 API（默认 `3100`），停止旧 API 进程后重新执行 `pnpm start`，并确认数据库 migration 已执行。
-- 简历库没有数据：确认前端的 `VITE_API_BASE_URL` 指向实际 API，且 API 与前端使用同一个 PostgreSQL 数据库；不要只启动 Web。
-- API 返回 502：通常是前端代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/health`，再检查 Web 的 `VITE_API_BASE_URL`。
+- 上传简历失败并提示对象存储不可用：确认 MinIO 容器在运行（`docker compose -f deploy/docker-compose.yml up -d minio`）且 `S3_ENDPOINT` 指向的地址可达；`.\start-local.ps1` 会在启动 API 前自动完成这步检查。
+- 简历库没有数据：确认 API 与前端使用同一个 PostgreSQL 数据库，且 Web 的 `/api` 代理指向实际 API；不要只启动 Web。
+- API 返回 502：通常是代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/health`，再检查 Web 的 `VITE_API_PROXY_TARGET`。
 - 数据库连接失败：检查 PostgreSQL 是否启动、端口和账号是否正确；可先执行 `node scripts/check-postgres-ready.mjs`。
-
-# longdao-jianli
