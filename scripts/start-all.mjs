@@ -252,9 +252,11 @@ async function main() {
   mkdirSync(resolve(root, 'data', 'resumes', 'quarantine'), { recursive: true })
   const postgresReady = await ensurePostgres(env)
   if (!postgresReady) {
-    warn('PostgreSQL was not reachable. API startup may fail until the database service is running.')
+    warn('PostgreSQL was not reachable. Run this launcher as administrator or set the PostgreSQL service to auto-start.')
+    process.exitCode = 10
+    return
   }
-  let startupFailed = !postgresReady
+  let startupFailed = false
 
   const components = [
     {
