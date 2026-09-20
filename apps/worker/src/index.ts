@@ -9,6 +9,7 @@ import { startWorker, type StartWorkerOptions, type WorkerRuntime } from './work
 import { ClamdClient } from './security/clamd-client.js'
 import { processNextResumeScan, startResumeScanPoll } from './security/resume-scan.js'
 import { createOpenAIResumeAnalyzer } from './handlers/openai-resume-analyzer.js'
+import { loadEnvironment } from './env.js'
 
 export {
   beginTaskAttempt,
@@ -53,6 +54,7 @@ export type {
 const entrypoint = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false
 
 if (entrypoint) {
+  loadEnvironment()
   const config = loadConfig()
   let runtime: WorkerRuntime | undefined
   let stopping = false

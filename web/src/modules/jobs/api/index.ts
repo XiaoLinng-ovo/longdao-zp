@@ -17,6 +17,7 @@ export interface ApiJobSpec {
   responsibilities: string[]
   requirements: JobRequirement[]
   skills: string[]
+  generatedBy?: 'ai' | 'local_fallback' | 'human'
   confirmed: boolean
   confirmedAt?: string
 }
@@ -25,7 +26,7 @@ export interface ApiJobJd {
   version: number
   language: string
   content: string
-  generatedBy: 'human' | 'ai_assisted'
+  generatedBy: 'human' | 'ai_assisted' | 'local_fallback'
   confirmed: boolean
   confirmedAt?: string
 }
@@ -154,8 +155,16 @@ export async function createSpec(id: string, input: CreateSpecInput): Promise<Ap
   return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec`, input)).data
 }
 
-export async function createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' }): Promise<ApiJob> {
+export async function generateJobSpec(id: string): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec/generate`, {})).data
+}
+
+export async function createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' | 'local_fallback' }): Promise<ApiJob> {
   return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd`, input)).data
+}
+
+export async function generateJobDescription(id: string): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd/generate`, {})).data
 }
 
 export async function listJobSpecVersions(id: string): Promise<ApiJobSpecVersion[]> {

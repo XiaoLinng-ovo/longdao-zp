@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { OfferAction, OfferRow } from '../api'
+import type { OfferAction, OfferRow, OnboardingStatus } from '../api'
 import { OFFER_ACTION_LABEL, OFFER_STATUS_LABEL } from '../api'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 
@@ -13,6 +13,12 @@ const emit = defineEmits<{
 }>()
 
 const REASON_ACTIONS: OfferAction[] = ['decline', 'cancel', 'reject']
+const ONBOARDING_STATUS_LABEL: Record<OnboardingStatus, string> = {
+  pending: '待入职',
+  scheduled: '已排期',
+  completed: '已归档',
+  cancelled: '已取消',
+}
 const pending = ref<{ row: OfferRow; action: OfferAction } | null>(null)
 const reason = ref('')
 
@@ -22,7 +28,7 @@ function actionsFor(row: OfferRow): OfferAction[] {
     case 'pending_approval': return ['approve', 'reject', 'cancel']
     case 'approved': return ['send', 'cancel']
     case 'sent': return ['accept', 'decline', 'expire', 'cancel']
-    case 'accepted': return ['archive-onboarding']
+    case 'accepted': return row.onboardingStatus ? [] : ['archive-onboarding']
     default: return []
   }
 }
@@ -56,8 +62,6 @@ function submitReason() {
     <table>
       <thead>
         <tr>
-          <th>编号</th>
-          <th>申请</th>
           <th>候选人</th>
           <th>岗位</th>
           <th>状态</th>
@@ -69,9 +73,7 @@ function submitReason() {
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
-          <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.code }}</a></td>
-          <td>{{ row.applicationCode }}</td>
-          <td><strong>{{ row.candidate }}</strong></td>
+          <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.candidate }}</a></td>
           <td>{{ row.job }}</td>
           <td><StatusTag :status="row.status" /></td>
           <td><StatusTag :status="row.approvalStatus" /></td>
@@ -92,12 +94,12 @@ function submitReason() {
               >
                 {{ OFFER_ACTION_LABEL[action] }}
               </button>
-              <span v-if="!actionsFor(row).length" class="list-muted">{{ OFFER_STATUS_LABEL[row.status] }}</span>
+              <span v-if="!actionsFor(row).length" class="list-muted">{{ row.onboardingStatus ? ONBOARDING_STATUS_LABEL[row.onboardingStatus] : OFFER_STATUS_LABEL[row.status] }}</span>
             </div>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="9">暂无 Offer 记录</td>
+          <td class="table-empty" colspan="7">暂无 Offer 记录</td>
         </tr>
       </tbody>
     </table>
@@ -106,7 +108,7 @@ function submitReason() {
   <div v-if="pending" class="overlay" role="presentation" @click.self="pending = null">
     <div class="dialog" role="dialog" aria-modal="true">
       <h3>{{ OFFER_ACTION_LABEL[pending.action] }}</h3>
-      <p>Offer {{ pending.row.code }}（{{ pending.row.applicationCode }}）</p>
+      <p>Offer {{ pending.row.candidate }} · {{ pending.row.job }}</p>
       <div class="form-field">
         <label for="offer-reason">操作原因（必填）</label>
         <textarea id="offer-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>

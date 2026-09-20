@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { actionRequisition, getRequisition, loadDepartments, updateRequisition, type ApiDepartment, type ApiRequisition, type RequisitionAction } from '../api'
 import { REQ_ACTION_HINT, REQ_ACTION_LABEL, REQ_REASON_REQUIRED, conversionHint, describeApproval, requisitionActionsFor, requisitionStatusLabel, validateRequisitionForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { actionLabel, employmentTypeLabel, statusLabel, workModeLabel } from '../../../shared/utils/labels'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import { apiClient } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
@@ -26,6 +27,14 @@ const actions = computed<RequisitionAction[]>(() => request.value ? requisitionA
 const actionHint = computed(() => (pendingAction.value ? REQ_ACTION_HINT[pendingAction.value] : ''))
 const approvalInfo = computed(() => describeApproval(request.value))
 const conversionMessage = computed(() => conversionHint(request.value))
+const requesterLabel = computed(() => {
+  const current = request.value
+  if (!current) return ''
+  const name = current.requesterName?.trim()
+  const email = current.requesterEmail?.trim()
+  if (name && email) return `${name}（${email}）`
+  return name || email || current.requesterId || ''
+})
 const associatedJobs = ref<Array<{ id: string; code: string; title: string; status: string; updatedAt: string }>>([])
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
@@ -170,7 +179,7 @@ onMounted(refresh)
 </script>
 
 <template>
-  <PageHeader title="需求详情" :description="request ? `${request.title}（${request.code || request.id}）` : ''">
+  <PageHeader title="需求详情" :description="request?.title || ''">
     <div class="inline-actions">
       <button class="btn btn-ghost" type="button" @click="router.back">返回列表</button>
       <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
@@ -184,24 +193,23 @@ onMounted(refresh)
   <section v-else-if="request" class="form-panel">
     <div class="section-title">基础信息</div>
     <div class="detail-grid">
-      <div class="detail-item"><span>需求编号</span><strong>{{ request.code || request.id }}</strong></div>
       <div class="detail-item"><span>部门</span><strong>{{ request.department }}</strong></div>
       <div class="detail-item"><span>状态</span><StatusTag :status="request.status" /></div>
       <div class="detail-item"><span>招聘人数</span><strong>{{ request.headcount }}</strong></div>
-      <div class="detail-item"><span>用工类型</span><strong>{{ request.employmentType }}</strong></div>
-      <div class="detail-item"><span>工作模式</span><strong>{{ request.workMode }}</strong></div>
+      <div class="detail-item"><span>用工类型</span><strong>{{ employmentTypeLabel(request.employmentType) }}</strong></div>
+      <div class="detail-item"><span>工作模式</span><strong>{{ workModeLabel(request.workMode) }}</strong></div>
       <div class="detail-item"><span>工作地点</span><strong>{{ request.location || '未设置' }}</strong></div>
       <div class="detail-item"><span>审批人</span><strong>{{ approvalInfo.approver }}</strong></div>
       <div class="detail-item"><span>审批状态</span><StatusTag :status="approvalInfo.status" /></div>
       <div class="detail-item"><span>更新日期</span><strong>{{ request.updatedAt.slice(0, 10) }}</strong></div>
       <div class="detail-item" style="grid-column: 1 / -1"><span>招聘理由</span><strong>{{ request.justification }}</strong></div>
       <div v-if="conversionMessage" class="detail-item hint" style="grid-column: 1 / -1"><span>转化提示</span><strong>{{ conversionMessage }}</strong></div>
-      <div v-if="request.requesterId" class="detail-item"><span>当前操作账户</span><strong>{{ request.requesterId }}</strong></div>
+      <div v-if="requesterLabel" class="detail-item"><span>当前操作账户</span><strong>{{ requesterLabel }}</strong></div>
     </div>
 
     <div v-if="approvalInfo.history.length" class="error-note" style="margin-top:14px">
       <div v-for="(item, index) in approvalInfo.history" :key="index">
-        <div>{{ item.actedAt ? `${item.actedAt.slice(0, 10)} ` : '' }}{{ item.status }} · {{ item.approver || '系统' }}</div>
+        <div>{{ item.actedAt ? `${item.actedAt.slice(0, 10)} ` : '' }}{{ statusLabel(item.status) }} · {{ item.approver || '系统' }}</div>
         <div v-if="item.comment">{{ item.comment }}</div>
       </div>
     </div>
@@ -237,9 +245,9 @@ onMounted(refresh)
           <tbody>
             <tr v-for="event in auditEvents" :key="event.id">
               <td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
-              <td>{{ event.action }}</td>
-              <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-              <td>{{ event.actorName || event.actorId || '系统' }}</td>
+              <td>{{ actionLabel(event.action) }}</td>
+              <td>{{ statusLabel(event.fromStatus) }} → {{ statusLabel(event.toStatus) }}</td>
+              <td>{{ event.actorName || '系统' }}</td>
               <td>{{ event.reason || '-' }}</td>
             </tr>
           </tbody>
@@ -252,12 +260,11 @@ onMounted(refresh)
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>编号</th><th>岗位名称</th><th>状态</th><th>更新时间</th></tr>
+            <tr><th>岗位名称</th><th>状态</th><th>更新时间</th></tr>
           </thead>
           <tbody>
             <tr v-for="row in associatedJobs" :key="row.id" class="row-clickable" role="link" tabindex="0" @click="openAssociatedJob(row)" @keydown.enter="openAssociatedJob(row)">
-              <td><span class="row-link" @click.stop="openAssociatedJob(row)">{{ row.code || row.id }}</span></td>
-              <td>{{ row.title }}</td>
+              <td><span class="row-link" @click.stop="openAssociatedJob(row)">{{ row.title }}</span></td>
               <td><StatusTag :status="row.status" /></td>
               <td>{{ (row.updatedAt || '').slice(0, 10) }}</td>
             </tr>
@@ -287,7 +294,7 @@ onMounted(refresh)
     <div v-if="editError" class="error-note">{{ editError }}</div>
     <div class="form-grid">
       <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="editForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="">请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}（{{ department.code }}）{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
+      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="">请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
       <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="editForm.headcount" type="number" min="1" /></div>
       <div class="form-field"><label>用工类型 <span class="required">*</span></label><select v-model="editForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
       <div class="form-field"><label>工作模式 <span class="required">*</span></label><select v-model="editForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>

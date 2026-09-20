@@ -25,8 +25,11 @@ export interface ApiInterview {
 }
 
 export interface ApiCandidate { id: string; code: string; fullName: string }
-export interface ApiJob { id: string; title: string }
-export interface ApiApplication { id: string; code: string; candidateId: string; jobId: string; status: string; candidateName?: string; jobTitle?: string }
+export interface ApiJob { id: string; code: string; title: string }
+export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; candidateName?: string; jobTitle?: string }
+export interface ScheduleCandidate { id: string; code: string; fullName: string; email?: string }
+export interface ScheduleJob { id: string; code: string; title: string }
+export interface InterviewScheduleData { candidates: ScheduleCandidate[]; jobs: ScheduleJob[]; applications: ApiApplication[] }
 
 export interface CreateInterviewInput {
   applicationId: string
@@ -59,6 +62,7 @@ export interface InterviewView {
   round: string
   scheduledAt: string
   interviewers: string[]
+  interviewerIds: string[]
   feedbackStatus: Interview['feedbackStatus']
   status: string
   applicationId: string
@@ -81,6 +85,12 @@ export const RECOMMENDATION_LABEL: Record<FeedbackRecommendation, string> = {
   strong_no: '强烈不推荐',
 }
 
+export const PARTICIPANT_ROLE_LABEL: Record<string, string> = {
+  interviewer: '面试官',
+  coordinator: '协调人',
+  observer: '观察员',
+}
+
 function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: Map<string, string>): InterviewView {
   const app = row.application
   return {
@@ -91,6 +101,7 @@ function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: M
     round: `${row.round} 轮`,
     scheduledAt: row.scheduledStartAt ? new Date(row.scheduledStartAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '待安排',
     interviewers: row.participants.map((p) => p.name || p.userId),
+    interviewerIds: row.participants.filter((p) => p.role === 'interviewer').map((p) => p.userId),
     feedbackStatus: (row.feedbackStatus === 'locked' || row.status === 'completed' ? 'completed' : row.feedbackStatus === 'submitted' ? 'submitted' : 'scheduled') as Interview['feedbackStatus'],
     status: row.status,
     applicationId: row.applicationId,
@@ -108,19 +119,17 @@ export async function loadInterviews(): Promise<InterviewView[]> {
   return interviewsRes.data.map((row) => toViewModel(row, candidates, jobs))
 }
 
-export async function loadApplicationsForSchedule(): Promise<ApiApplication[]> {
+export async function loadInterviewScheduleData(): Promise<InterviewScheduleData> {
   const [applicationResponse, candidateResponse, jobResponse] = await Promise.all([
     apiClient.getJson<ApiApplication[]>('/applications'),
     apiClient.getJson<ApiCandidate[]>('/candidates'),
     apiClient.getJson<ApiJob[]>('/jobs'),
   ])
-  const candidateMap = new Map(candidateResponse.data.map((candidate) => [candidate.id, candidate]))
-  const jobMap = new Map(jobResponse.data.map((job) => [job.id, job]))
-  return applicationResponse.data.map((application) => ({
-    ...application,
-    candidateName: candidateMap.get(application.candidateId)?.fullName || candidateMap.get(application.candidateId)?.code,
-    jobTitle: jobMap.get(application.jobId)?.title || jobMap.get(application.jobId)?.id || application.jobId,
-  }))
+  return {
+    candidates: candidateResponse.data.map((candidate) => ({ id: candidate.id, code: candidate.code, fullName: candidate.fullName })),
+    jobs: jobResponse.data.map((job) => ({ id: job.id, code: job.code, title: job.title })),
+    applications: applicationResponse.data,
+  }
 }
 
 export interface ApiInterviewDetail extends ApiInterview {
@@ -160,6 +169,26 @@ export async function concludeInterview(id: string, outcome: 'continue' | 'offer
   return (await apiClient.postJson(`/interviews/${id}/conclude`, { outcome })).data
 }
 
+export interface GeneratedInterviewQuestion {
+  category: 'technical' | 'behavioral' | 'experience' | 'job_specific'
+  difficulty: 'easy' | 'medium' | 'hard'
+  question: string
+  rationale: string
+  groundedIn: string[]
+  scoringRubric: Array<{ criterion: string; points: number }>
+}
+
+export interface InterviewQuestionSet {
+  questions: GeneratedInterviewQuestion[]
+  engine: 'llm' | 'local_fallback'
+  advisoryOnly: true
+  applicationStatusMutation: 'none'
+}
+
+export async function generateInterviewQuestions(id: string, questionCount = 5): Promise<InterviewQuestionSet> {
+  return (await apiClient.postJson<InterviewQuestionSet>(`/interviews/${id}/questions`, { questionCount })).data
+}
+
 export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none' }
 export interface LiveInterviewSegment { id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
 export interface LiveInterviewSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string }
@@ -171,4 +200,4 @@ export async function uploadLiveInterviewChunk(sessionId: string, audioBase64: s
 export async function endLiveInterviewSession(sessionId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/end`, {})).data }
 export async function updateLiveInterviewQuestion(sessionId: string, question: string, source: 'manual' | 'ai_adopted' = 'manual', segmentId?: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/question`, { question, source, ...(segmentId ? { segmentId } : {}) })).data }
 export async function correctLiveSegmentRole(segmentId: string, role: 'interviewer' | 'candidate', segmentIds: string[] = [segmentId]): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-segments/${segmentId}/role`, { role, segmentIds })).data }
-export async function analyzeLiveSegment(segmentId: string, question: string, segmentIds: string[] = [segmentId]): Promise<LiveAnswerAnalysis> { return (await apiClient.postJson<LiveAnswerAnalysis>(`/interview-live-segments/${segmentId}/analyze`, { question, segmentIds, priorContext: [] })).data }
+export async function analyzeLiveSegment(segmentId: string, question: string, segmentIds: string[] = [segmentId], priorContext: string[] = []): Promise<LiveAnswerAnalysis> { return (await apiClient.postJson<LiveAnswerAnalysis>(`/interview-live-segments/${segmentId}/analyze`, { question, segmentIds, priorContext })).data }

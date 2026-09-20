@@ -11,7 +11,6 @@ const emit = defineEmits<{ open: [row: Candidate] }>()
       <tr v-for="row in rows" :key="row.id">
         <td>
           <button class="name-link" type="button" @click="emit('open', row)"><strong>{{ row.name }}</strong></button>
-          <small class="muted">{{ row.id }}</small>
         </td>
         <td>{{ row.job }}</td>
         <td><span class="tag-list">{{ (row.tags || []).join('、') || '—' }}</span></td>

@@ -60,7 +60,6 @@ function submitPending() {
     <table>
       <thead>
         <tr>
-          <th>编号</th>
           <th>岗位名称</th>
           <th>部门</th>
           <th>状态</th>
@@ -71,7 +70,6 @@ function submitPending() {
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
-          <td>{{ row.id }}</td>
           <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.title }}</a></td>
           <td>{{ row.department }}</td>
           <td>{{ label(row) }}</td>
@@ -80,8 +78,24 @@ function submitPending() {
           <td>
             <div class="inline-actions">
               <button class="btn btn-ghost" type="button" @click="emit('open', row)">详情</button>
-              <button v-if="!row.spec" class="btn btn-primary" type="button" @click="emit('openDoc', row, 'spec')">新建说明书</button>
-              <button v-if="!row.jd" class="btn btn-primary" type="button" @click="emit('openDoc', row, 'jd')">新建 JD</button>
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="Boolean(row.spec)"
+                :title="row.spec ? '说明书已生成，请进入详情页调整' : '生成岗位说明书'"
+                @click="emit('openDoc', row, 'spec')"
+              >
+                AI 生成说明书
+              </button>
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="Boolean(row.jd)"
+                :title="row.jd ? 'JD 已生成，请进入详情页调整' : '生成 JD'"
+                @click="emit('openDoc', row, 'jd')"
+              >
+                AI 生成 JD
+              </button>
               <button
                 v-for="action in quickActions(row)"
                 :key="action"
@@ -97,7 +111,7 @@ function submitPending() {
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="7">暂无岗位记录</td>
+          <td class="table-empty" colspan="6">暂无岗位记录</td>
         </tr>
       </tbody>
     </table>
@@ -106,7 +120,7 @@ function submitPending() {
   <div v-if="pending" class="overlay" role="presentation" @click.self="pending = null">
     <div class="dialog" role="dialog" aria-modal="true">
       <h3>{{ JOB_ACTION_LABEL[pending.action] }}</h3>
-      <p>岗位 {{ pending.row.title }}（{{ pending.row.id }}）</p>
+      <p>岗位 {{ pending.row.title }}</p>
       <div class="form-field">
         <label for="job-reason">操作原因（必填）</label>
         <textarea id="job-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>
@@ -122,4 +136,5 @@ function submitPending() {
 <style scoped>
 .row-link { color: var(--primary); font-weight: 500 }
 .row-link:hover { text-decoration: underline }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
 </style>

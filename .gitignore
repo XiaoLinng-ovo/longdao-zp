@@ -27,6 +27,13 @@ generate-test-resume.mjs
 *_view.txt
 *梳理*.md
 
+# ===== Office / 系统临时文件 =====
+# Word 打开 .docx 时会生成 ~$ 开头的锁文件，不要提交
+~$*
+.DS_Store
+Thumbs.db
+desktop.ini
+
 # 测试简历样例（是 apps/api 简历解析的 DOCX 测试夹具，必须跟踪，勿忽略）
 
 # 本地 agent 计划工作流草稿（正式文档在 docs/superpowers/，不受影响）

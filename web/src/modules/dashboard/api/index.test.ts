@@ -10,8 +10,19 @@ vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
 const summary = {
   generatedAt: '2026-09-14T00:00:00.000Z',
-  metrics: [{ label: '收到申请', value: 3, detail: '全部申请记录' }],
-  funnel: [{ stage: '收到申请', count: 3, conversionRate: null }],
+  metrics: [
+    { label: '收到申请', value: 13, detail: '全部申请记录' },
+    { label: '通过筛选', value: 8, detail: '61.54% 转化率' },
+    { label: '进入面试', value: 7, detail: '87.5% 转化率' },
+    { label: '发出 Offer', value: 5, detail: '71.43% 转化率' },
+  ],
+  funnel: [
+    { stage: '收到申请', count: 13, conversionRate: null },
+    { stage: '通过筛选', count: 8, conversionRate: 61.54 },
+    { stage: '进入面试', count: 7, conversionRate: 87.5 },
+    { stage: '发出 Offer', count: 5, conversionRate: 71.43 },
+    { stage: '已入职', count: 5, conversionRate: 100 },
+  ],
   pendingApprovals: [{ id: 'real-request', code: 'REQ-7', title: '测试招聘', department: '技术', headcount: 1, status: 'pending_approval', updatedAt: '2026-09-10T00:00:00Z', approval: { approver: '审批人' } }],
   pendingFeedback: [{ id: 'interview-1', code: 'IV-1', title: '初试', round: 1, scheduledStartAt: '2026-09-11T00:00:00Z', status: 'completed', feedbackStatus: 'pending', candidateName: '张三', jobTitle: '前端工程师' }],
   failedTasks: [{ id: 'task-1', resumeId: 'resume-1', status: 'failed', attempts: 2, lastError: '解析失败', availableAt: '2026-09-10T00:00:00Z' }],
@@ -28,9 +39,11 @@ describe('真实招聘首页', () => {
     respond()
     const data = await loadDashboard()
     expect(getJson).toHaveBeenCalledWith('/dashboard/summary')
-    expect(data.metrics[0]?.value).toBe(3)
+    expect(data.metrics[0]?.value).toBe(13)
+    expect(data.metrics[2]?.trend).toBe('53.85% 转化率')
+    expect(data.metrics[3]?.trend).toBe('38.46% 转化率')
     expect(data.pending[0]).toMatchObject({ entityId: 'real-request', status: 'pending' })
-    expect(data.funnel).toEqual([{ label: '收到申请', value: 3 }])
+    expect(data.funnel[2]).toEqual({ label: '进入面试', value: 7, conversionRate: 87.5 })
     expect(data.pendingFeedback[0]).toMatchObject({ candidateName: '张三', feedbackStatus: 'pending' })
     expect(data.failedTasks[0]).toMatchObject({ id: 'task-1', lastError: '解析失败' })
   })
@@ -49,6 +62,6 @@ describe('真实招聘首页', () => {
     expect(root.textContent).not.toContain('数据库暂不可用')
     expect(root.textContent).toContain('测试招聘')
     expect(root.textContent).toContain('张三')
-    expect(root.querySelector('.metric-card strong')?.textContent).toBe('3')
+    expect(root.querySelector('.metric-card strong')?.textContent).toBe('13')
   })
 })

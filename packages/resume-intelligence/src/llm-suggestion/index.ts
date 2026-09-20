@@ -1,5 +1,6 @@
 export interface LlmResumeSuggestion {
   summary: string
+  score: number
   strengths: string[]
   risks: string[]
   matchedRequirements: string[]
@@ -30,12 +31,17 @@ function textArray(value: unknown, field: string): string[] {
 export function parseLlmResumeSuggestion(value: unknown): LlmResumeSuggestion {
   const input = record(value)
   const summary = text(input.summary, 'summary')
+  const score = input.score
+  if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100) {
+    throw new TypeError('score must be a number between 0 and 100')
+  }
   const confidence = input.confidence
   if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     throw new TypeError('confidence must be a number between 0 and 1')
   }
   return {
     summary,
+    score,
     strengths: textArray(input.strengths, 'strengths'),
     risks: textArray(input.risks, 'risks'),
     matchedRequirements: textArray(input.matchedRequirements, 'matchedRequirements'),

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { WorkflowEvent } from '../../api/workflow-events'
+import { actionLabel, statusLabel } from '../../utils/labels'
 
 defineProps<{
   events: WorkflowEvent[]
@@ -18,10 +19,10 @@ defineProps<{
       <tbody>
         <tr v-for="event in events" :key="event.id">
           <td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
-          <td>{{ event.subjectLabel || event.subjectId }}</td>
-          <td>{{ event.action }}</td>
-          <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-          <td>{{ event.actorName || event.actorId || '系统' }}</td>
+          <td>{{ event.subjectLabel || '—' }}</td>
+          <td>{{ actionLabel(event.action) }}</td>
+          <td>{{ statusLabel(event.fromStatus) }} → {{ statusLabel(event.toStatus) }}</td>
+          <td>{{ event.actorName || '系统' }}</td>
           <td>{{ event.reason || '-' }}</td>
         </tr>
       </tbody>

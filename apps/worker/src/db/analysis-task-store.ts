@@ -404,6 +404,38 @@ export class PostgresAnalysisTaskStore {
     }
   }
 
+  async getJobAnalysisContext(jobId: string): Promise<{ title: string; requirements: string[] } | undefined> {
+    const client = await this.pool.connect()
+    try {
+      const result = await client.query<{ title: string; content: Record<string, unknown> | null }>(
+        `SELECT j.title, latest.content
+         FROM jobs AS j
+         LEFT JOIN LATERAL (
+           SELECT content FROM job_spec_versions
+           WHERE job_id = j.id
+           ORDER BY version DESC
+           LIMIT 1
+         ) AS latest ON true
+         WHERE j.id = $1`,
+        [jobId],
+      )
+      const row = result.rows[0]
+      if (!row) return undefined
+      const content = row.content && typeof row.content === 'object' ? row.content : {}
+      const requirements = Array.isArray(content.requirements)
+        ? content.requirements.map((item) => {
+            if (!item || typeof item !== 'object') return ''
+            const entry = item as Record<string, unknown>
+            return [entry.label, entry.description].filter((value) => typeof value === 'string' && value.trim()).join('：')
+          }).filter(Boolean)
+        : []
+      const skills = Array.isArray(content.skills) ? content.skills.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []
+      return { title: row.title, requirements: [...requirements, ...skills] }
+    } finally {
+      client.release()
+    }
+  }
+
   /**
    * Advances a resume scan state in PostgreSQL. Terminal scan states cannot be
    * overwritten, preventing a late scanner result from reopening a quarantined

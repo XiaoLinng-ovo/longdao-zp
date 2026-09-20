@@ -1,592 +1,549 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import {
-  createApplication,
-  getAnalysisResult,
-  getCandidate,
-  loadCandidateTags,
-  loadJobs,
-  processAnalysisTask,
-  reviewAnalysisResult,
-  updateApplicationStatus,
-  updateCandidate,
-  uploadResume,
-} from '../api'
-import type { ApiAnalysisResult, ApiApplication, ApiCandidateDetail, CandidateStatus } from '../api'
-import { humanReviewStatusLabel, recommendationLabel } from '../labels'
+import { getAnalysisAssessment, getAnalysisExtraction, getCandidate, reviewAnalysisResult, type ApiCandidateDetail } from '../api'
+import { recommendationLabel } from '../labels'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
-import { isApiClientError } from '../../../shared/api'
-import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import PageHeader from '../../../shared/components/PageHeader.vue'
-import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
-import StatusTag from '../../../shared/components/StatusTag.vue'
-import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 
 const route = useRoute()
 const router = useRouter()
 
-const id = computed(() => String(route.params.id || ''))
 const detail = ref<ApiCandidateDetail | null>(null)
-const allTags = ref<string[]>([])
-const showTagEditor = ref(false)
-const tagDraft = ref('')
-const savingTags = ref(false)
 const loading = ref(true)
 const error = ref('')
-const feedback = ref('')
-const actingId = ref('')
+const showEdit = ref(false)
+const savingEdit = ref(false)
+const editForm = ref({
+  score: 0,
+  recommendation: '',
+  strengths: '',
+  risks: '',
+  comment: '',
+})
 
-const pending = ref<{ applicationId: string; status: 'rejected' | 'withdrawn' } | null>(null)
-const reason = ref('')
-const auditEvents = ref<WorkflowEvent[]>([])
-const loadingAudit = ref(false)
+const latestResult = computed(() => {
+  const results = detail.value?.analysisResults ?? []
+  return results.find((item) => getAnalysisAssessment(item) || getAnalysisExtraction(item))
+})
 
-const CANDIDATE_STATUS_LABEL: Record<CandidateStatus, string> = {
-  active: '有效',
-  archived: '已归档',
-  do_not_contact: '请勿联系',
-}
+const extraction = computed(() => getAnalysisExtraction(latestResult.value))
+const assessment = computed(() => getAnalysisAssessment(latestResult.value))
 
-const APP_STATUS_LABEL: Record<string, string> = {
-  new: '新申请', screening: '筛选中', interview: '面试中', offer: '已发 Offer', hired: '已入职', rejected: '已淘汰', withdrawn: '已撤回',
-}
-
-const ADVANCE: Record<string, { next: string; label: string } | undefined> = {
-  new: { next: 'screening', label: '开始筛选' },
-  screening: { next: 'interview', label: '转面试' },
-  interview: { next: 'offer', label: '发 Offer' },
-  offer: { next: 'hired', label: '确认入职' },
-}
-
-const jobMap = computed(() => new Map((detail.value?.jobs ?? []).map((job) => [job.id, job])))
-
-function jobTitle(application: ApiApplication): string {
-  const job = jobMap.value.get(application.jobId)
-  return job ? `${job.title}（${job.code || job.id}）` : application.jobId
-}
-
-function analysisTaskStatusLabel(status: string): string {
-  return ({ queued: '排队中', processing: '处理中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] ?? status
-}
-
-function clearFlags() { error.value = ''; feedback.value = '' }
-
-async function loadTags() {
-  try {
-    allTags.value = await loadCandidateTags()
-    const current = new Set(detail.value?.tags ?? [])
-    for (const tag of allTags.value) current.add(tag)
-    allTags.value = [...current]
-  } catch {
-    allTags.value = detail.value?.tags ?? []
+const candidateProfile = computed(() => {
+  const extracted = extraction.value?.candidate
+  const placeholderNames = new Set(['待解析候选人', '待解析', '未命名候选人'])
+  const currentName = detail.value?.fullName?.trim() || ''
+  return {
+    fullName: placeholderNames.has(currentName) && extracted?.fullName ? extracted.fullName : currentName || extracted?.fullName || '—',
+    email: detail.value?.email || extracted?.email || '—',
+    phone: detail.value?.phone || extracted?.phone || '—',
+    headline: extraction.value?.profile?.headline || extracted?.headline || '—',
+    experienceYears: extraction.value?.profile?.totalExperienceYears,
   }
+})
+
+const score = computed(() => assessment.value?.score)
+const recommendation = computed(() => recommendationLabel(assessment.value?.recommendation))
+const reviewHistory = computed(() =>
+  latestResult.value?.result.humanReview?.history
+  ?? latestResult.value?.result.analysis?.report?.humanReview?.history
+  ?? [],
+)
+
+const dimensions = computed(() => {
+  const values = assessment.value?.dimensions
+  if (!values) return []
+  return [
+    { label: '硬性要求', value: values.hardRequirement },
+    { label: '工作经验', value: values.experience },
+    { label: '技能匹配', value: values.skills },
+    { label: '教育背景', value: values.education },
+    { label: '潜力', value: values.potential },
+  ].filter((item): item is { label: string; value: number } => typeof item.value === 'number')
+})
+
+function requirementReason(item: { label?: string; rationale?: string; evidence?: Array<{ sourceText?: string; normalizedValue?: string }> }): string {
+  return item.rationale || item.label || item.evidence?.find((evidence) => evidence.sourceText)?.sourceText || ''
 }
 
-function openTagEditor() {
-  clearFlags()
-  tagDraft.value = (detail.value?.tags ?? []).join('，')
-  showTagEditor.value = true
-}
+const matchReasons = computed(() => {
+  const reasons = [
+    ...(assessment.value?.strengths ?? []),
+    ...(assessment.value?.matchedRequirements ?? []).map(requirementReason),
+  ].map((item) => item.trim()).filter(Boolean)
+  return [...new Set(reasons)]
+})
 
-async function saveTags() {
-  if (savingTags.value || !detail.value) return
-  const tags = tagDraft.value.split(/[，,、\s]+/).map((tag) => tag.trim()).filter(Boolean)
-  savingTags.value = true
-  clearFlags()
-  try {
-    const updated = await updateCandidate(detail.value.id, { tags })
-    if (detail.value) detail.value.tags = updated.tags ?? []
-    showTagEditor.value = false
-    feedback.value = '标签已保存'
-    await loadTags()
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '标签保存失败').message
-  } finally {
-    savingTags.value = false
-  }
-}
+const riskReasons = computed(() => {
+  const reasons = [
+    ...(assessment.value?.risks ?? []),
+    ...(assessment.value?.conflicts ?? []).map(requirementReason),
+    ...(assessment.value?.missingRequirements ?? []).map(requirementReason),
+  ].map((item) => item.trim()).filter(Boolean)
+  return [...new Set(reasons)]
+})
 
-async function loadAuditEvents(candidateId: string) {
-  loadingAudit.value = true
-  auditEvents.value = []
-  try {
-    const relatedIds = new Set<string>([candidateId])
-    for (const application of detail.value?.applications ?? []) relatedIds.add(application.id)
-    auditEvents.value = await loadWorkflowEvents(undefined, 300).then((rows) => rows.filter((event) => relatedIds.has(event.subjectId)))
-  } catch {
-    auditEvents.value = []
-  } finally {
-    loadingAudit.value = false
-  }
-}
-
-async function refresh() {
+async function load() {
   loading.value = true
-  clearFlags()
+  error.value = ''
   try {
-    detail.value = await getCandidate(id.value)
-    await Promise.all([loadTags(), loadAuditEvents(detail.value.id)])
+    const id = String(route.params.id ?? '')
+    if (!id) throw new Error('缺少候选人ID')
+    detail.value = await getCandidate(id)
   } catch (cause) {
-    error.value = describeApiFailure(cause, '读取候选人失败').message
+    error.value = describeApiFailure(cause, '读取候选人详情失败').message
   } finally {
     loading.value = false
   }
 }
 
-function canOperate(status: string): boolean {
-  return ['new', 'screening', 'interview', 'offer'].includes(status)
+function splitLines(value: string): string[] {
+  return value.split(/\n+/).map((item) => item.trim()).filter(Boolean)
 }
 
-async function advance(application: ApiApplication) {
-  if (actingId.value) return
-  const step = ADVANCE[application.status]
-  if (!step) return
-  await runStatus(application, step.next as ApiApplication['status'], undefined, step.label)
+function formatEditTime(value?: string): string {
+  if (!value) return '时间未知'
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-function openReason(application: ApiApplication, status: 'rejected' | 'withdrawn') {
-  reason.value = ''
-  pending.value = { applicationId: application.id, status }
-}
-
-async function submitPending() {
-  if (!pending.value) return
-  const required = pending.value.status === 'rejected'
-  const text = reason.value.trim()
-  if (required && !text) return
-  const application = detail.value?.applications.find((item) => item.id === pending.value!.applicationId)
-  if (!application) return
-  const step = pending.value
-  pending.value = null
-  await runStatus(application, step.status, text || undefined, step.status === 'rejected' ? '淘汰' : '撤回')
-}
-
-async function updateCandidateStatus(status: CandidateStatus, actionLabel: string) {
-  if (actingId.value || !detail.value) return
-  actingId.value = 'candidate'
-  clearFlags()
-  try {
-    const updated = await updateCandidate(detail.value.id, { status })
-    if (detail.value) detail.value.status = updated.status
-    feedback.value = `${actionLabel}成功，当前状态 ${CANDIDATE_STATUS_LABEL[updated.status as CandidateStatus] ?? updated.status}`
-    await refresh()
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '候选人状态更新失败').message
-  } finally {
-    actingId.value = ''
+function openEdit() {
+  if (!latestResult.value) return
+  editForm.value = {
+    score: assessment.value?.score ?? 0,
+    recommendation: assessment.value?.recommendation ?? 'needs_review',
+    strengths: (assessment.value?.strengths ?? []).join('\n'),
+    risks: (assessment.value?.risks ?? []).join('\n'),
+    comment: '',
   }
+  showEdit.value = true
 }
 
-async function runStatus(application: ApiApplication, status: ApiApplication['status'], reasonValue: string | undefined, actionLabel: string) {
-  actingId.value = application.id
-  clearFlags()
-  try {
-    const updated = await updateApplicationStatus(application.id, status, reasonValue)
-    if (detail.value) {
-      detail.value.applications = detail.value.applications.map((item) => item.id === updated.id ? updated : item)
-    }
-    feedback.value = `${actionLabel}成功，当前状态 ${APP_STATUS_LABEL[updated.status] ?? updated.status}`
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '申请操作失败').message
-  } finally {
-    actingId.value = ''
+async function submitEdit() {
+  if (!latestResult.value || savingEdit.value) return
+  const scoreValue = Number(editForm.value.score)
+  if (!Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > 100) {
+    error.value = '综合评分必须在 0-100 之间'
+    return
   }
-}
-
-// ---- 新建申请（候选人可申请多个岗位，后端会阻止重复申请同一岗位）----
-const showCreateApplication = ref(false)
-const creatingApplication = ref(false)
-const applicationForm = ref({ jobId: '', source: '' })
-const createApplicationOptions = ref<Array<{ value: string; label: string }>>([])
-const loadingApplicationOptions = ref(false)
-
-async function openCreateApplication() {
-  clearFlags()
-  applicationForm.value = { jobId: '', source: '' }
-  showCreateApplication.value = true
-  createApplicationOptions.value = []
-  loadingApplicationOptions.value = true
+  savingEdit.value = true
+  error.value = ''
   try {
-    const jobs = await loadJobs()
-    const applied = new Set((detail.value?.applications ?? []).map((app) => app.jobId))
-    createApplicationOptions.value = jobs
-      .filter((job) => !applied.has(job.entityId))
-      .map((job) => ({ value: job.entityId, label: `${job.title}（${job.id}）` }))
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '读取岗位失败').message
-  } finally {
-    loadingApplicationOptions.value = false
-  }
-}
-
-async function submitCreateApplication() {
-  if (creatingApplication.value) return
-  if (!applicationForm.value.jobId) { error.value = '请选择岗位'; return }
-  creatingApplication.value = true
-  clearFlags()
-  try {
-    const created = await createApplication({
-      candidateId: id.value,
-      jobId: applicationForm.value.jobId,
-      source: applicationForm.value.source.trim() || undefined,
+    await reviewAnalysisResult(latestResult.value.id, {
+      status: 'accepted',
+      comment: editForm.value.comment.trim() || '人工编辑分析结果和得分',
+      edits: {
+        score: scoreValue,
+        recommendation: editForm.value.recommendation,
+        strengths: splitLines(editForm.value.strengths),
+        risks: splitLines(editForm.value.risks),
+      },
     })
-    showCreateApplication.value = false
-    feedback.value = `已创建申请，当前状态 ${APP_STATUS_LABEL[created.status] ?? created.status}`
-    await refresh()
+    showEdit.value = false
+    await load()
   } catch (cause) {
-    error.value = describeApiFailure(cause, '创建申请失败').message
+    error.value = describeApiFailure(cause, '保存分析结果失败').message
   } finally {
-    creatingApplication.value = false
+    savingEdit.value = false
   }
 }
 
-// ---- 详情页内联简历上传与人工复核 ----
-const resumeFile = ref<File | undefined>()
-const resumeApplicationId = ref('')
-const uploading = ref(false)
-const retryingTaskId = ref('')
-const reviewingResultId = ref('')
-const reviewing = ref(false)
-const reviewComment = ref('')
-const showReview = ref(false)
-
-function selectResumeFile(event: Event) {
-  resumeFile.value = (event.target as HTMLInputElement).files?.[0]
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') { reject(new Error('读取文件失败')); return }
-      const dataUrl = reader.result
-      const comma = dataUrl.indexOf(',')
-      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl)
-    }
-    reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'))
-    reader.readAsDataURL(file)
-  })
-}
-
-function isNotFound(cause: unknown): boolean {
-  return isApiClientError(cause) && (cause.status === 404 || cause.code === 'NOT_FOUND')
-}
-
-async function pollForResult(taskId: string): Promise<ApiAnalysisResult> {
-  const deadline = Date.now() + 8000
-  let lastError: unknown
-  while (Date.now() < deadline) {
-    try {
-      return await getAnalysisResult(taskId)
-    } catch (cause) {
-      lastError = cause
-      if (!isNotFound(cause)) throw cause
-    }
-    await new Promise((resolve) => setTimeout(resolve, 700))
-  }
-  throw lastError instanceof Error ? lastError : new Error('分析结果尚未就绪')
-}
-
-async function submitResume() {
-  const file = resumeFile.value
-  if (!file) { error.value = '请选择简历文件'; return }
-  uploading.value = true
-  clearFlags()
-  try {
-    const created = await uploadResume({
-      candidateId: id.value,
-      applicationId: resumeApplicationId.value || undefined,
-      originalFilename: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      content: await fileToBase64(file),
-      encoding: 'base64',
-    })
-    await processAnalysisTask(created.task.id)
-    let result: ApiAnalysisResult
-    try {
-      result = await getAnalysisResult(created.task.id)
-    } catch (cause) {
-      if (!isNotFound(cause)) throw cause
-      result = await pollForResult(created.task.id)
-    }
-    feedback.value = '简历已上传并完成规则分析（AI 结果仅供人工复核参考，不会自动变更申请状态）。'
-    resumeFile.value = undefined
-    const input = document.querySelector<HTMLInputElement>('#candidate-detail-resume-file')
-    if (input) input.value = ''
-    await refresh()
-    // 上传后定位到新一轮分析结果，便于立即复核。
-    const matched = detail.value?.analysisResults.find((item) => item.analysisTaskId === created.task.id)
-    if (matched) openReview(matched)
-    void result
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '上传简历失败').message
-  } finally {
-    uploading.value = false
-  }
-}
-
-async function retryAnalysisTask(taskId: string) {
-  if (retryingTaskId.value) return
-  retryingTaskId.value = taskId
-  clearFlags()
-  try {
-    const task = await processAnalysisTask(taskId)
-    if (task.status === 'completed') {
-      feedback.value = '分析任务已重新处理完成。'
-    } else {
-      feedback.value = `分析任务已提交，当前状态 ${task.status}`
-    }
-    await refresh()
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '分析任务重试失败').message
-  } finally {
-    retryingTaskId.value = ''
-  }
-}
-
-function openReview(result: ApiAnalysisResult) {
-  clearFlags()
-  reviewingResultId.value = result.id
-  reviewComment.value = ''
-  showReview.value = true
-}
-
-async function submitReview(status: 'accepted' | 'needs_correction') {
-  if (reviewing.value || !reviewingResultId.value) return
-  const comment = reviewComment.value.trim() || undefined
-  if (status === 'needs_correction' && !comment) { error.value = '请填写退回修正说明'; return }
-  reviewing.value = true
-  clearFlags()
-  try {
-    await reviewAnalysisResult(reviewingResultId.value, { status, comment })
-    reviewComment.value = ''
-    showReview.value = false
-    feedback.value = status === 'accepted' ? '已确认通过复核' : '已退回修正'
-    await refresh()
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '复核提交失败').message
-  } finally {
-    reviewing.value = false
-  }
-}
-
-onMounted(refresh)
+onMounted(load)
 </script>
 
 <template>
-  <PageHeader title="候选人详情" :description="detail ? `${detail.fullName}（${detail.code || detail.id}）` : ''">
+  <PageHeader title="候选人详情" :description="candidateProfile.fullName">
     <div class="inline-actions">
       <button class="btn btn-ghost" type="button" @click="router.back">返回列表</button>
-      <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
+      <button class="btn btn-ghost" type="button" @click="load">刷新</button>
     </div>
   </PageHeader>
 
-  <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
   <div v-if="loading" class="loading-note">正在读取候选人...</div>
+  <div v-else-if="error" class="error-note">{{ error }}</div>
 
   <template v-else-if="detail">
     <section class="form-panel">
-      <div class="section-title">基础信息</div>
-      <div class="detail-grid">
-        <div class="detail-item"><span>候选人编号</span><strong>{{ detail.code || detail.id }}</strong></div>
-        <div class="detail-item"><span>姓名</span><strong>{{ detail.fullName }}</strong></div>
-        <div class="detail-item"><span>状态</span><StatusTag :status="detail.status" /></div>
-        <div class="detail-item"><span>邮箱</span><strong>{{ detail.email || '—' }}</strong></div>
-        <div class="detail-item"><span>电话</span><strong>{{ detail.phone || '—' }}</strong></div>
-        <div class="detail-item"><span>来源</span><strong>{{ detail.source || '—' }}</strong></div>
-        <div class="detail-item"><span>标签</span><strong>{{ (detail.tags || []).join('、') || '—' }}</strong></div>
-        <div class="detail-item"><span>更新时间</span><strong>{{ (detail.updatedAt || '').slice(0, 10) || '—' }}</strong></div>
-        <div class="detail-item detail-tags-actions">
-          <button class="btn btn-ghost btn-sm" type="button" @click="openTagEditor">编辑标签</button>
+      <div class="section-title">个人信息</div>
+      <div class="profile-grid">
+        <div class="profile-item"><span>姓名</span><strong>{{ candidateProfile.fullName }}</strong></div>
+        <div class="profile-item"><span>邮箱</span><strong>{{ candidateProfile.email }}</strong></div>
+        <div class="profile-item"><span>电话</span><strong>{{ candidateProfile.phone }}</strong></div>
+        <div class="profile-item"><span>当前方向</span><strong>{{ candidateProfile.headline }}</strong></div>
+        <div v-if="candidateProfile.experienceYears != null" class="profile-item">
+          <span>相关经验</span><strong>{{ candidateProfile.experienceYears }} 年</strong>
         </div>
-        <div v-if="showTagEditor" class="detail-item detail-tag-editor">
-          <label for="candidate-tags">标签（用逗号分隔）</label>
-          <input id="candidate-tags" v-model="tagDraft" placeholder="如：后端、高潜、内推" />
-          <small class="hint">已有标签：{{ allTags.join('、') || '暂无' }}</small>
-          <div class="inline-actions">
-            <button class="btn btn-primary btn-sm" type="button" :disabled="savingTags" @click="saveTags">{{ savingTags ? '保存中...' : '保存标签' }}</button>
-            <button class="btn btn-ghost btn-sm" type="button" :disabled="savingTags" @click="showTagEditor = false">取消</button>
+      </div>
+    </section>
+
+    <section class="form-panel">
+      <div class="section-title">简历信息</div>
+      <div v-if="!extraction" class="list-muted">暂无简历解析结果</div>
+      <div v-else class="resume-stack">
+        <div v-if="extraction.profile?.summary || extraction.profile?.headline" class="resume-block">
+          <h4>个人简介</h4>
+          <p>{{ extraction.profile.summary || extraction.profile.headline }}</p>
+        </div>
+
+        <div v-if="(extraction.experience || []).length" class="resume-block">
+          <h4>工作经历</h4>
+          <ul>
+            <li v-for="(item, index) in extraction.experience" :key="index">
+              {{ item.evidence || item.description || item.title || item.employer }}
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="(extraction.education || []).length" class="resume-block">
+          <h4>教育背景</h4>
+          <ul>
+            <li v-for="(item, index) in extraction.education" :key="index">
+              {{ item.evidence || [item.institution, item.degree, item.fieldOfStudy].filter(Boolean).join(' · ') }}
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="(extraction.skills || []).length" class="resume-block">
+          <h4>技能</h4>
+          <div class="tag-row">
+            <span v-for="skill in extraction.skills" :key="skill.value || skill.canonical" class="skill-tag">
+              {{ skill.value || skill.canonical }}
+            </span>
           </div>
         </div>
-      </div>
-    </section>
 
-    <section class="form-panel">
-      <div class="section-title panel-title">
-        <span>申请记录</span>
-        <button class="btn btn-primary btn-sm" type="button" @click="openCreateApplication">新建申请</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>岗位</th><th>状态</th><th>分数</th><th>AI 分析</th><th>更新时间</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="application in detail.applications" :key="application.id">
-              <td><strong>{{ jobTitle(application) }}</strong></td>
-              <td><StatusTag :status="application.status" /></td>
-              <td>{{ application.score != null ? `${application.score}/100` : '—' }}</td>
-              <td><StatusTag :status="application.aiStatus" /></td>
-              <td>{{ (application.updatedAt || '').slice(0, 10) }}</td>
-              <td>
-                <div class="inline-actions" v-if="canOperate(application.status)">
-                  <button v-if="ADVANCE[application.status]" class="btn btn-primary btn-sm" type="button" :disabled="actingId === application.id" @click="advance(application)">
-                    {{ actingId === application.id ? '处理中...' : ADVANCE[application.status]!.label }}
-                  </button>
-                  <button class="btn btn-danger btn-sm" type="button" :disabled="actingId === application.id" @click="openReason(application, 'rejected')">淘汰</button>
-                  <button class="btn btn-ghost btn-sm" type="button" :disabled="actingId === application.id" @click="openReason(application, 'withdrawn')">撤回</button>
-                </div>
-                <span v-else class="hint">无可执行操作</span>
-              </td>
-            </tr>
-            <tr v-if="!detail.applications.length"><td colspan="6" class="table-empty">暂无申请记录</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+        <div v-if="(extraction.languages || []).length" class="resume-block">
+          <h4>语言能力</h4>
+          <p>{{ (extraction.languages || []).join('、') }}</p>
+        </div>
 
-    <section class="form-panel">
-      <div class="section-title">上传简历并分析</div>
-      <div class="form-grid">
-        <div class="form-field">
-          <label for="candidate-detail-resume-application">关联申请（可选）</label>
-          <select id="candidate-detail-resume-application" v-model="resumeApplicationId">
-            <option value="">不关联申请</option>
-            <option v-for="application in detail.applications" :key="application.id" :value="application.id">{{ jobTitle(application) }}</option>
-          </select>
-        </div>
-        <div class="form-field">
-          <label for="candidate-detail-resume-file">简历文件</label>
-          <input id="candidate-detail-resume-file" type="file" accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" @change="selectResumeFile">
-          <small class="muted">文件将以二进制 base64 入库；AI 结构化解析当前对纯文本最稳定。</small>
-        </div>
-        <div class="form-field form-actions">
-          <button class="btn btn-primary" type="button" :disabled="uploading" @click="submitResume">{{ uploading ? '处理中...' : '上传并分析' }}</button>
+        <div v-if="(extraction.certifications || []).length" class="resume-block">
+          <h4>证书</h4>
+          <p>{{ (extraction.certifications || []).join('、') }}</p>
         </div>
       </div>
     </section>
 
     <section class="form-panel">
-      <div class="section-title">简历（{{ detail.resumes.length }}）</div>
-      <div v-if="!detail.resumes.length" class="list-muted">暂无简历</div>
-      <div v-for="resume in detail.resumes" :key="resume.id" class="detail-card">
-        <div class="detail-meta"><strong>{{ resume.originalFilename }}</strong><StatusTag :status="resume.scanStatus" /></div>
-        <div class="list-muted">上传于 {{ (resume.createdAt || '').slice(0, 10) || '—' }}</div>
+      <div class="section-title section-title-row">
+        <span>AI 与岗位匹配度</span>
+        <button v-if="latestResult" class="btn btn-ghost btn-sm" type="button" @click="openEdit">编辑分析结果和得分</button>
       </div>
-    </section>
+      <div v-if="!assessment" class="list-muted">暂无岗位匹配评分</div>
+      <template v-else>
+        <div class="score-overview">
+          <div class="score-card">
+            <strong>{{ score != null ? score : '—' }}</strong>
+            <span>综合评分</span>
+          </div>
+          <div class="score-copy">
+            <h4>{{ recommendation }}</h4>
+            <p>评分基于岗位硬性要求、工作经验、技能、教育背景和岗位潜力综合计算。</p>
+            <div class="dimension-list">
+              <div v-for="item in dimensions" :key="item.label" class="dimension-item">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
 
-    <section class="form-panel">
-      <div class="section-title">AI 分析任务（{{ detail.analysisTasks.length }}）</div>
-      <div v-if="!detail.analysisTasks.length" class="list-muted">暂无分析任务</div>
-      <div v-for="task in detail.analysisTasks" :key="task.id" class="detail-card">
-        <div class="detail-meta">
-          <strong>任务 {{ task.id.slice(0, 12) }}</strong>
-          <StatusTag :status="task.status" />
+        <div class="reason-grid">
+          <div class="reason-card">
+            <h4>匹配原因</h4>
+            <ul v-if="matchReasons.length">
+              <li v-for="reason in matchReasons" :key="reason">{{ reason }}</li>
+            </ul>
+            <p v-else class="list-muted">暂无明确匹配说明</p>
+          </div>
+          <div class="reason-card risk">
+            <h4>风险与不足</h4>
+            <ul v-if="riskReasons.length">
+              <li v-for="reason in riskReasons" :key="reason">{{ reason }}</li>
+            </ul>
+            <p v-else class="list-muted">暂无明确风险项</p>
+          </div>
         </div>
-        <div class="list-muted">状态：{{ analysisTaskStatusLabel(task.status) }} · 尝试次数：{{ task.attempts }}</div>
-        <div v-if="task.lastError" class="list-muted">失败原因：{{ task.lastError }}</div>
-        <div class="inline-actions" style="margin-top:8px">
-          <button
-            v-if="task.status === 'failed' || task.status === 'queued'"
-            class="btn btn-primary btn-sm"
-            type="button"
-            :disabled="retryingTaskId === task.id"
-            @click="retryAnalysisTask(task.id)"
-          >
-            {{ retryingTaskId === task.id ? '重试中...' : '重新处理' }}
-          </button>
-        </div>
-      </div>
-    </section>
 
-    <section class="form-panel">
-      <div class="section-title">AI 分析结果（{{ detail.analysisResults.length }}）</div>
-      <div v-if="!detail.analysisResults.length" class="list-muted">暂无分析结果</div>
-      <div v-for="result in detail.analysisResults" :key="result.id" class="detail-card">
-        <div class="detail-meta">
-          <strong>综合评分：{{ result.result?.assessment?.score != null ? result.result.assessment.score : '—' }}</strong>
-          <StatusTag :status="result.humanReviewStatus" />
+        <div v-if="reviewHistory.length" class="history-block">
+          <h4>修改记录</h4>
+          <div v-for="(record, index) in reviewHistory" :key="`${record.editedAt}-${index}`" class="history-item">
+            <div class="history-head">
+              <strong>{{ formatEditTime(record.editedAt) }}</strong>
+              <span>{{ record.editedBy || '人工用户' }}</span>
+            </div>
+            <p v-if="record.comment">{{ record.comment }}</p>
+            <p>
+              综合评分：
+              {{ record.before?.score ?? '—' }}
+              →
+              {{ record.after?.score ?? '—' }}
+            </p>
+          </div>
         </div>
-        <div class="list-muted">推荐结论：{{ recommendationLabel(result.result?.assessment?.recommendation) }}</div>
-        <div class="list-muted">生成于 {{ (result.createdAt || '').slice(0, 10) || '—' }}</div>
-        <div class="inline-actions" style="margin-top:8px">
-          <button class="btn btn-ghost btn-sm" type="button" @click="openReview(result)">人工复核</button>
-        </div>
-      </div>
-    </section>
-
-    <section class="form-panel">
-      <div class="section-title">流程审计</div>
-      <WorkflowEventTable :events="auditEvents" :loading="loadingAudit" />
+      </template>
     </section>
   </template>
 
-  <!-- 淘汰/撤回原因 -->
-  <div v-if="pending" class="overlay" role="presentation" @click.self="pending = null">
+  <div v-if="showEdit" class="overlay" role="presentation" @click.self="showEdit = false">
     <div class="dialog" role="dialog" aria-modal="true">
-      <h3>{{ pending.status === 'rejected' ? '淘汰候选人' : '撤回申请' }}</h3>
-      <p>{{ pending.status === 'rejected' ? '请填写淘汰原因（必填）' : '可填写撤回原因（可选）' }}</p>
-      <div class="form-field">
-        <label for="candidate-detail-reason">操作原因</label>
-        <textarea id="candidate-detail-reason" v-model="reason" rows="3" :placeholder="pending.status === 'rejected' ? '必填' : '可选'"></textarea>
+      <h3>编辑分析结果和得分</h3>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="candidate-analysis-score">综合评分（0-100）</label>
+          <input id="candidate-analysis-score" v-model.number="editForm.score" type="number" min="0" max="100" />
+        </div>
+        <div class="form-field">
+          <label for="candidate-analysis-recommendation">推荐结论</label>
+          <select id="candidate-analysis-recommendation" v-model="editForm.recommendation">
+            <option value="strong_match">强匹配</option>
+            <option value="match">匹配</option>
+            <option value="needs_review">待复核</option>
+            <option value="weak_match">弱匹配</option>
+          </select>
+        </div>
+        <div class="form-field form-wide">
+          <label for="candidate-analysis-strengths">匹配原因（每行一条）</label>
+          <textarea id="candidate-analysis-strengths" v-model="editForm.strengths" rows="4"></textarea>
+        </div>
+        <div class="form-field form-wide">
+          <label for="candidate-analysis-risks">风险与不足（每行一条）</label>
+          <textarea id="candidate-analysis-risks" v-model="editForm.risks" rows="4"></textarea>
+        </div>
+        <div class="form-field form-wide">
+          <label for="candidate-analysis-comment">修改说明</label>
+          <textarea id="candidate-analysis-comment" v-model="editForm.comment" rows="2" placeholder="说明为什么调整评分或分析结论"></textarea>
+        </div>
       </div>
       <div class="dialog-buttons">
-        <button class="btn btn-ghost" type="button" @click="pending = null">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="pending.status === 'rejected' && !reason.trim()" @click="submitPending">确认</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 新建申请 -->
-  <div v-if="showCreateApplication" class="overlay" role="presentation" @click.self="showCreateApplication = false">
-    <div class="dialog" role="dialog" aria-modal="true">
-      <h3>新建申请</h3>
-      <div class="form-field">
-        <label>岗位</label>
-        <select v-model="applicationForm.jobId">
-          <option value="" disabled>选择岗位</option>
-          <option v-for="option in createApplicationOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-        </select>
-        <p v-if="loadingApplicationOptions" class="list-muted">正在读取岗位...</p>
-        <p v-else-if="!createApplicationOptions.length" class="list-muted">暂无可申请的新岗位（已申请的岗位不会重复列出）</p>
-      </div>
-      <div class="form-field">
-        <label>来源（可选）</label>
-        <input v-model="applicationForm.source" placeholder="如 内推 / 招聘网站" />
-      </div>
-      <div class="dialog-buttons">
-        <button class="btn btn-ghost" type="button" @click="showCreateApplication = false">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="creatingApplication || !applicationForm.jobId" @click="submitCreateApplication">
-          {{ creatingApplication ? '创建中...' : '创建申请' }}
+        <button class="btn btn-ghost" type="button" :disabled="savingEdit" @click="showEdit = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="savingEdit" @click="submitEdit">
+          {{ savingEdit ? '保存中...' : '保存修改' }}
         </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 人工复核 -->
-  <div v-if="showReview" class="overlay" role="presentation" @click.self="showReview = false">
-    <div class="dialog" role="dialog" aria-modal="true">
-      <h3>人工复核分析结果</h3>
-      <div class="form-field">
-        <label for="candidate-detail-review-comment">复核说明</label>
-        <textarea id="candidate-detail-review-comment" v-model="reviewComment" rows="3" placeholder="确认通过或退回修正时填写说明（退回修正必填）"></textarea>
-      </div>
-      <div class="dialog-buttons">
-        <button class="btn btn-ghost" type="button" @click="showReview = false">取消</button>
-        <button class="btn btn-danger" type="button" :disabled="reviewing" @click="submitReview('needs_correction')">退回修正</button>
-        <button class="btn btn-primary" type="button" :disabled="reviewing" @click="submitReview('accepted')">确认通过</button>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.detail-tags-actions { display: flex; align-items: center; }
-.detail-tag-editor { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
-.detail-tag-editor input { width: 100%; }
-.btn-sm { padding: 4px 8px; font-size: 11.5px; }
-.hint { font-size: 11px; color: var(--muted); }
-.list-muted { font-size: 12px; color: var(--muted); }
-.muted { display: block; margin-top: 5px; font-size: 11px; color: var(--muted); }
-.panel-title { display: flex; align-items: center; justify-content: space-between; }
-.form-actions { display: flex; align-items: flex-end; }
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.profile-item {
+  min-width: 0;
+}
+
+.profile-item span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.profile-item strong {
+  display: block;
+  color: #1e293b;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.resume-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.btn-sm {
+  padding: 5px 9px;
+  font-size: 11.5px;
+}
+
+.form-wide {
+  grid-column: 1 / -1;
+}
+
+.resume-block {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.resume-block:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.resume-block h4,
+.reason-card h4,
+.score-copy h4 {
+  margin: 0 0 8px;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.resume-block p,
+.resume-block ul,
+.reason-card ul {
+  margin: 0;
+  color: #475569;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.resume-block ul,
+.reason-card ul {
+  padding-left: 18px;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.skill-tag {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.score-overview {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.score-card {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.score-card strong {
+  color: #0f766e;
+  font-size: 44px;
+  line-height: 1;
+}
+
+.score-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.score-copy p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.dimension-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dimension-item {
+  padding: 9px;
+  border-radius: 7px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.dimension-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.dimension-item strong {
+  display: block;
+  margin-top: 4px;
+  color: #1e293b;
+  font-size: 16px;
+}
+
+.reason-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.reason-card {
+  padding: 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.reason-card.risk {
+  border-color: #fed7aa;
+  background: #fffaf5;
+}
+
+.history-block {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.history-block h4 {
+  margin: 0 0 10px;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.history-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.history-item + .history-item {
+  margin-top: 8px;
+}
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.history-item p {
+  margin: 6px 0 0;
+  color: #475569;
+  font-size: 12px;
+}
+
+.list-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .profile-grid,
+  .score-overview,
+  .reason-grid,
+  .dimension-list {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

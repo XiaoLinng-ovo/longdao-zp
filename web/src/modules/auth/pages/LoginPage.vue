@@ -39,7 +39,7 @@ onMounted(async () => {
 <template>
   <main class="login-shell">
     <section class="login-panel">
-      <div class="brand"><span class="brand-mark">SR</span><span><b>智能招聘系统</b><small>SmartRecruit Pro · 全流程智能招聘</small></span></div>
+      <div class="brand"><span class="brand-mark">龙道</span><span><b>龙道招聘系统</b><small>全流程智能招聘</small></span></div>
       <h1>登录招聘管理平台</h1>
       <p class="list-muted">当前阶段提供本地开发账号登录，生产环境将接入企业 SSO 与更严格密码策略。</p>
       <div v-if="error" class="error-note" role="alert">{{ error }}</div>

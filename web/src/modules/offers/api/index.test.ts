@@ -21,11 +21,13 @@ describe('Offer API', () => {
       if (path === '/applications') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'app-1', code: 'APP-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'offer' }] } as never)
       if (path === '/candidates') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王思远' }] } as never)
       if (path === '/jobs') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'job-1', code: 'JOB-1', title: '高级后端工程师' }] } as never)
+      if (path === '/onboarding') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'onboarding-1', applicationId: 'app-1', offerId: 'offer-1', status: 'pending', createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z' }] } as never)
       throw new Error(`unexpected path ${path}`)
     })
     const rows = await listOfferContextRows()
     expect(rows[0].candidate).toContain('王思远')
     expect(rows[0].job).toContain('高级后端工程师')
+    expect(rows[0].onboardingStatus).toBe('pending')
   })
 
   it('详情取当前版本或最后一个版本', async () => {

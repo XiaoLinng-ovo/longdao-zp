@@ -7,6 +7,8 @@ export interface ResumeAnalysisTaskPayload {
   resumeId: string
   candidateId?: string
   jobId?: string
+  jobTitle?: string
+  jobRequirements?: string[]
   fileName: string
   mimeType?: string
   /** Inline text is useful for tests and small migration jobs. */
@@ -85,6 +87,13 @@ function validatePayload(payload: ResumeAnalysisTaskPayload): ResumeAnalysisTask
   if (payload.applicationId !== undefined) requireString(payload.applicationId, 'applicationId')
   requireString(payload.resumeId, 'resumeId')
   requireString(payload.fileName, 'fileName')
+  if (payload.jobTitle !== undefined) requireString(payload.jobTitle, 'jobTitle')
+  if (payload.jobRequirements !== undefined && (!Array.isArray(payload.jobRequirements) || payload.jobRequirements.some((item) => typeof item !== 'string'))) {
+    throw new WorkerFailure('jobRequirements must be an array of strings when provided', {
+      category: 'validation',
+      code: 'INVALID_RESUME_ANALYSIS_PAYLOAD',
+    })
+  }
 
   if (payload.mimeType !== undefined) requireString(payload.mimeType, 'mimeType')
   if (payload.text !== undefined && typeof payload.text !== 'string') {
@@ -125,6 +134,18 @@ async function defaultTextLoader(
 async function defaultAnalyzer(input: ResumeAnalysisInput): Promise<ResumeAnalysisResult> {
   const { task, content, context } = input
   const normalizedText = content.text.replace(/\s+/gu, ' ').trim()
+  const requirementLabels = task.payload.jobRequirements ?? []
+  const job = {
+    ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
+    title: task.payload.jobTitle ?? '',
+    requirements: requirementLabels.map((label, index) => ({
+      id: `${task.payload.jobId ?? 'job'}-requirement-${index + 1}`,
+      label,
+      kind: 'other' as const,
+      keywords: [label],
+      hard: index === 0,
+    })),
+  }
   const report = buildRuleBasedReport({
     resume: {
       documentId: task.payload.resumeId,
@@ -133,7 +154,7 @@ async function defaultAnalyzer(input: ResumeAnalysisInput): Promise<ResumeAnalys
       ...(content.mimeType === undefined ? {} : { mimeType: content.mimeType }),
       ...(task.payload.source === undefined ? {} : { source: task.payload.source }),
     },
-    job: { ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }), title: '', requirements: [] },
+    job,
     subject: {
       resumeId: task.payload.resumeId,
       ...(task.payload.applicationId === undefined ? {} : { applicationId: task.payload.applicationId }),

@@ -1,7 +1,11 @@
+import { setDefaultResultOrder } from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import './env.js';
 import { loadConfig } from './config.js';
 import { startServer } from './server.js';
+
+// 部分 OpenAI 兼容端点会发布不可达的 AAAA 记录，纯 IPv6 优先会让每次调用白等数秒甚至随机失败。
+setDefaultResultOrder('ipv4first');
 
 export { loadConfig } from './config.js';
 export { createApp, createHttpServer, startServer } from './server.js';

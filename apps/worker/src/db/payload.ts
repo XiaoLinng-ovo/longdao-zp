@@ -27,12 +27,14 @@ export function createResumePayloadResolver(
       : await createLocalObjectStorage(quarantineRoot).get(source.storageKey)
     const text = await extractResumeText(content, source.originalFilename, source.mimeType)
     const jobId = task.applicationId ? await store.getApplicationJob(task.applicationId) : undefined
+    const jobContext = jobId ? await store.getJobAnalysisContext(jobId) : undefined
 
     return {
       ...(task.applicationId === undefined ? {} : { applicationId: task.applicationId }),
       resumeId: source.resumeId,
       candidateId: source.candidateId,
       ...(jobId === undefined ? {} : { jobId }),
+      ...(jobContext === undefined ? {} : { jobTitle: jobContext.title, jobRequirements: jobContext.requirements }),
       fileName: source.originalFilename,
       mimeType: source.mimeType ?? 'text/plain',
       text,

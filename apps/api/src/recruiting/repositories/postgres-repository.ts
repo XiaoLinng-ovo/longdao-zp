@@ -46,6 +46,7 @@ export class RepositoryNotFoundError extends Error {
 
 export class RepositoryValidationError extends Error {
   readonly code = 'REPOSITORY_VALIDATION_ERROR'
+  readonly status = 400
 
   constructor(message: string) {
     super(message)
@@ -639,6 +640,10 @@ export class NormalizedRecruitingRepository {
   async createInterview(input: InterviewCreateInput): Promise<InterviewDbRecord> {
     return this.transaction(async (client) => {
       const applicationId = await resolveRequiredForeignKey(client, 'applications', 'id', 'application_no', input.applicationId, 'applicationId')
+      const participants = await Promise.all((input.participants ?? []).map(async (participant) => ({
+        ...participant,
+        userId: await resolveActorId(client, participant.userId, { required: true, allowDisplayName: true }) as string,
+      })))
       const interviewNo = businessNumber('INT', 'int', input.businessId ?? input.id, this.generateBusinessId)
       const round = input.round ?? await this.nextInterviewRound(client, applicationId)
       const row = await queryOne<InterviewRow>(client,
@@ -648,7 +653,7 @@ export class NormalizedRecruitingRepository {
          RETURNING ${INTERVIEW_COLUMNS}`,
         [uuidOrGenerated(input.id), interviewNo, applicationId, round, input.type ?? 'other', required(input.title, 'title'),
          input.status ?? 'scheduled', input.scheduledStartAt ?? null, input.scheduledEndAt ?? null, input.timezone ?? null,
-         input.location ?? null, input.meetingUrl ?? null, JSON.stringify(input.participants ?? [])])
+         input.location ?? null, input.meetingUrl ?? null, JSON.stringify(participants)])
       return mapInterview(row)
     })
   }
@@ -834,6 +839,13 @@ export class NormalizedRecruitingRepository {
     return mapOnboarding(row)
   }
 
+  async getOnboardingByOfferId(offerId: string): Promise<OnboardingDbRecord | undefined> {
+    const reference = required(offerId, 'offer id')
+    if (!isUuid(reference)) throw new RepositoryValidationError('onboarding offer lookups require the database uuid')
+    const result = await this.pool.query<OnboardingRow>(`${ONBOARDING_SELECT} WHERE r.offer_id = $1::uuid LIMIT 1`, [reference])
+    return result.rows[0] ? mapOnboarding(result.rows[0]) : undefined
+  }
+
   async createOnboarding(input: OnboardingCreateInput): Promise<OnboardingDbRecord> {
     return this.transaction(async (client) => {
       const applicationId = await resolveRequiredForeignKey(client, 'applications', 'id', 'application_no', input.applicationId, 'applicationId')
@@ -841,6 +853,7 @@ export class NormalizedRecruitingRepository {
       const row = await queryOne<OnboardingRow>(client,
         `INSERT INTO onboarding_records (id, application_id, offer_id, planned_start_date, status, notes)
          VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6)
+         ON CONFLICT (offer_id) DO UPDATE SET offer_id = EXCLUDED.offer_id
          RETURNING ${ONBOARDING_COLUMNS}`,
         [uuidOrGenerated(input.id), applicationId, offerId, input.plannedStartDate ?? null, input.status ?? 'pending', input.notes ?? null])
       return mapOnboarding(row)
@@ -891,7 +904,7 @@ export class NormalizedRecruitingRepository {
 
   /** 批量解析用户 display_name，用于面试参与人、审计操作人等只读展示。 */
   async resolveUserDisplayNames(userIds: string[]): Promise<Map<string, string>> {
-    const unique = [...new Set(userIds.filter(Boolean))]
+    const unique = [...new Set(userIds.filter((userId) => isUuid(userId)))]
     if (!unique.length) return new Map()
     const result = await this.pool.query<{ id: string; display_name: string }>('SELECT id, display_name FROM users WHERE id = ANY($1::uuid[])', [unique])
     return new Map(result.rows.map((row) => [row.id, row.display_name]))
@@ -988,7 +1001,7 @@ async function resolveReferenceLine(executor: Pick<RepositoryPool, 'query'> | Pi
  * 解析操作者/面试官引用：uuid → 直接校验存在；邮箱 → 按邮箱查；
  * 其余（历史 seed 里的 user-recruiter 之类）返回 null，由调用方决定是否必须（NOT NULL 列传 required）。
  */
-async function resolveActorId(executor: Pick<RepositoryClient, 'query'>, value: string | null | undefined, options: { required?: boolean } = {}): Promise<string | null> {
+async function resolveActorId(executor: Pick<RepositoryClient, 'query'>, value: string | null | undefined, options: { required?: boolean; allowDisplayName?: boolean } = {}): Promise<string | null> {
   const reference = text(value)
   if (!reference) {
     if (options.required) throw new RepositoryValidationError('actor is required but was empty')
@@ -998,10 +1011,17 @@ async function resolveActorId(executor: Pick<RepositoryClient, 'query'>, value: 
     ? await executor.query<{ id: string }>('SELECT id FROM users WHERE id = $1::uuid', [reference])
     : reference.includes('@')
       ? await executor.query<{ id: string }>('SELECT id FROM users WHERE lower(email) = lower($1)', [reference])
-      : { rows: [] as Array<{ id: string }> }
+      : options.allowDisplayName
+        ? await executor.query<{ id: string }>('SELECT id FROM users WHERE lower(display_name) = lower($1) AND is_active = true ORDER BY id', [reference])
+        : { rows: [] as Array<{ id: string }> }
+  if (lookup.rows.length > 1) throw new RepositoryValidationError(`面试官姓名不唯一，请填写邮箱或用户 ID：${reference}`)
   const row = lookup.rows[0]
   if (row) return row.id
-  if (options.required) throw new RepositoryValidationError(`actor must reference an existing user: ${reference}`)
+  if (options.required) {
+    throw new RepositoryValidationError(options.allowDisplayName
+      ? `未找到有效面试官：${reference}，请填写系统用户姓名、邮箱或用户 ID`
+      : `actor must reference an existing user: ${reference}`)
+  }
   return null
 }
 
@@ -1021,7 +1041,7 @@ function jsonArray<T>(value: unknown): T[] {
 }
 
 interface RecruitmentRequestRow extends QueryResultRow {
-  id: string; request_no: string; title: string; department_id: string | null; department_name: string | null; department_code: string | null; requested_by: string | null; hiring_manager_id: string | null; headcount: number; budget_min: string | number | null; budget_max: string | number | null; employment_type: string | null; work_mode: string | null; location: string | null; reason: string; status: string; version: number; created_at: string | Date; updated_at: string | Date
+  id: string; request_no: string; title: string; department_id: string | null; department_name: string | null; department_code: string | null; requested_by: string | null; requester_name?: string | null; requester_email?: string | null; hiring_manager_id: string | null; headcount: number; budget_min: string | number | null; budget_max: string | number | null; employment_type: string | null; work_mode: string | null; location: string | null; reason: string; status: string; version: number; created_at: string | Date; updated_at: string | Date
 }
 interface JobRow extends QueryResultRow {
   id: string; job_no: string; recruitment_request_id: string | null; recruitment_request_no: string | null; department_id: string; department_name: string | null; department_code: string | null; title: string; status: string; headcount: number; employment_type: string | null; work_mode: string | null; location: string | null; created_by: string | null; created_at: string | Date; updated_at: string | Date
@@ -1068,9 +1088,10 @@ const WORKFLOW_EVENT_COLUMNS = 'id, subject_type, subject_id, event_type, from_s
 const FEEDBACK_RETURNING = 'id, interview_id, interviewer_id, status, overall_score, recommendation, ratings, strengths, concerns, notes, submitted_at, locked_at'
 const OFFER_VERSION_RETURNING = 'id, offer_id, version, position_title, department_id, employment_type, start_date, compensation, benefits, content, created_at'
 
-const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, d.code AS department_code, rr.requested_by, rr.hiring_manager_id, rr.headcount, rr.budget_min, rr.budget_max, rr.employment_type, rr.work_mode, rr.location, rr.reason, rr.status, rr.version, rr.created_at, rr.updated_at
+const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, d.code AS department_code, rr.requested_by, u.display_name AS requester_name, u.email AS requester_email, rr.hiring_manager_id, rr.headcount, rr.budget_min, rr.budget_max, rr.employment_type, rr.work_mode, rr.location, rr.reason, rr.status, rr.version, rr.created_at, rr.updated_at
   FROM recruitment_requests rr
-  LEFT JOIN departments d ON d.id = rr.department_id`
+  LEFT JOIN departments d ON d.id = rr.department_id
+  LEFT JOIN users u ON u.id = rr.requested_by`
 const JOB_SELECT = `SELECT j.id, j.job_no, j.recruitment_request_id, rr.request_no AS recruitment_request_no, j.department_id, d.name AS department_name, d.code AS department_code, j.title, j.status, j.headcount, j.employment_type, j.work_mode, j.location, j.created_by, j.created_at, j.updated_at
   FROM jobs j
   LEFT JOIN recruitment_requests rr ON rr.id = j.recruitment_request_id
@@ -1092,7 +1113,7 @@ const ONBOARDING_SELECT = `SELECT r.id, r.application_id, r.offer_id, r.planned_
   LEFT JOIN applications a ON a.id = r.application_id`
 
 function mapRecruitmentRequest(row: RecruitmentRequestRow): RecruitmentRequestRecord {
-  return { id: row.id, businessId: row.request_no, legacyId: legacyId('REQ', row.request_no), code: row.request_no, title: row.title, departmentId: row.department_code ?? row.department_id ?? '', departmentName: row.department_name, requestedById: row.requested_by, hiringManagerId: row.hiring_manager_id, headcount: row.headcount, budgetMin: numberValue(row.budget_min), budgetMax: numberValue(row.budget_max), employmentType: row.employment_type, workMode: row.work_mode, location: row.location, reason: row.reason, status: row.status, version: row.version, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  return { id: row.id, businessId: row.request_no, legacyId: legacyId('REQ', row.request_no), code: row.request_no, title: row.title, departmentId: row.department_code ?? row.department_id ?? '', departmentName: row.department_name, requestedById: row.requested_by, requesterName: row.requester_name ?? null, requesterEmail: row.requester_email ?? null, hiringManagerId: row.hiring_manager_id, headcount: row.headcount, budgetMin: numberValue(row.budget_min), budgetMax: numberValue(row.budget_max), employmentType: row.employment_type, workMode: row.work_mode, location: row.location, reason: row.reason, status: row.status, version: row.version, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapJob(row: JobRow): JobRecord {

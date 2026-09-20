@@ -211,3 +211,71 @@ export function createInterviewQuestionGenerator(config: InterviewQuestionGenera
     },
   }
 }
+
+function localRubric(): InterviewScoringCriterion[] {
+  return [
+    { criterion: '回答与简历证据一致', points: 4 },
+    { criterion: '技术与岗位要求匹配', points: 3 },
+    { criterion: '表达清晰且有具体案例', points: 3 },
+  ]
+}
+
+export function generateLocalInterviewQuestions(input: InterviewQuestionGenerationInput): InterviewQuestionSet {
+  validateInput(input)
+  const primaryRequirement = input.jobRequirements[0] ?? input.jobTitle
+  const secondaryRequirement = input.jobRequirements[1] ?? primaryRequirement
+  const resumeLine = input.anonymizedResume.split(/\n+/).map((line) => line.trim()).find(Boolean) ?? '简历经历'
+  const summary = input.analysisSummary.find(Boolean) ?? '候选人简历与岗位存在可核实的匹配点'
+  const templates: GeneratedInterviewQuestion[] = [
+    {
+      category: 'experience',
+      difficulty: 'medium',
+      question: `请结合简历中的“${resumeLine.slice(0, 40)}”，介绍一段最能体现你岗位能力的经历。`,
+      rationale: '核验简历经历是否真实、完整，并了解候选人在项目中的实际职责。',
+      groundedIn: [resumeLine.slice(0, 80)],
+      scoringRubric: localRubric(),
+    },
+    {
+      category: 'job_specific',
+      difficulty: 'medium',
+      question: `这个岗位重点关注“${primaryRequirement}”。请说明你过去如何解决过同类问题，结果如何？`,
+      rationale: '验证候选人的经验是否直接覆盖岗位核心要求。',
+      groundedIn: [primaryRequirement],
+      scoringRubric: localRubric(),
+    },
+    {
+      category: 'technical',
+      difficulty: 'hard',
+      question: `如果让你负责一个与“${secondaryRequirement}”相关的新项目，你会如何拆解方案、识别风险并推进落地？`,
+      rationale: '评估候选人将既有技能迁移到新任务的方案设计能力。',
+      groundedIn: [secondaryRequirement, summary],
+      scoringRubric: localRubric(),
+    },
+    {
+      category: 'behavioral',
+      difficulty: 'medium',
+      question: '请讲一次你和团队意见不一致、但最终推动项目前进的经历。你具体做了什么？',
+      rationale: '评估协作、沟通和冲突处理能力。',
+      groundedIn: ['简历分析与岗位要求'],
+      scoringRubric: localRubric(),
+    },
+    {
+      category: 'experience',
+      difficulty: 'easy',
+      question: '请说明你选择这个岗位的原因，以及你希望在入职后前三个月优先完成什么。',
+      rationale: '了解求职动机、岗位理解和入职后的行动计划。',
+      groundedIn: [input.jobTitle],
+      scoringRubric: localRubric(),
+    },
+  ]
+  const questions: GeneratedInterviewQuestion[] = Array.from({ length: input.questionCount }, (_, index) => {
+    const base = templates[index % templates.length]!
+    if (index < templates.length) return base
+    return {
+      ...base,
+      difficulty: 'hard',
+      question: `${base.question}（请补充更多量化结果或失败复盘）`,
+    }
+  })
+  return { questions, advisoryOnly: true, applicationStatusMutation: 'none' }
+}

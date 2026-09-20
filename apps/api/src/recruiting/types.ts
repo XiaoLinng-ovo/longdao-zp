@@ -22,6 +22,8 @@ export interface RecruitmentRequestRecord {
   departmentId: string
   department: string
   requesterId: string
+  requesterName?: string
+  requesterEmail?: string
   hiringManagerId?: string
   headcount: number
   employmentType: string
@@ -81,6 +83,7 @@ export interface JobSpecRecord {
   responsibilities: string[]
   requirements: Array<{ label: string; description: string; required: boolean; weight?: number }>
   skills: string[]
+  generatedBy?: 'ai' | 'local_fallback' | 'human'
   confirmed: boolean
   confirmedAt?: string
 }
@@ -89,7 +92,7 @@ export interface JobDescriptionRecord {
   version: number
   language: string
   content: string
-  generatedBy: 'human' | 'ai_assisted'
+  generatedBy: 'human' | 'ai_assisted' | 'local_fallback'
   confirmed: boolean
   confirmedAt?: string
 }

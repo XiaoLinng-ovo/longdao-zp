@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../../../shared/api'
-import { createJd, createSpec, jobAction, listJobDescriptionVersions, listJobSpecVersions, loadJobs } from './index'
+import { createJd, createSpec, generateJobDescription, generateJobSpec, jobAction, listJobDescriptionVersions, listJobSpecVersions, loadJobs } from './index'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn(), postJson: vi.fn(), patchJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
@@ -24,6 +24,18 @@ describe('岗位 API', () => {
     expect(postJson).toHaveBeenCalledWith('/jobs/uuid-job/spec', expect.objectContaining({ title: '说明书', skills: ['Node'] }))
     await createJd('uuid-job', { language: 'zh-CN', content: '岗位描述', generatedBy: 'human' })
     expect(postJson).toHaveBeenCalledWith('/jobs/uuid-job/jd', { language: 'zh-CN', content: '岗位描述', generatedBy: 'human' })
+  })
+
+  it('按岗位名称请求 AI 生成说明书', async () => {
+    postJson.mockResolvedValue({ ok: true, requestId: 'test', data: { id: 'uuid-job', spec: { title: '后端工程师' } } } as never)
+    await generateJobSpec('uuid-job')
+    expect(postJson).toHaveBeenCalledWith('/jobs/uuid-job/spec/generate', {})
+  })
+
+  it('按岗位请求 AI 生成 JD', async () => {
+    postJson.mockResolvedValue({ ok: true, requestId: 'test', data: { id: 'uuid-job', jd: { content: 'JD' } } } as never)
+    await generateJobDescription('uuid-job')
+    expect(postJson).toHaveBeenCalledWith('/jobs/uuid-job/jd/generate', {})
   })
 
   it('读取岗位说明书与 JD 版本历史', async () => {

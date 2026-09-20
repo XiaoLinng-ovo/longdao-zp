@@ -107,10 +107,7 @@ onMounted(refresh)
       <h3>入职归档详情</h3>
       <div class="detail-card" style="margin-top: 12px">
         <div class="detail-grid">
-          <div class="detail-item"><span>入职档案</span><strong>{{ selected.id }}</strong></div>
           <div class="detail-item"><span>状态</span><StatusTag :status="selected.status" /></div>
-          <div class="detail-item"><span>申请</span><strong>{{ selected.applicationCode }}</strong></div>
-          <div class="detail-item"><span>Offer</span><strong>{{ selected.offerCode }}</strong></div>
           <div class="detail-item"><span>候选人</span><strong>{{ selected.candidate }}</strong></div>
           <div class="detail-item"><span>岗位</span><strong>{{ selected.job }}</strong></div>
           <div class="detail-item"><span>计划入职</span><strong>{{ selected.plannedStartDate || '未排期' }}</strong></div>

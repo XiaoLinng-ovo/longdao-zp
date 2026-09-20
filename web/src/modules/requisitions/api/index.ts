@@ -8,6 +8,8 @@ export interface ApiRequisition {
   departmentId: string
   department: string
   requesterId: string
+  requesterName?: string
+  requesterEmail?: string
   headcount: number
   employmentType: string
   workMode: string

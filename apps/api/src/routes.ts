@@ -5,6 +5,7 @@ import { readBody, readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/service.js';
+import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { createDatabasePool } from './db/connection.js';
 import { authService } from './auth/middleware.js';
 import type { Role } from './auth/types.js';
@@ -17,8 +18,10 @@ import { DingTalkApprovalWorkflow, DingTalkApprovalWorkflowError } from './integ
 import { PostgresDingTalkApprovalRepository } from './integrations/dingtalk/postgres-approval-workflow.js';
 import { executeRecruitmentApprovalAction } from './integrations/dingtalk/approval-routing.js';
 import { executeOfferApprovalAction } from './integrations/dingtalk/offer-approval.js';
-import { createInterviewQuestionGenerator, InterviewQuestionGenerationError, loadInterviewQuestionGeneratorConfig } from './interviews/question-generator.js';
+import { createInterviewQuestionGenerator, generateLocalInterviewQuestions, InterviewQuestionGenerationError, loadInterviewQuestionGeneratorConfig } from './interviews/question-generator.js';
 import { createInterviewAnswerAnalyzer, InterviewAnswerAnalysisError, loadInterviewAnswerAnalyzerConfig } from './interviews/answer-analyzer.js';
+import { createJobSpecGenerator, generateLocalJobSpec, JobSpecGenerationError, loadJobSpecGeneratorConfig } from './recruiting/job-spec-generator.js';
+import { createJobDescriptionGenerator, generateLocalJobDescription, JobDescriptionGenerationError, loadJobDescriptionGeneratorConfig } from './recruiting/job-description-generator.js';
 import { createFunAsrClient, FunAsrError, loadFunAsrConfig } from './interviews/funasr-client.js';
 import { mapInterviewRoles, type ConfirmedSpeakerRoles } from './interviews/role-mapper.js';
 import { LiveInterviewSessionRepository } from './interviews/live-session-repository.js';
@@ -413,6 +416,27 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/admin/dingtalk-settings' && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateDingTalkSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
     if (path === '/api/v1/admin/resume-virus-scan' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.getResumeVirusScanSetting()); return; }
     if (path === '/api/v1/admin/resume-virus-scan' && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); const body = await readJson(context); if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'VALIDATION_ERROR', 'enabled 必须是布尔值'); sendSuccess(context, await adminService.updateResumeVirusScanSetting(body.enabled, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/ai-settings' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.getAiSettings()); return; }
+    if (path === '/api/v1/admin/ai-settings' && method === 'PATCH') {
+      requireRole(auth, ADMIN_ROLES);
+      const body = await readJson(context);
+      try {
+        sendSuccess(context, await adminService.updateAiSettings(body as never, auth.user.id, context.requestId));
+      } catch (error) {
+        if (error instanceof AiSettingsValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message);
+        throw error;
+      }
+      return;
+    }
+    if (path === '/api/v1/admin/ai-connection-test' && method === 'POST') {
+      requireRole(auth, ADMIN_ROLES);
+      const body = await readJson(context);
+      sendSuccess(context, await adminService.testAiConnection({
+        ...(typeof body.baseUrl === 'string' ? { baseUrl: body.baseUrl } : {}),
+        ...(typeof body.apiKey === 'string' ? { apiKey: body.apiKey } : {}),
+      }));
+      return;
+    }
     if (path === '/api/v1/admin/analysis-tasks' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await recruiting.listAnalysisTasks(context.url.searchParams.get('status') ?? undefined)); return; }
     if (path === '/api/v1/admin/audit-logs' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await adminService.listAuditLogs(Number(context.url.searchParams.get('limit') ?? '50'))); return; }
     if (path === '/api/v1/workflow-events' && method === 'GET') {
@@ -453,10 +477,10 @@ const routeMiddleware: Middleware = async (context, next) => {
       try { const asr=createFunAsrClient(loadFunAsrConfig()); const chunkOffsetMs=Number(body.chunkOffsetMs ?? 0); if(!Number.isFinite(chunkOffsetMs)||chunkOffsetMs<0) throw new HttpError(400,'INVALID_INPUT','chunkOffsetMs 必须是非负数'); const contentType=String(body.contentType ?? 'audio/webm'); const audio=Buffer.from(encoded,'base64'); const audioObjectKey=await liveInterviewAudioStorage.store(liveSessionPath.sessionId,audio,contentType,chunkOffsetMs); const transcribed=(await asr.transcribe(audio,contentType)).map((item)=>({...item,startMs:item.startMs+chunkOffsetMs,endMs:item.endMs+chunkOffsetMs})); const known:ConfirmedSpeakerRoles={}; current.segments.forEach((item)=>{if(item.role!=='unknown'&&item.confidence>=0.6) known[item.speakerId]=item.role}); const mapped=mapInterviewRoles(transcribed,known); const saved=[]; for(const item of mapped) saved.push(await liveInterviewSessions.addSegment(liveSessionPath.sessionId,{speakerId:item.speakerId,role:item.role,confidence:item.confidence,text:item.text,startMs:item.startMs,endMs:item.endMs,audioObjectKey})); sendSuccess(context,saved,201) } catch(error) { if(error instanceof FunAsrError) throw new HttpError(error.code==='NOT_CONFIGURED'?503:502,`FUNASR_${error.code}`,error.message); throw error } return;
     }
     const liveSegmentMatch = path.match(/^\/api\/v1\/interview-live-segments\/([^/]+)\/(role|analyze)$/);
-    if (liveSegmentMatch && method === 'POST') { requireRole(auth,INTERVIEW_WRITE_ROLES); const body=await readJson(context); const analysisContext=await liveInterviewSessions.getAnalysisContext(liveSegmentMatch[1]!); await recruiting.assertInterviewInScope(analysisContext.interviewId,departmentScope(auth)); if(liveSegmentMatch[2]==='role'){ const role=String(body.role); if(role!=='interviewer'&&role!=='candidate') throw new HttpError(400,'INVALID_INPUT','role 必须是 interviewer 或 candidate'); const ids=Array.isArray(body.segmentIds)?body.segmentIds.map(String):[liveSegmentMatch[1]!]; sendSuccess(context,await liveInterviewSessions.correctUtteranceRole(liveSegmentMatch[1]!,ids,role)); return } if(analysisContext.segment.role!=='candidate'||analysisContext.segment.confidence<0.6) throw new HttpError(409,'CANDIDATE_ROLE_UNCONFIRMED','只有已确认的候选人回答才能进入 AI 分析'); try { const candidateAnswer=await liveInterviewSessions.getUtteranceText(liveSegmentMatch[1]!,Array.isArray(body.segmentIds)?body.segmentIds.map(String):[liveSegmentMatch[1]!]); const config=loadInterviewAnswerAnalyzerConfig(); const analyzer=createInterviewAnswerAnalyzer(config); const analysis=await analyzer.analyze({question:String(body.question ?? ''),candidateAnswer,jobTitle:analysisContext.jobTitle,jobRequirements:analysisContext.jobRequirements.length?analysisContext.jobRequirements:['岗位要求未结构化'],priorContext:Array.isArray(body.priorContext)?body.priorContext.map(String):[]}); await liveInterviewSessions.saveAnalysis(liveSegmentMatch[1]!,String(body.question ?? ''),analysis,config.model); sendSuccess(context,analysis) } catch(error) { if(error instanceof InterviewAnswerAnalysisError) throw new HttpError(error.code==='AI_NOT_CONFIGURED'?503:error.code==='INVALID_INPUT'?400:502,error.code,error.message); throw error } return; }
+    if (liveSegmentMatch && method === 'POST') { requireRole(auth,INTERVIEW_WRITE_ROLES); const body=await readJson(context); const analysisContext=await liveInterviewSessions.getAnalysisContext(liveSegmentMatch[1]!); await recruiting.assertInterviewInScope(analysisContext.interviewId,departmentScope(auth)); if(liveSegmentMatch[2]==='role'){ const role=String(body.role); if(role!=='interviewer'&&role!=='candidate') throw new HttpError(400,'INVALID_INPUT','role 必须是 interviewer 或 candidate'); const ids=Array.isArray(body.segmentIds)?body.segmentIds.map(String):[liveSegmentMatch[1]!]; sendSuccess(context,await liveInterviewSessions.correctUtteranceRole(liveSegmentMatch[1]!,ids,role)); return } if(analysisContext.segment.role!=='candidate'||analysisContext.segment.confidence<0.6) throw new HttpError(409,'CANDIDATE_ROLE_UNCONFIRMED','只有已确认的候选人回答才能进入 AI 分析'); try { const candidateAnswer=await liveInterviewSessions.getUtteranceText(liveSegmentMatch[1]!,Array.isArray(body.segmentIds)?body.segmentIds.map(String):[liveSegmentMatch[1]!]); const resumeContext=await recruiting.getInterviewQuestionContext(analysisContext.interviewId).then((ctx)=>[ctx.anonymizedResume,...ctx.analysisSummary]).catch(()=>[]); const config=loadInterviewAnswerAnalyzerConfig(); const analyzer=createInterviewAnswerAnalyzer(config); const analysis=await analyzer.analyze({question:String(body.question ?? ''),candidateAnswer,jobTitle:analysisContext.jobTitle,jobRequirements:analysisContext.jobRequirements.length?analysisContext.jobRequirements:['岗位要求未结构化'],priorContext:Array.isArray(body.priorContext)?body.priorContext.map(String):[],resumeContext}); await liveInterviewSessions.saveAnalysis(liveSegmentMatch[1]!,String(body.question ?? ''),analysis,config.model); sendSuccess(context,analysis) } catch(error) { if(error instanceof InterviewAnswerAnalysisError) throw new HttpError(error.code==='AI_NOT_CONFIGURED'?503:error.code==='INVALID_INPUT'?400:502,error.code,error.message); throw error } return; }
     const interviewMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)(?:\/(feedback|lock-feedback|conclude|questions))?$/);
     if (interviewMatch && method === 'GET' && !interviewMatch[2]) { await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.getInterview(interviewMatch[1]!)); return; }
-    if (interviewMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') { try { const generator=createInterviewQuestionGenerator(loadInterviewQuestionGeneratorConfig()); sendSuccess(context,await generator.generate(body as never)) } catch(error) { if(error instanceof InterviewQuestionGenerationError) throw new HttpError(error.code==='AI_NOT_CONFIGURED'?503:error.code==='INVALID_INPUT'?400:502,error.code,error.message); throw error } } return; }
+    if (interviewMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') { const input = await recruiting.getInterviewQuestionContext(interviewMatch[1]!); const requestedCount = body.questionCount === undefined ? input.questionCount : Number(body.questionCount); if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 20) throw new HttpError(400, 'INVALID_INPUT', 'questionCount 必须是 1 到 20 的整数'); const generationInput = { ...input, questionCount: requestedCount }; try { const generator=createInterviewQuestionGenerator(loadInterviewQuestionGeneratorConfig()); const generated=await generator.generate(generationInput); sendSuccess(context,{...generated,engine:'llm'}) } catch(error) { if(error instanceof InterviewQuestionGenerationError && error.code === 'INVALID_INPUT') throw new HttpError(400,error.code,error.message); sendSuccess(context,{...generateLocalInterviewQuestions(generationInput),engine:'local_fallback'}) } } return; }
     const applicationMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/status$/);
     if (applicationMatch && method === 'POST') { requireRole(auth, APPLICATION_WRITE_ROLES); await recruiting.assertApplicationInScope(applicationMatch[1]!, departmentScope(auth)); const body = await readJson(context); sendSuccess(context, await recruiting.updateApplicationStatus(applicationMatch[1]!, String(body.status) as never, body.reason, auth.user.id)); return; }
     const jobMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)(?:\/(.*))?$/);
@@ -465,7 +489,50 @@ const routeMiddleware: Middleware = async (context, next) => {
       const job = await recruiting.getJob(id); assertDepartmentScope(auth, job.departmentId);
       if (!suffix && method === 'GET') { setVersionEtag(context, job.version); sendSuccess(context, job); return; }
       if (!suffix && method === 'PATCH') { requireRole(auth, JOB_WRITE_ROLES); assertVersion(parseIfMatch(context), job.version); const result = await recruiting.updateJob(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
+      if (suffix === 'spec/generate' && method === 'POST') {
+        requireRole(auth, JOB_WRITE_ROLES);
+        try {
+          const generated = await createJobSpecGenerator(loadJobSpecGeneratorConfig()).generate({ jobTitle: job.title });
+          sendSuccess(context, await recruiting.createSpec(id, generated, auth.user.id));
+        } catch (error) {
+          if (error instanceof JobSpecGenerationError) {
+            if (error.code === 'AI_NOT_CONFIGURED') {
+              sendSuccess(context, await recruiting.createSpec(id, generateLocalJobSpec({ jobTitle: job.title }), auth.user.id));
+              return;
+            }
+            throw new HttpError(error.code === 'INVALID_INPUT' ? 400 : 502, error.code, error.message);
+          }
+          throw error;
+        }
+        return;
+      }
       if (suffix === 'spec' && method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.createSpec(id, await readJson(context) as never, auth.user.id)); return; }
+      if (suffix === 'jd/generate' && method === 'POST') {
+        requireRole(auth, JOB_WRITE_ROLES);
+        const generationInput = {
+          jobTitle: job.title,
+          spec: job.spec ? {
+            summary: job.spec.summary,
+            responsibilities: job.spec.responsibilities,
+            requirements: job.spec.requirements,
+            skills: job.spec.skills,
+          } : undefined,
+        };
+        try {
+          const generated = await createJobDescriptionGenerator(loadJobDescriptionGeneratorConfig()).generate(generationInput);
+          sendSuccess(context, await recruiting.createJd(id, generated, auth.user.id));
+        } catch (error) {
+          if (error instanceof JobDescriptionGenerationError) {
+            if (error.code === 'AI_NOT_CONFIGURED') {
+              sendSuccess(context, await recruiting.createJd(id, generateLocalJobDescription(generationInput), auth.user.id));
+              return;
+            }
+            throw new HttpError(error.code === 'INVALID_INPUT' ? 400 : 502, error.code, error.message);
+          }
+          throw error;
+        }
+        return;
+      }
       if (suffix === 'jd' && method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.createJd(id, await readJson(context) as never, auth.user.id)); return; }
       if (suffix === 'spec-versions' && method === 'GET') { sendSuccess(context, await recruiting.listJobSpecVersions(id)); return; }
       if (suffix === 'jd-versions' && method === 'GET') { sendSuccess(context, await recruiting.listJobDescriptionVersions(id)); return; }

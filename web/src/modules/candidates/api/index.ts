@@ -4,21 +4,81 @@ import type { Candidate } from '../../../shared/types/recruiting'
 export { loadJobs } from '../../jobs/api'
 
 interface ApiJob { id: string; title: string }
-export interface ApiApplication { id: string; candidateId: string; jobId: string; status: string; score?: number; aiStatus: string; updatedAt: string; rejectionReason?: string }
-export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; tags?: string[]; status: string; updatedAt: string; applications: ApiApplication[] }
+export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; score?: number; aiStatus: string; updatedAt: string; rejectionReason?: string }
+export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number; applications: ApiApplication[] }
 export interface ApiResume { id: string; candidateId: string; applicationId?: string; originalFilename: string; mimeType: string; sizeBytes: number; contentHash: string; scanStatus: string; createdAt: string }
 export interface ApiAnalysisTask { id: string; resumeId: string; applicationId?: string; status: string; attempts: number; completedAt?: string; lastError?: string }
+
+export interface ApiResumeExtraction {
+  candidate?: { fullName?: string; email?: string; phone?: string; headline?: string }
+  profile?: { headline?: string; summary?: string; totalExperienceYears?: number }
+  education?: Array<{ institution?: string; degree?: string; fieldOfStudy?: string; evidence?: string }>
+  experience?: Array<{ employer?: string; title?: string; startDate?: string; endDate?: string; description?: string; evidence?: string }>
+  skills?: Array<{ value?: string; canonical?: string }>
+  languages?: string[]
+  certifications?: string[]
+}
+
+export interface ApiRequirementAssessment {
+  requirementId?: string
+  label?: string
+  matched?: boolean
+  score?: number
+  rationale?: string
+  evidence?: Array<{ sourceText?: string; normalizedValue?: string }>
+}
+
+export interface ApiMatchAssessment {
+  score?: number
+  recommendation?: string
+  dimensions?: { hardRequirement?: number; experience?: number; skills?: number; education?: number; potential?: number }
+  matchedRequirements?: ApiRequirementAssessment[]
+  conflicts?: ApiRequirementAssessment[]
+  missingRequirements?: ApiRequirementAssessment[]
+  strengths?: string[]
+  risks?: string[]
+  interviewQuestions?: string[]
+  confidence?: number
+}
+
+export interface ApiAnalysisEditRecord {
+  action?: string
+  editedBy?: string
+  editedAt?: string
+  comment?: string
+  before?: { score?: number; recommendation?: string; strengths?: string[]; risks?: string[] }
+  after?: { score?: number; recommendation?: string; strengths?: string[]; risks?: string[] }
+}
 
 export interface ApiAnalysisResult {
   id: string
   analysisTaskId: string
   resumeId: string
   applicationId?: string
-  result: { assessment?: { score?: number; recommendation?: string }; humanReview?: { status?: string; comment?: string } }
+  result: {
+    assessment?: ApiMatchAssessment
+    humanReview?: { status?: string; comment?: string; reviewedBy?: string; reviewedAt?: string; history?: ApiAnalysisEditRecord[] }
+    extraction?: ApiResumeExtraction
+    analysis?: {
+      report?: {
+        assessment?: ApiMatchAssessment
+        extraction?: ApiResumeExtraction
+        humanReview?: { status?: string; comment?: string; reviewedBy?: string; reviewedAt?: string; history?: ApiAnalysisEditRecord[] }
+      }
+    }
+  }
   analyzerVersion: string
   inputHash: string
   humanReviewStatus: 'pending' | 'accepted' | 'needs_correction'
   createdAt: string
+}
+
+export function getAnalysisAssessment(result: ApiAnalysisResult | undefined): ApiMatchAssessment | undefined {
+  return result?.result.assessment ?? result?.result.analysis?.report?.assessment
+}
+
+export function getAnalysisExtraction(result: ApiAnalysisResult | undefined): ApiResumeExtraction | undefined {
+  return result?.result.extraction ?? result?.result.analysis?.report?.extraction
 }
 
 export interface ApiCandidateJob { id: string; code: string; title: string }
@@ -47,8 +107,8 @@ function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
     entityId: row.id,
     name: row.fullName,
     job: application ? jobs.get(application.jobId) || application.jobId : '未关联岗位',
-    score: application?.score ?? 0,
-    aiStatus: application?.aiStatus === 'completed' ? 'completed' : 'pending',
+    score: application?.score ?? row.score ?? 0,
+    aiStatus: application?.aiStatus === 'completed' || row.aiStatus === 'completed' ? 'completed' : 'pending',
     applicationStatus: (application?.status === 'interviewing' ? 'scheduled' : application?.status || 'pending') as Candidate['applicationStatus'],
     updatedAt: (application?.updatedAt || row.updatedAt).slice(0, 10),
     tags: row.tags,
@@ -109,6 +169,10 @@ export async function listAnalysisTasks(): Promise<ApiAnalysisTask[]> {
   return (await apiClient.getJson<ApiAnalysisTask[]>('/analysis-tasks')).data
 }
 
+export async function getAnalysisTask(taskId: string): Promise<ApiAnalysisTask> {
+  return (await apiClient.getJson<ApiAnalysisTask>(`/analysis-tasks/${taskId}`)).data
+}
+
 /** 本地/内联规则分析入口；生产环境由 Worker 轮询完成，此方法保持幂等。 */
 export async function processAnalysisTask(taskId: string): Promise<ApiAnalysisTask> {
   return (await apiClient.postJson<ApiAnalysisTask>(`/analysis-tasks/${taskId}`, {})).data
@@ -122,6 +186,10 @@ export async function getAnalysisResultById(id: string): Promise<ApiAnalysisResu
   return (await apiClient.getJson<ApiAnalysisResult>(`/analysis-results/${id}`)).data
 }
 
-export async function reviewAnalysisResult(id: string, body: { status: 'accepted' | 'needs_correction'; comment?: string }): Promise<ApiAnalysisResult> {
+export async function reviewAnalysisResult(id: string, body: {
+  status: 'accepted' | 'needs_correction'
+  comment?: string
+  edits?: { score?: number; recommendation?: string; strengths?: string[]; risks?: string[] }
+}): Promise<ApiAnalysisResult> {
   return (await apiClient.patchJson<ApiAnalysisResult>(`/analysis-results/${id}`, body)).data
 }

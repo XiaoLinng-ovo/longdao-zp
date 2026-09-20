@@ -16,7 +16,6 @@ const emit = defineEmits<{
     <table>
       <thead>
         <tr>
-          <th>编号</th>
           <th>候选人</th>
           <th>岗位</th>
           <th>轮次</th>
@@ -28,7 +27,6 @@ const emit = defineEmits<{
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
-          <td>{{ row.id }}</td>
           <td><strong>{{ row.candidate }}</strong></td>
           <td>{{ row.job }}</td>
           <td>{{ row.round }}</td>
@@ -51,7 +49,7 @@ const emit = defineEmits<{
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="8">暂无面试记录，请先点击右上角「安排面试」发起面试</td>
+          <td class="table-empty" colspan="7">暂无面试记录，请先点击右上角「安排面试」发起面试</td>
         </tr>
       </tbody>
     </table>

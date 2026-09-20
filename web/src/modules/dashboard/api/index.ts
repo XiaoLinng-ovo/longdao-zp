@@ -39,14 +39,14 @@ interface DashboardSummaryContract {
 export interface DashboardData {
   metrics: Metric[]
   pending: Requisition[]
-  funnel: Array<{ label: string; value: number }>
+  funnel: Array<{ label: string; value: number; conversionRate: number | null }>
   pendingFeedback: DashboardSummaryContract['pendingFeedback']
   failedTasks: DashboardSummaryContract['failedTasks']
 }
 
-function toMetric(row: DashboardSummaryContract['metrics'][number], index: number): Metric {
+function toMetric(row: DashboardSummaryContract['metrics'][number], index: number, overallRate?: number): Metric {
   const tones: Metric['tone'][] = ['teal', 'blue', 'amber', 'red']
-  return { label: row.label, value: row.value, trend: row.detail, tone: tones[index % tones.length] }
+  return { label: row.label, value: row.value, trend: index > 0 && overallRate !== undefined ? `${overallRate}% 转化率` : row.detail, tone: tones[index % tones.length] }
 }
 
 function toRequisition(row: DashboardSummaryContract['pendingApprovals'][number]): Requisition {
@@ -65,10 +65,13 @@ function toRequisition(row: DashboardSummaryContract['pendingApprovals'][number]
 
 export async function loadDashboard(): Promise<DashboardData> {
   const response = await apiClient.getJson<DashboardSummaryContract>('/dashboard/summary')
+  const funnel = response.data.funnel.map((step) => ({ label: step.stage, value: step.count, conversionRate: step.conversionRate }))
+  const total = funnel[0]?.value ?? 0
+  const overallRate = (value: number): number => total > 0 ? Math.round(value / total * 10000) / 100 : 0
   return {
-    metrics: response.data.metrics.map(toMetric),
+    metrics: response.data.metrics.map((row, index) => toMetric(row, index, index === 0 ? undefined : overallRate(funnel[index]?.value ?? 0))),
     pending: response.data.pendingApprovals.map(toRequisition),
-    funnel: response.data.funnel.map((step) => ({ label: step.stage, value: step.count })),
+    funnel,
     pendingFeedback: response.data.pendingFeedback,
     failedTasks: response.data.failedTasks,
   }

@@ -25,7 +25,7 @@ type CreateRecruitmentRequestInput = {
 type UpdateRecruitmentRequestInput = Partial<CreateRecruitmentRequestInput>
 type CreateJobInput = { title: string; departmentId: string; hiringManagerId?: string; recruitmentRequestId: string; headcount: number; employmentType: string; workMode: string; location?: string }
 type UpdateJobInput = Partial<Omit<CreateJobInput, 'recruitmentRequestId'>>
-type CreateJobSpecInput = { title: string; summary: string; responsibilities: string[]; requirements: Array<{ label: string; description: string; required: boolean; weight?: number }>; skills: string[] }
+type CreateJobSpecInput = { title: string; summary: string; responsibilities: string[]; requirements: Array<{ label: string; description: string; required: boolean; weight?: number }>; skills: string[]; generatedBy?: 'ai' | 'local_fallback' | 'human' }
 type CreateCandidateInput = { fullName: string; email?: string; phone?: string; source?: string; tags?: string[] }
 type UpdateCandidateInput = Partial<Omit<CreateCandidateInput, 'fullName'>> & { fullName?: string; status?: CandidateRecord['status']; reason?: string }
 type CreateApplicationInput = { candidateId: string; jobId: string; source?: string }
@@ -33,6 +33,18 @@ type CreateResumeInput = { candidateId: string; applicationId?: string; original
 type CreateInterviewInput = { applicationId: string; round?: number; type?: InterviewType; title: string; scheduledStartAt?: string; scheduledEndAt?: string; timezone?: string; location?: string; meetingUrl?: string; participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean }> }
 type FeedbackInput = { interviewerId: string; overallScore?: number; recommendation?: InterviewFeedbackRecord['recommendation']; ratings?: Record<string, number>; strengths?: string[]; concerns?: string[]; notes?: string }
 type CreateOfferInput = { applicationId: string; positionTitle: string; departmentId: string; employmentType: string; startDate?: string; baseSalary: { amount: number; currency: string }; bonus?: { amount: number; currency: string }; equity?: string; benefits?: string[]; content: string; expiresAt?: string }
+type ExtractedCandidateProfile = { candidate?: { fullName?: string; email?: string; phone?: string } }
+type ReviewAnalysisResultInput = {
+  status: AnalysisResultRecord['humanReviewStatus']
+  comment?: string
+  reviewedBy?: string
+  edits?: {
+    score?: number
+    recommendation?: string
+    strengths?: string[]
+    risks?: string[]
+  }
+}
 export interface RecruitingReport { generatedAt: string; summary: Array<{ label: string; value: number; detail: string }>; funnel: Array<{ stage: string; count: number; conversionRate: number | null }>; statusStats: Array<{ entity: string; status: string; count: number }>; jobFilling: Array<{ jobId: string; code: string; title: string; headcount: number; filledCount: number; openCount: number; fillRate: number }>; channels: Array<{ channel: string; applications: number; screened: number; interviewed: number; offers: number; hired: number; conversionRate: number }>; recruitmentCycle: { averageDaysToHire: number | null; medianDaysToHire: number | null; hiredCount: number }; feedbackCompletion: { expected: number; locked: number; completionRate: number | null }; offerAcceptance: { sent: number; accepted: number; acceptanceRate: number | null } }
 export interface DashboardSummary {
   generatedAt: string
@@ -78,6 +90,87 @@ function normalizeTags(value: unknown): string[] | undefined {
   return result.length ? result : undefined
 }
 
+const PLACEHOLDER_CANDIDATE_NAMES = new Set(['待解析候选人', '待解析', '未命名候选人'])
+
+function extractedCandidatePatch(candidate: CandidateRecord, extraction: ExtractedCandidateProfile | undefined): { fullName?: string; email?: string; phone?: string } {
+  const draft = extraction?.candidate
+  if (!draft) return {}
+  const patch: { fullName?: string; email?: string; phone?: string } = {}
+  const email = clean(draft.email)
+  const phone = clean(draft.phone)
+  const fullName = clean(draft.fullName)
+  if (email) patch.email = email
+  if (phone) patch.phone = phone
+  if (fullName && PLACEHOLDER_CANDIDATE_NAMES.has(clean(candidate.fullName))) patch.fullName = fullName
+  return patch
+}
+
+function normalizedStringList(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new RecruitingWorkflowError('VALIDATION_ERROR', `${field} 必须是字符串数组`, 400)
+  return [...new Set(value.map((item) => clean(item)).filter(Boolean))]
+}
+
+function applyAnalysisEdits(report: Record<string, unknown>, input: ReviewAnalysisResultInput, actorId: string): void {
+  const analysis = report.analysis && typeof report.analysis === 'object' ? report.analysis as Record<string, unknown> : undefined
+  const nestedReport = analysis?.report && typeof analysis.report === 'object' ? analysis.report as Record<string, unknown> : undefined
+  const target = nestedReport ?? report
+  const assessment = target.assessment && typeof target.assessment === 'object'
+    ? target.assessment as Record<string, unknown>
+    : {}
+  const humanReview = target.humanReview && typeof target.humanReview === 'object'
+    ? target.humanReview as Record<string, unknown>
+    : {}
+  const edits = input.edits ?? {}
+  const before = {
+    score: assessment.score,
+    recommendation: assessment.recommendation,
+    strengths: Array.isArray(assessment.strengths) ? assessment.strengths.map((item) => clean(item)).filter(Boolean) : [],
+    risks: Array.isArray(assessment.risks) ? assessment.risks.map((item) => clean(item)).filter(Boolean) : [],
+  }
+
+  if (edits.score !== undefined) {
+    const score = Number(edits.score)
+    if (!Number.isFinite(score) || score < 0 || score > 100) {
+      throw new RecruitingWorkflowError('VALIDATION_ERROR', '综合评分必须在 0-100 之间', 400)
+    }
+    assessment.score = Math.round(score * 100) / 100
+  }
+  if (edits.recommendation !== undefined) assessment.recommendation = clean(edits.recommendation)
+  const strengths = normalizedStringList(edits.strengths, 'strengths')
+  const risks = normalizedStringList(edits.risks, 'risks')
+  if (strengths !== undefined) assessment.strengths = strengths
+  if (risks !== undefined) assessment.risks = risks
+
+  const after = {
+    score: assessment.score,
+    recommendation: assessment.recommendation,
+    strengths: Array.isArray(assessment.strengths) ? assessment.strengths.map((item) => clean(item)).filter(Boolean) : [],
+    risks: Array.isArray(assessment.risks) ? assessment.risks.map((item) => clean(item)).filter(Boolean) : [],
+  }
+  const history = Array.isArray(humanReview.history) ? humanReview.history : []
+  const editedAt = new Date().toISOString()
+  target.assessment = assessment
+  target.humanReview = {
+    ...humanReview,
+    status: input.status,
+    ...(input.comment ? { comment: clean(input.comment) } : {}),
+    reviewedBy: clean(input.reviewedBy) || actorId,
+    reviewedAt: editedAt,
+    history: [
+      ...history,
+      {
+        action: 'edited',
+        editedBy: clean(input.reviewedBy) || actorId,
+        editedAt,
+        ...(input.comment ? { comment: clean(input.comment) } : {}),
+        before,
+        after,
+      },
+    ],
+  }
+}
+
 
 function positiveInteger(value: unknown, field: string): number {
   const result = Number(value)
@@ -88,6 +181,7 @@ function positiveInteger(value: unknown, field: string): number {
 /** 把仓储层的说明书版本（job_spec_versions 行）还原成领域 spec 对象，供 getJob 详情回填。 */
 function specFromDbVersion(item: RepositoryJobSpecVersion): JobSpecRecord {
   const content = item.content && typeof item.content === 'object' ? item.content as Record<string, unknown> : {}
+  const generatedBy = content.generatedBy === 'ai' || content.generatedBy === 'local_fallback' || content.generatedBy === 'human' ? content.generatedBy : undefined
   const requirements = Array.isArray(content.requirements) ? content.requirements.map((entry) => {
     const row = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {}
     return { label: String(row.label ?? ''), description: String(row.description ?? ''), required: row.required !== false, ...(typeof row.weight === 'number' ? { weight: row.weight } : {}) }
@@ -99,6 +193,7 @@ function specFromDbVersion(item: RepositoryJobSpecVersion): JobSpecRecord {
     responsibilities: Array.isArray(content.responsibilities) ? content.responsibilities.map(String) : [],
     requirements,
     skills: Array.isArray(content.skills) ? content.skills.map(String) : [],
+    ...(generatedBy ? { generatedBy } : {}),
     confirmed: item.confirmedAt != null,
     ...(item.confirmedAt ? { confirmedAt: item.confirmedAt } : {}),
   }
@@ -106,11 +201,12 @@ function specFromDbVersion(item: RepositoryJobSpecVersion): JobSpecRecord {
 
 /** 把仓储层的 JD 版本（job_description_versions 行）还原成领域 jd 对象。JD 语言未落库，默认中文。 */
 function jdFromDbVersion(item: RepositoryJobDescriptionVersion): JobDescriptionRecord {
+  const generatedBy = item.status === 'ai_assisted' || item.status === 'local_fallback' ? item.status : 'human'
   return {
     version: item.version,
     language: 'zh-CN',
     content: item.content,
-    generatedBy: item.status === 'ai_assisted' ? 'ai_assisted' : 'human',
+    generatedBy,
     confirmed: item.confirmedAt != null,
     ...(item.confirmedAt ? { confirmedAt: item.confirmedAt } : {}),
   }
@@ -224,6 +320,19 @@ function mapRepositoryAnalysisResult(item: RepositoryAnalysisResult): AnalysisRe
   return { id: item.id, analysisTaskId: item.analysisTaskId, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), result: item.result, analyzerVersion: item.analyzerVersion ?? 'unknown', inputHash: item.inputHash ?? '', humanReviewStatus: item.humanReviewStatus as AnalysisResultRecord['humanReviewStatus'], createdAt: item.createdAt }
 }
 
+function analysisReport(result: unknown): { assessment?: { score?: number }; extraction?: unknown } {
+  if (!result || typeof result !== 'object') return {}
+  const row = result as Record<string, unknown>
+  const nested = row.analysis && typeof row.analysis === 'object'
+    ? (row.analysis as Record<string, unknown>).report
+    : undefined
+  const report = nested && typeof nested === 'object' ? nested as Record<string, unknown> : row
+  return {
+    ...(report.assessment && typeof report.assessment === 'object' ? { assessment: report.assessment as { score?: number } } : {}),
+    ...(report.extraction && typeof report.extraction === 'object' ? { extraction: report.extraction } : {}),
+  }
+}
+
 function mapRepositoryJobForAnalysis(item: RepositoryJob): JobRecord {
   return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
 }
@@ -319,6 +428,24 @@ export class RecruitingService {
       this.repository = undefined
     } else {
       this.repository = createNormalizedRecruitingRepository()
+    }
+  }
+
+  /** 对象存储（MinIO）写失败时给出可诊断的提示，避免只抛出底层网络错误。 */
+  private async putResumeObject(key: string, body: Uint8Array, contentType: string): Promise<void> {
+    try {
+      await this.objectStorage.put(key, body, contentType)
+    } catch (error) {
+      throw new RecruitingWorkflowError('OBJECT_STORAGE_UNAVAILABLE', `简历存储不可用：无法写入对象存储（MinIO），请确认本地 MinIO 已启动。原始错误：${error instanceof Error ? error.message : '未知错误'}`, 503)
+    }
+  }
+
+  /** 对象存储（MinIO）读失败时同样给出可诊断的提示，便于在分析任务里定位。 */
+  private async getResumeObject(key: string): Promise<Buffer> {
+    try {
+      return await this.objectStorage.get(key)
+    } catch (error) {
+      throw new RecruitingWorkflowError('OBJECT_STORAGE_UNAVAILABLE', `简历存储不可用：无法读取对象存储（MinIO），请确认本地 MinIO 已启动。原始错误：${error instanceof Error ? error.message : '未知错误'}`, 503)
     }
   }
 
@@ -425,7 +552,7 @@ export class RecruitingService {
   }
 
   private mapRepositoryRequest(item: import('./repositories/types.js').RecruitmentRequestRecord): RecruitmentRequestRecord {
-    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId ?? '', department: item.departmentName ?? item.departmentId ?? '', requesterId: item.requestedById ?? '', ...(item.hiringManagerId ? { hiringManagerId: item.hiringManagerId } : {}), headcount: item.headcount, employmentType: item.employmentType ?? 'full_time', workMode: item.workMode ?? 'onsite', ...(item.location ? { location: item.location } : {}), ...(item.budgetMin === null && item.budgetMax === null ? {} : { salaryRange: { ...(item.budgetMin === null ? {} : { min: { amount: item.budgetMin, currency: 'CNY' } }), ...(item.budgetMax === null ? {} : { max: { amount: item.budgetMax, currency: 'CNY' } }) } }), justification: item.reason, status: item.status as RecruitmentRequestRecord['status'], approval: { status: item.status === 'approved' ? 'approved' : item.status === 'rejected' ? 'rejected' : 'pending', approver: '' }, convertedJobIds: [], version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId ?? '', department: item.departmentName ?? item.departmentId ?? '', requesterId: item.requestedById ?? '', ...(item.requesterName ? { requesterName: item.requesterName } : {}), ...(item.requesterEmail ? { requesterEmail: item.requesterEmail } : {}), ...(item.hiringManagerId ? { hiringManagerId: item.hiringManagerId } : {}), headcount: item.headcount, employmentType: item.employmentType ?? 'full_time', workMode: item.workMode ?? 'onsite', ...(item.location ? { location: item.location } : {}), ...(item.budgetMin === null && item.budgetMax === null ? {} : { salaryRange: { ...(item.budgetMin === null ? {} : { min: { amount: item.budgetMin, currency: 'CNY' } }), ...(item.budgetMax === null ? {} : { max: { amount: item.budgetMax, currency: 'CNY' } }) } }), justification: item.reason, status: item.status as RecruitmentRequestRecord['status'], approval: { status: item.status === 'approved' ? 'approved' : item.status === 'rejected' ? 'rejected' : 'pending', approver: '' }, convertedJobIds: [], version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   private mapRepositoryJob(item: import('./repositories/types.js').JobRecord): JobRecord {
@@ -590,7 +717,24 @@ export class RecruitingService {
   async listJobs(status?: string, recruitmentRequestId?: string, departmentId?: string): Promise<JobRecord[]> {
     if (this.repository) {
       const rows = await this.repository.listJobs(status, recruitmentRequestId)
-      return rows.filter((item) => !departmentId || item.departmentId === departmentId).map((item) => this.mapRepositoryJob(item))
+      const scoped = rows.filter((item) => !departmentId || item.departmentId === departmentId)
+      if (!scoped.length) return []
+      const [specRows, jdRows] = await Promise.all([
+        this.repository.listJobSpecVersions(),
+        this.repository.listJobDescriptionVersions(),
+      ])
+      const latestSpecs = new Map<string, JobSpecRecord>()
+      const latestJds = new Map<string, JobDescriptionRecord>()
+      for (const row of specRows) if (!latestSpecs.has(row.jobId)) latestSpecs.set(row.jobId, specFromDbVersion(row))
+      for (const row of jdRows) if (!latestJds.has(row.jobId)) latestJds.set(row.jobId, jdFromDbVersion(row))
+      return scoped.map((item) => {
+        const mapped = this.mapRepositoryJob(item)
+        const spec = latestSpecs.get(item.id)
+        const jd = latestJds.get(item.id)
+        if (spec) mapped.spec = spec
+        if (jd) mapped.jd = jd
+        return mapped
+      })
     }
     const state = await this.store.read()
     return state.jobs.filter((item) => (!status || item.status === status) && (!recruitmentRequestId || item.recruitmentRequestId === recruitmentRequestId) && (!departmentId || item.departmentId === departmentId))
@@ -664,16 +808,16 @@ export class RecruitingService {
       const jobRow = await this.repository.getJob(id)
       const versions = await this.repository.listJobSpecVersions(jobRow.id)
       const version = (versions[0]?.version ?? 0) + 1
-      const spec: JobSpecRecord = { version, title: required(input.title, '说明书标题'), summary: required(input.summary, '岗位摘要'), responsibilities: input.responsibilities ?? [], requirements: input.requirements ?? [], skills: input.skills ?? [], confirmed: false }
+      const spec: JobSpecRecord = { version, title: required(input.title, '说明书标题'), summary: required(input.summary, '岗位摘要'), responsibilities: input.responsibilities ?? [], requirements: input.requirements ?? [], skills: input.skills ?? [], ...(input.generatedBy ? { generatedBy: input.generatedBy } : {}), confirmed: false }
       await this.repository.createJobSpecVersion({ jobId: jobRow.id, version, content: spec as unknown as Record<string, unknown>, createdById: actorId })
       await this.repository.appendWorkflowEvent({ subjectType: 'job', subjectId: jobRow.id, action: 'spec_created', actorId })
-      return { ...this.mapRepositoryJob(jobRow), spec }
+      return this.getJob(jobRow.id)
     }
     return this.store.transaction((state) => {
       const job = jobOrThrow(state, id)
       const createdAt = LocalRecruitingStore.timestamp()
       if (job.spec) state.jobSpecVersions.push({ ...job.spec, jobId: job.id, createdAt, actorId })
-      job.spec = { version: (job.spec?.version ?? 0) + 1, title: required(input.title, '说明书标题'), summary: required(input.summary, '岗位摘要'), responsibilities: input.responsibilities ?? [], requirements: input.requirements ?? [], skills: input.skills ?? [], confirmed: false }
+      job.spec = { version: (job.spec?.version ?? 0) + 1, title: required(input.title, '说明书标题'), summary: required(input.summary, '岗位摘要'), responsibilities: input.responsibilities ?? [], requirements: input.requirements ?? [], skills: input.skills ?? [], ...(input.generatedBy ? { generatedBy: input.generatedBy } : {}), confirmed: false }
       state.jobSpecVersions.push({ ...job.spec, jobId: job.id, createdAt, actorId })
       job.version += 1; job.updatedAt = createdAt
       addEvent(state, { subjectType: 'job', subjectId: job.id, action: 'spec_created', actorId })
@@ -681,15 +825,14 @@ export class RecruitingService {
     })
   }
 
-  async createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' }, actorId = 'user-demo'): Promise<JobRecord> {
+  async createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' | 'local_fallback' }, actorId = 'user-demo'): Promise<JobRecord> {
     if (this.repository) {
       const jobRow = await this.repository.getJob(id)
       const versions = await this.repository.listJobDescriptionVersions(jobRow.id)
       const version = (versions[0]?.version ?? 0) + 1
-      const created = await this.repository.createJobDescriptionVersion({ jobId: jobRow.id, version, title: jobRow.title, content: required(input.content, 'JD 内容'), status: input.generatedBy === 'ai_assisted' ? 'ai_assisted' : 'draft', createdById: actorId })
+      await this.repository.createJobDescriptionVersion({ jobId: jobRow.id, version, title: jobRow.title, content: required(input.content, 'JD 内容'), status: input.generatedBy ?? 'human', createdById: actorId })
       await this.repository.appendWorkflowEvent({ subjectType: 'job', subjectId: jobRow.id, action: 'jd_created', actorId })
-      const jd: JobDescriptionRecord = { version: created.version, language: required(input.language, '语言'), content: created.content, generatedBy: input.generatedBy ?? 'human', confirmed: false }
-      return { ...this.mapRepositoryJob(jobRow), jd }
+      return this.getJob(jobRow.id)
     }
     return this.store.transaction((state) => {
       const job = jobOrThrow(state, id)
@@ -738,31 +881,51 @@ export class RecruitingService {
     })
   }
 
-  async listCandidates(departmentId?: string): Promise<Array<CandidateRecord & { applications: ApplicationRecord[] }>> {
+  async listCandidates(departmentId?: string): Promise<Array<CandidateRecord & { applications: ApplicationRecord[]; aiStatus: 'completed' | 'pending'; score?: number }>> {
     const jobIds = departmentId ? await this.jobIdsInDepartment(departmentId) : undefined
     if (this.repository) {
-      const candidates = await this.repository.listCandidates()
-      const applications = await this.repository.listApplications()
-      const results = await this.repository.listAnalysisResults()
+      const [candidates, applications, results, resumes] = await Promise.all([
+        this.repository.listCandidates(),
+        this.repository.listApplications(),
+        this.repository.listAnalysisResults(),
+        this.repository.listResumes(),
+      ])
       const resultByApplication = new Map(results.filter((r) => r.applicationId).map((r) => [r.applicationId!, r]))
+      const applicationCandidate = new Map(applications.map((app) => [app.id, app.candidateId]))
+      const resumeCandidate = new Map(resumes.map((resume) => [resume.id, resume.candidateId]))
+      // Results are ordered newest-first, so the first hit per candidate is the latest analysis.
+      const latestResultByCandidate = new Map<string, (typeof results)[number]>()
+      for (const result of results) {
+        const candidateId = result.applicationId ? applicationCandidate.get(result.applicationId) : resumeCandidate.get(result.resumeId)
+        if (candidateId && !latestResultByCandidate.has(candidateId)) latestResultByCandidate.set(candidateId, result)
+      }
       const rows = candidates.map((item) => {
         const candidateApplications = applications.filter((app) => app.candidateId === item.id).map((app) => {
           const result = resultByApplication.get(app.id)
-          const score = (result?.result as any)?.assessment?.score
+          const score = analysisReport(result?.result).assessment?.score
           return { id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(app.source ? { source: app.source } : {}), ...(typeof score === 'number' ? { score } : {}), aiStatus: result ? 'completed' : 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt }
         })
-        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, applications: candidateApplications as ApplicationRecord[] }
+        const latestResult = latestResultByCandidate.get(item.id)
+        const latestScore = analysisReport(latestResult?.result).assessment?.score
+        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, aiStatus: (latestResult ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof latestScore === 'number' ? { score: latestScore } : {}), applications: candidateApplications as ApplicationRecord[] }
       })
       return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
     }
 
     const state = await this.store.read()
     const scoped = departmentId ? filterStateByDepartment(state, departmentId) : state
-    const rows = scoped.candidates.map((candidate) => ({ ...candidate, applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }))
+    const rows = scoped.candidates.map((candidate) => {
+      const resumeIds = new Set(scoped.resumes.filter((resume) => resume.candidateId === candidate.id).map((resume) => resume.id))
+      const applicationIds = new Set(scoped.applications.filter((application) => application.candidateId === candidate.id).map((application) => application.id))
+      const latest = scoped.analysisResults.filter((result) => resumeIds.has(result.resumeId) || (result.applicationId ? applicationIds.has(result.applicationId) : false)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
+      const score = analysisReport(latest?.result).assessment?.score
+      return { ...candidate, aiStatus: (latest ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof score === 'number' ? { score } : {}), applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }
+    })
     return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
   }
 
   async listCandidateTags(): Promise<string[]> {
+    if (this.repository) return []
     const state = await this.stateView()
     return [...(state.candidateTags ?? [])]
   }
@@ -777,7 +940,7 @@ export class RecruitingService {
       const analysisResults = allResults.filter((r) => resumeIds.has(r.resumeId) || (r.applicationId ? appIds.has(r.applicationId) : false)).map(mapRepositoryAnalysisResult)
       const resultByApplication = new Map(analysisResults.filter((r) => r.applicationId).map((r) => [r.applicationId!, r]))
       const jobs = allJobs.filter((j) => new Set(applications.map((a) => a.jobId)).has(j.id)).map((j) => ({ id: j.id, code: j.businessId, title: j.title }))
-      return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.map((app) => { const score = (resultByApplication.get(app.id)?.result as any)?.assessment?.score; return { id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(typeof score === 'number' ? { score } : {}), aiStatus: (resultByApplication.has(app.id) ? 'completed' : 'pending') as ApplicationRecord['aiStatus'], appliedAt: app.appliedAt, updatedAt: app.updatedAt } }), resumes: resumes.map((r) => ({ id: r.id, candidateId: r.candidateId, ...(r.applicationId ? { applicationId: r.applicationId } : {}), storageKey: r.storageKey, originalFilename: r.originalFilename, mimeType: r.mimeType, sizeBytes: r.sizeBytes, contentHash: r.contentHash ?? '', scanStatus: r.scanStatus as ResumeRecord['scanStatus'], createdAt: r.createdAt })), analysisTasks, analysisResults, jobs }
+      return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, applications: applications.map((app) => { const score = analysisReport(resultByApplication.get(app.id)?.result).assessment?.score; return { id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(typeof score === 'number' ? { score } : {}), aiStatus: (resultByApplication.has(app.id) ? 'completed' : 'pending') as ApplicationRecord['aiStatus'], appliedAt: app.appliedAt, updatedAt: app.updatedAt } }), resumes: resumes.map((r) => ({ id: r.id, candidateId: r.candidateId, ...(r.applicationId ? { applicationId: r.applicationId } : {}), storageKey: r.storageKey, originalFilename: r.originalFilename, mimeType: r.mimeType, sizeBytes: r.sizeBytes, contentHash: r.contentHash ?? '', scanStatus: r.scanStatus as ResumeRecord['scanStatus'], createdAt: r.createdAt })), analysisTasks, analysisResults, jobs }
     }
     const state = await this.store.read()
     const candidate = candidateOrThrow(state, id)
@@ -875,6 +1038,58 @@ export class RecruitingService {
     const feedback = state.interviewFeedback.filter((x) => x.interviewId === id).map((item) => ({ ...item }))
     const feedbackStatus = feedback.length && feedback.every((x) => x.status === 'locked') ? 'locked' : feedback.length ? feedback[0]!.status : 'pending'
     return { ...interview, application: applicationOrThrow(state, interview.applicationId), feedbackStatus, feedback }
+  }
+
+  async getInterviewQuestionContext(id: string): Promise<{
+    jobTitle: string
+    jobRequirements: string[]
+    anonymizedResume: string
+    analysisSummary: string[]
+    questionCount: number
+  }> {
+    const interview = await this.getInterview(id)
+    const [candidate, job] = await Promise.all([
+      this.getCandidate(interview.application.candidateId),
+      this.getJob(interview.application.jobId),
+    ])
+    const latest = [...candidate.analysisResults].sort((a, b) => a.createdAt < b.createdAt ? 1 : -1)[0]
+    const report = latest?.result as {
+      extraction?: {
+        profile?: { headline?: string; summary?: string; totalExperienceYears?: number }
+        experience?: Array<{ employer?: string; title?: string; description?: string; evidence?: string }>
+        education?: Array<{ institution?: string; degree?: string; fieldOfStudy?: string; evidence?: string }>
+        skills?: Array<{ value?: string; canonical?: string }>
+      }
+      assessment?: {
+        strengths?: string[]
+        risks?: string[]
+        matchedRequirements?: Array<{ label?: string; rationale?: string }>
+      }
+    } | undefined
+    const extraction = report?.extraction
+    const resumeLines = [
+      extraction?.profile?.summary,
+      extraction?.profile?.headline,
+      ...(extraction?.experience ?? []).map((item) => [item.employer, item.title, item.description, item.evidence].filter(Boolean).join(' · ')),
+      ...(extraction?.education ?? []).map((item) => [item.institution, item.degree, item.fieldOfStudy, item.evidence].filter(Boolean).join(' · ')),
+      (extraction?.skills ?? []).map((item) => item.value || item.canonical).filter(Boolean).join('、'),
+    ].map((item) => clean(item)).filter(Boolean)
+    const requirements = [
+      ...(job.spec?.requirements ?? []).map((item) => clean(item.label)),
+      ...(job.spec?.skills ?? []).map((item) => clean(item)),
+    ].filter(Boolean)
+    const analysisSummary = [
+      ...(report?.assessment?.strengths ?? []),
+      ...(report?.assessment?.risks ?? []),
+      ...(report?.assessment?.matchedRequirements ?? []).map((item) => item.rationale || item.label || ''),
+    ].map((item) => clean(item)).filter(Boolean)
+    return {
+      jobTitle: job.title,
+      jobRequirements: requirements.length ? requirements : [`具备 ${job.title} 相关经验`],
+      anonymizedResume: resumeLines.join('\n') || candidate.fullName,
+      analysisSummary,
+      questionCount: 5,
+    }
   }
 
   async createInterview(input: CreateInterviewInput, actorId = 'user-demo'): Promise<InterviewRecord> {
@@ -1043,7 +1258,7 @@ export class RecruitingService {
         if (application.candidateId !== candidateId) throw new RecruitingWorkflowError('RESUME_CANDIDATE_MISMATCH', '简历与申请的候选人不一致')
       }
       const id = randomUUID(); const hash = validatedUpload.contentHash; const storageKey = `${id}.${validatedUpload.extension}`
-      await this.objectStorage.put(storageKey, payload, mimeType)
+      await this.putResumeObject(storageKey, payload, mimeType)
       let saved: Awaited<ReturnType<NormalizedRecruitingRepository['createResume']>>
       let queued: Awaited<ReturnType<NormalizedRecruitingRepository['createAnalysisTask']>>
       try {
@@ -1057,7 +1272,7 @@ export class RecruitingService {
     }
     const localId = randomUUID()
     const localStorageKey = `${localId}.${validatedUpload.extension}`
-    await this.objectStorage.put(localStorageKey, payload, mimeType)
+    await this.putResumeObject(localStorageKey, payload, mimeType)
     try { return await this.store.transaction(async (state) => {
       const candidate = candidateOrThrow(state, candidateId)
       let application: ApplicationRecord | undefined
@@ -1119,21 +1334,38 @@ export class RecruitingService {
     return result
   }
 
-  async reviewAnalysisResult(id: string, input: { status: AnalysisResultRecord['humanReviewStatus']; comment?: string; reviewedBy?: string }, actorId = 'user-demo'): Promise<AnalysisResultRecord> {
+  async reviewAnalysisResult(id: string, input: ReviewAnalysisResultInput, actorId = 'user-demo'): Promise<AnalysisResultRecord> {
     if (this.repository) {
       if (!['accepted', 'needs_correction'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '复核状态必须是 accepted 或 needs_correction', 400)
       const current = await this.repository.getAnalysisResult(id)
-      const report = current.result as { humanReview?: Record<string, unknown> }
-      report.humanReview = { ...(report.humanReview ?? {}), status: input.status, ...(input.comment ? { comment: clean(input.comment) } : {}), reviewedBy: clean(input.reviewedBy) || actorId, reviewedAt: new Date().toISOString() }
-      return mapRepositoryAnalysisResult(await this.repository.reviewAnalysisResult(id, input.status, current.result))
+      applyAnalysisEdits(current.result, input, actorId)
+      const saved = await this.repository.reviewAnalysisResult(id, input.status, current.result)
+      const resume = await this.repository.getResume(current.resumeId)
+      await this.repository.appendWorkflowEvent({
+        subjectType: 'candidate',
+        subjectId: resume.candidateId,
+        action: 'analysis_result_edited',
+        actorId,
+        ...(input.comment ? { reason: clean(input.comment) } : {}),
+      })
+      return mapRepositoryAnalysisResult(saved)
     }
     return this.store.transaction((state) => {
       const result = state.analysisResults.find((item) => item.id === id)
       if (!result) throw new RecruitingNotFoundError(`未找到分析结果：${id}`)
       if (!['accepted', 'needs_correction'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '复核状态必须是 accepted 或 needs_correction', 400)
+      applyAnalysisEdits(result.result, input, actorId)
       result.humanReviewStatus = input.status
-      const report = result.result as { humanReview?: Record<string, unknown> }
-      report.humanReview = { ...(report.humanReview ?? {}), status: input.status, ...(input.comment ? { comment: clean(input.comment) } : {}), reviewedBy: clean(input.reviewedBy) || actorId, reviewedAt: LocalRecruitingStore.timestamp() }
+      const resume = state.resumes.find((item) => item.id === result.resumeId)
+      if (resume) {
+        addEvent(state, {
+          subjectType: 'candidate',
+          subjectId: resume.candidateId,
+          action: 'analysis_result_edited',
+          actorId,
+          ...(input.comment ? { reason: clean(input.comment) } : {}),
+        })
+      }
       return result
     })
   }
@@ -1151,9 +1383,28 @@ export class RecruitingService {
       try {
         const application = processing.applicationId ? await this.repository.getApplication(processing.applicationId) : undefined
         const job = application ? await this.repository.getJob(application.jobId) : undefined
-        const resumeBytes = await this.objectStorage.get(resume.storageKey)
+        const resumeBytes = await this.getResumeObject(resume.storageKey)
         const content = await extractResumeText(resumeBytes, resume.originalFilename, resume.mimeType)
         const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: resume.originalFilename, mimeType: resume.mimeType, text: content, source: 'upload' }, job: buildJobRequirements(job ? mapRepositoryJobForAnalysis(job) : undefined, job?.id) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), ...(job ? { jobId: job.id } : {}) } })
+        const currentCandidate = await this.repository.getCandidate(resume.candidateId)
+        const candidatePatch = extractedCandidatePatch({
+          id: currentCandidate.id,
+          code: currentCandidate.businessId,
+          fullName: currentCandidate.name,
+          ...(currentCandidate.email ? { email: currentCandidate.email } : {}),
+          ...(currentCandidate.phone ? { phone: currentCandidate.phone } : {}),
+          status: 'active',
+          createdAt: currentCandidate.createdAt,
+          updatedAt: currentCandidate.updatedAt,
+        }, report.extraction as ExtractedCandidateProfile)
+        if (Object.keys(candidatePatch).length) {
+          await this.repository.updateCandidate(currentCandidate.id, {
+            ...(candidatePatch.fullName ? { name: candidatePatch.fullName } : {}),
+            ...(candidatePatch.email ? { email: candidatePatch.email } : {}),
+            ...(candidatePatch.phone ? { phone: candidatePatch.phone } : {}),
+          })
+          await this.repository.appendWorkflowEvent({ subjectType: 'candidate', subjectId: currentCandidate.id, action: 'profile_parsed' })
+        }
         await this.repository.createAnalysisResult({ analysisTaskId: processing.id, resumeId: resume.id, ...(processing.applicationId ? { applicationId: processing.applicationId } : {}), result: report as unknown as Record<string, unknown>, analyzerVersion: 'resume-intelligence-rule-based-0.1.0', inputHash: resume.contentHash })
         return mapRepositoryAnalysisTask(await this.repository.updateAnalysisTask(taskId, { status: 'completed', completedAt: new Date().toISOString(), lastError: null }))
       } catch (error) {
@@ -1170,9 +1421,18 @@ export class RecruitingService {
       const job = application ? jobOrThrow(state, application.jobId) : undefined
       task.status = 'processing'; task.attempts += 1; task.startedAt = LocalRecruitingStore.timestamp(); delete task.lastError
       try {
-        const resumeBytes = await this.objectStorage.get(resume.storageKey)
+        const resumeBytes = await this.getResumeObject(resume.storageKey)
         const content = await extractResumeText(resumeBytes, resume.originalFilename, resume.mimeType)
         const report = buildRuleBasedReport({ resume: { documentId: resume.id, fileName: resume.originalFilename, mimeType: resume.mimeType, text: content, source: 'upload' }, job: buildJobRequirements(job, job?.id) as Parameters<typeof buildRuleBasedReport>[0]['job'], subject: { resumeId: resume.id, ...(task.applicationId ? { applicationId: task.applicationId } : {}), ...(job ? { jobId: job.id } : {}) } })
+        const candidate = candidateOrThrow(state, resume.candidateId)
+        const candidatePatch = extractedCandidatePatch(candidate, report.extraction as ExtractedCandidateProfile)
+        if (Object.keys(candidatePatch).length) {
+          if (candidatePatch.fullName) candidate.fullName = candidatePatch.fullName
+          if (candidatePatch.email) candidate.email = candidatePatch.email
+          if (candidatePatch.phone) candidate.phone = candidatePatch.phone
+          candidate.updatedAt = LocalRecruitingStore.timestamp()
+          addEvent(state, { subjectType: 'candidate', subjectId: candidate.id, action: 'profile_parsed', actorId: 'resume-analysis' })
+        }
         const result: AnalysisResultRecord = { id: randomUUID(), analysisTaskId: task.id, resumeId: resume.id, ...(task.applicationId ? { applicationId: task.applicationId } : {}), result: report as unknown as Record<string, unknown>, analyzerVersion: 'resume-intelligence-rule-based-0.1.0', inputHash: resume.contentHash, humanReviewStatus: 'pending', createdAt: LocalRecruitingStore.timestamp() }
         state.analysisResults = state.analysisResults.filter((item) => item.analysisTaskId !== task.id)
         state.analysisResults.push(result)
@@ -1259,6 +1519,8 @@ export class RecruitingService {
       const from = offer.status
       const timestamp = LocalRecruitingStore.timestamp()
       if (action === 'archive_onboarding') {
+        const existing = await this.repository.getOnboardingByOfferId(offer.id)
+        if (existing) return this.mapRepositoryOnboarding(existing)
         if (from !== 'accepted') throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态 ${from} 不允许执行 ${action}`)
         const record = await this.repository.createOnboarding({ applicationId: offer.applicationId, offerId: offer.id, status: 'pending' })
         await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: record.id, action, fromStatus: 'accepted', toStatus: 'pending', actorId })
@@ -1280,7 +1542,7 @@ export class RecruitingService {
       await this.repository.appendWorkflowEvent({ subjectType: 'offer', subjectId: offer.id, action, fromStatus: from, toStatus: updated.status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
       return this.mapRepositoryOffer(updated)
     }
-    return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);const t=LocalRecruitingStore.timestamp();const from=o.status;const next:Record<string,string>={submit_approval:'pending_approval',approve:'approved',send:'sent',accept:'accepted',decline:'declined',cancel:'cancelled',reject:'draft',expire:'expired'};if(action==='archive_onboarding'){if(from!=='accepted')throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);const r:OnboardingRecord={id:randomUUID(),applicationId:o.applicationId,offerId:o.id,status:'pending',createdAt:t,updatedAt:t};state.onboarding.push(r);addEvent(state,{subjectType:'onboarding',subjectId:r.id,action,fromStatus:'accepted',toStatus:'pending',actorId});return r}const allowed:Record<string,string[]>={submit_approval:['draft'],reject:['pending_approval'],approve:['pending_approval'],send:['approved'],accept:['sent'],decline:['sent'],expire:['sent'],cancel:['draft','pending_approval','approved','sent']};if(!allowed[action]||!allowed[action]!.includes(from))throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);if(['decline','cancel','reject'].includes(action))required(reason,'原因');o.status=next[action] as OfferRecord['status'];if(action==='submit_approval')o.approval={status:'pending',approver:'待审批'};else if(action==='approve')o.approval={status:'approved',approver:'当前审批人',actedAt:t};else if(action==='reject')o.approval={status:'rejected',approver:'当前审批人',comment:clean(reason),actedAt:t};else if(action==='cancel')o.approval.status='cancelled';if(action==='accept'||action==='decline')o.respondedAt=t;if(action==='expire')o.expiresAt=o.expiresAt??t;o.version++;o.updatedAt=t;addEvent(state,{subjectType:'offer',subjectId:o.id,action,fromStatus:from,toStatus:o.status,actorId,...(reason?{reason:clean(reason)}:{})});return o})}
+    return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);const t=LocalRecruitingStore.timestamp();const from=o.status;const next:Record<string,string>={submit_approval:'pending_approval',approve:'approved',send:'sent',accept:'accepted',decline:'declined',cancel:'cancelled',reject:'draft',expire:'expired'};if(action==='archive_onboarding'){const existing=state.onboarding.find(x=>x.offerId===o.id);if(existing)return existing;if(from!=='accepted')throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);const r:OnboardingRecord={id:randomUUID(),applicationId:o.applicationId,offerId:o.id,status:'pending',createdAt:t,updatedAt:t};state.onboarding.push(r);addEvent(state,{subjectType:'onboarding',subjectId:r.id,action,fromStatus:'accepted',toStatus:'pending',actorId});return r}const allowed:Record<string,string[]>={submit_approval:['draft'],reject:['pending_approval'],approve:['pending_approval'],send:['approved'],accept:['sent'],decline:['sent'],expire:['sent'],cancel:['draft','pending_approval','approved','sent']};if(!allowed[action]||!allowed[action]!.includes(from))throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);if(['decline','cancel','reject'].includes(action))required(reason,'原因');o.status=next[action] as OfferRecord['status'];if(action==='submit_approval')o.approval={status:'pending',approver:'待审批'};else if(action==='approve')o.approval={status:'approved',approver:'当前审批人',actedAt:t};else if(action==='reject')o.approval={status:'rejected',approver:'当前审批人',comment:clean(reason),actedAt:t};else if(action==='cancel')o.approval.status='cancelled';if(action==='accept'||action==='decline')o.respondedAt=t;if(action==='expire')o.expiresAt=o.expiresAt??t;o.version++;o.updatedAt=t;addEvent(state,{subjectType:'offer',subjectId:o.id,action,fromStatus:from,toStatus:o.status,actorId,...(reason?{reason:clean(reason)}:{})});return o})}
   async listWorkflowEvents(filter?: { subjectType?: WorkflowEventRecord['subjectType']; limit?: number }): Promise<Array<WorkflowEventRecord & { subjectLabel: string }>> {
     const state = await this.stateView()
     const limit = Math.max(1, Math.min(filter?.limit ?? 200, 500))

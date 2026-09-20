@@ -12,6 +12,9 @@ const task = createTask<'resume-analysis', import('../src/handlers/resume-analys
   payload: {
     resumeId: 'resume-1',
     applicationId: 'application-1',
+    jobId: 'job-1',
+    jobTitle: '后端工程师',
+    jobRequirements: ['TypeScript', 'PostgreSQL'],
     fileName: 'resume.txt',
     text: '张三 13800138000 zhang@example.com\n五年 TypeScript 开发经验',
     source: 'test',
@@ -37,6 +40,7 @@ void describe('OpenAI-compatible resume analyzer', () => {
         return Response.json({
           choices: [{ message: { content: JSON.stringify({
             summary: '具备相关开发经验，建议人工复核。',
+            score: 78,
             strengths: ['TypeScript 经验'],
             risks: ['岗位要求信息不足'],
             matchedRequirements: [],
@@ -54,7 +58,9 @@ void describe('OpenAI-compatible resume analyzer', () => {
     assert.equal(body.model, 'resume-model')
     assert.doesNotMatch(body.messages[1]!.content, /13800138000|zhang@example\.com|张三/u)
     assert.match(body.messages[1]!.content, /\[PHONE\]|\[EMAIL\]|\[NAME\]/u)
+    assert.match(body.messages[1]!.content, /TypeScript|PostgreSQL/u)
     assert.equal(result.analysis.engine, 'llm-suggestion')
+    assert.equal(result.analysis.report.assessment.score, 78)
     assert.deepEqual(result.analysis.report.assessment.strengths, ['TypeScript 经验'])
     assert.equal(result.analysis.report.assessment.confidence, 0.72)
     assert.equal(result.safety.applicationStatusMutation, 'none')

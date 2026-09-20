@@ -48,12 +48,6 @@ const expectedRoutes = [
     icon: '⑦',
   },
   {
-    path: '/reports',
-    title: '招聘数据看板',
-    navLabel: '招聘数据看板',
-    icon: '▦',
-  },
-  {
     path: '/administration',
     title: '系统配置',
     navLabel: '系统配置',
@@ -106,10 +100,10 @@ describe('application router', () => {
     const router = createAppRouter()
     installAuthGuard(router)
 
-    await router.push('/reports')
+    await router.push('/jobs')
 
     expect(router.currentRoute.value.name).toBe('login')
-    expect(router.currentRoute.value.query.redirect).toBe('/reports')
+    expect(router.currentRoute.value.query.redirect).toBe('/jobs')
   })
 
   it('shows a dedicated forbidden page when an authenticated user lacks access', async () => {

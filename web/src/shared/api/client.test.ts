@@ -40,6 +40,19 @@ function requestInit(fetcher: ReturnType<typeof vi.fn>): RequestInit {
 }
 
 describe('shared JSON API client', () => {
+  it('把空响应体的 5xx 判定为后端不可达，而不是笼统的请求失败', async () => {
+    const fetcher = makeFetchMock(new Response(null, { status: 500 }))
+    const client = createApiClient({ baseUrl: '/api/v1', fetcher })
+    await expect(client.getJson('/jobs')).rejects.toBeInstanceOf(ApiNetworkError)
+    await expect(client.getJson('/jobs')).rejects.toThrow(/无法连接后端服务/)
+  })
+
+  it('保留 API 自身返回的 5xx 错误信封文案', async () => {
+    const fetcher = makeFetchMock(jsonResponse({ ok: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } }, { status: 500 }))
+    const client = createApiClient({ baseUrl: '/api/v1', fetcher })
+    await expect(client.getJson('/jobs')).rejects.toThrow('服务器内部错误')
+  })
+
   it('uses /api/v1 by default and preserves request id from the response header', async () => {
     const fetcher = makeFetchMock(
       jsonResponse(

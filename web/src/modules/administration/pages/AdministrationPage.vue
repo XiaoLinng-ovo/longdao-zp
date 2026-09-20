@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AiSettings, type AiConnectionTestResult, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
+import { actionLabel, statusLabel } from '../../../shared/utils/labels'
 
 const rows = ref<AdminCheckRow[]>([])
 const events = ref<WorkflowEvent[]>([])
@@ -13,21 +14,21 @@ const error = ref('')
 const users = ref<AdminUser[]>([])
 const roles = ref<AdminRole[]>([])
 const departments = ref<AdminDepartment[]>([])
-const departmentDraft = ref({ code: '', name: '' })
+const departmentDraft = ref({ name: '' })
 const savingDepartment = ref<string | null>(null)
 const creatingDepartment = ref(false)
 // 物理删除需要二次确认，避免误点（页面不使用 window.confirm，便于自动化验收）
 const confirmingDepartmentId = ref<string | null>(null)
+// 重命名是显式动作：名称默认只读，避免随手改动被引用的部门
+const renamingDepartmentId = ref<string | null>(null)
+const departmentRenameDraft = ref('')
 // 部门区块的行内反馈：行级操作失败（例如删除被引用阻断）只提示本区块，不替换整页内容
 const notice = ref('')
 const departmentError = ref('')
-// 与后端 admin/service.ts 的校验保持一致：3-64 位、小写字母开头、仅含小写字母/数字/短横线
-const departmentCodeValid = computed(() => /^[a-z][a-z0-9-]{2,63}$/.test(departmentDraft.value.code.trim()))
 const settings = ref<AdminSettings>({})
 const failedTasks = ref<AdminAnalysisTask[]>([])
 const auditLogs = ref<AdminAuditLog[]>([])
 const savingUser = ref<string | null>(null)
-const savingRole = ref<string | null>(null)
 const savingSettings = ref(false)
 const settingsDraft = ref<Record<string, string>>({})
 const dingTalkSettings = ref<DingTalkEnvSettings>({})
@@ -35,6 +36,20 @@ const dingTalkDraft = ref<Record<string, string>>({})
 const savingDingTalk = ref(false)
 const resumeVirusScanEnabled = ref(false)
 const savingResumeVirusScan = ref(false)
+const aiSettings = ref<AiSettings | null>(null)
+const aiTestResult = ref<AiConnectionTestResult | null>(null)
+const testingAiConnection = ref(false)
+const savingAiSettings = ref(false)
+const aiDraft = ref({ baseUrl: '', apiKey: '', model: '', timeoutMs: '' })
+const confirmingAiKeyClear = ref(false)
+const aiModels = ref<string[]>([])
+/** 下拉候选：测试连接拉到的全部模型，外加已保存的模型（可能不在返回列表里）。 */
+const aiModelOptions = computed(() => {
+  const configured = aiSettings.value?.env.OPENAI_MODEL.value.trim()
+  const list = [...aiModels.value]
+  if (configured && !list.includes(configured)) list.unshift(configured)
+  return list
+})
 
 const dingTalkFields = [
   { key: 'DINGTALK_APP_KEY', label: 'AppKey', secret: false, help: '钉钉开放平台 → 应用开发 → 企业内部应用 → 凭证与基础信息。', href: 'https://open.dingtalk.com/document/orgapp/obtain-the-appkey-and-appsecret' },
@@ -55,15 +70,6 @@ const subjectLabels: Record<WorkflowEvent['subjectType'], string> = {
   interview: '面试',
 }
 
-const actionLabels: Record<string, string> = {
-  submit: '提交审批', submit_approval: '提交审批', approve: '审批通过', reject: '审批驳回', withdraw: '撤回',
-  request_submitted: '提交审批', request_approved: '审批通过', request_rejected: '审批驳回', converted: '转为岗位',
-  publish: '发布', pause: '暂停', resume: '恢复', close: '关闭', create_job: '新建岗位', job_created: '新建岗位', spec_created: '新建说明书', jd_created: '新建 JD', confirm_spec: '确认说明书', spec_confirmed: '确认说明书', confirm_jd: '确认 JD', jd_confirmed: '确认 JD',
-  create: '创建', revise: '修订', send: '发送', accept: '接受', decline: '拒绝', cancel: '取消', expire: '过期',
-  archive_onboarding: '入职归档',
-  status_changed: '变更申请状态', feedback_submitted: '提交反馈', feedback_locked: '锁定反馈',
-}
-
 const eventSummary = computed(() => {
   const counter = new Map<string, number>()
   for (const event of events.value) {
@@ -72,16 +78,10 @@ const eventSummary = computed(() => {
   return [...counter.entries()].map(([type, count]) => ({ type, label: subjectLabels[type as WorkflowEvent['subjectType']], count }))
 })
 
+const hasSettings = computed(() => Object.keys(settingsDraft.value).length > 0)
+
 function subjectName(event: WorkflowEvent) {
   return event.subjectLabel || event.subjectId
-}
-
-function actionName(action: string) {
-  return actionLabels[action] ?? action.replaceAll('_', ' ')
-}
-
-function statusText(status?: string) {
-  return status || '—'
 }
 
 async function refresh() {
@@ -89,14 +89,14 @@ async function refresh() {
   error.value = ''
   departmentError.value = ''
   try {
-    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, tasks, logs] = await Promise.all([
+    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, aiConfig, tasks, logs] = await Promise.all([
       listAdminChecks(),
       loadWorkflowEvents(subjectType.value || undefined, 80),
-      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), listFailedAnalysisTasks(), listAdminAuditLogs(80),
+      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), getAiSettings().catch(() => null), listFailedAnalysisTasks(), listAdminAuditLogs(80),
     ])
     rows.value = checks
     events.value = audit
-    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; failedTasks.value = tasks; auditLogs.value = logs
+    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; if (aiConfig) applyAiSettings(aiConfig); failedTasks.value = tasks; auditLogs.value = logs
     settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
     dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
   } catch (cause) {
@@ -113,6 +113,63 @@ async function saveResumeVirusScan() {
   finally { savingResumeVirusScan.value = false }
 }
 
+async function runAiConnectionTest() {
+  testingAiConnection.value = true; error.value = ''; aiTestResult.value = null
+  try {
+    const result = await testAiConnection({
+      ...(aiDraft.value.baseUrl.trim() ? { baseUrl: aiDraft.value.baseUrl.trim() } : {}),
+      ...(aiDraft.value.apiKey.trim() ? { apiKey: aiDraft.value.apiKey.trim() } : {}),
+    })
+    aiTestResult.value = result
+    aiModels.value = result.models
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '测试模型连接失败'
+  } finally {
+    testingAiConnection.value = false
+  }
+}
+
+function applyAiSettings(settings: AiSettings) {
+  aiSettings.value = settings
+  aiDraft.value = {
+    baseUrl: settings.env.OPENAI_BASE_URL.value,
+    apiKey: '',
+    model: settings.env.OPENAI_MODEL.value,
+    timeoutMs: settings.env.OPENAI_TIMEOUT_MS.value,
+  }
+}
+
+async function submitAiSettings() {
+  savingAiSettings.value = true; error.value = ''; aiTestResult.value = null
+  try {
+    const patch: Record<string, string> = {
+      OPENAI_BASE_URL: aiDraft.value.baseUrl.trim(),
+      OPENAI_MODEL: aiDraft.value.model.trim(),
+      OPENAI_TIMEOUT_MS: aiDraft.value.timeoutMs.trim(),
+    }
+    // 密钥为写入专用：留空表示保持原值，避免把掩码回写进 .env。
+    if (aiDraft.value.apiKey.trim()) patch.OPENAI_API_KEY = aiDraft.value.apiKey.trim()
+    applyAiSettings(await saveAiSettings(patch))
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '保存模型配置失败'
+  } finally {
+    savingAiSettings.value = false
+  }
+}
+
+/** 密钥不回显，删除只能走这个显式动作。 */
+async function clearAiApiKey() {
+  savingAiSettings.value = true; error.value = ''; aiTestResult.value = null
+  try {
+    applyAiSettings(await saveAiSettings({ OPENAI_API_KEY: '' }))
+    confirmingAiKeyClear.value = false
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '清除密钥失败'
+  } finally {
+    savingAiSettings.value = false
+  }
+}
+
 async function saveUser(user: AdminUser) {
   savingUser.value = user.id; error.value = ''
   try { const saved = await updateAdminUser(user.id, { displayName: user.displayName, isActive: user.isActive, role: user.role, departmentCode: user.departmentCode }); users.value = users.value.map((item) => item.id === user.id ? saved : item) }
@@ -120,16 +177,27 @@ async function saveUser(user: AdminUser) {
   finally { savingUser.value = null }
 }
 
-async function saveRole(role: AdminRole) {
-  savingRole.value = role.id; error.value = ''
-  try { const saved = await updateAdminRole(role.id, { name: role.name }); roles.value = roles.value.map((item) => item.id === role.id ? saved : item) }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存角色失败' }
-  finally { savingRole.value = null }
+function startRenameDepartment(department: AdminDepartment) {
+  renamingDepartmentId.value = department.id
+  departmentRenameDraft.value = department.name
+  departmentError.value = ''; notice.value = ''
 }
 
-async function saveDepartment(department: AdminDepartment) {
+function cancelRenameDepartment() {
+  renamingDepartmentId.value = null
+  departmentRenameDraft.value = ''
+}
+
+async function saveDepartmentName(department: AdminDepartment) {
+  const name = departmentRenameDraft.value.trim()
+  if (!name) { departmentError.value = '请输入部门名称'; return }
   savingDepartment.value = department.id; departmentError.value = ''
-  try { const saved = await updateAdminDepartment(department.id, { name: department.name }); departments.value = departments.value.map((item) => item.id === department.id ? saved : item) }
+  try {
+    const saved = await updateAdminDepartment(department.id, { name })
+    departments.value = departments.value.map((item) => item.id === department.id ? saved : item)
+    renamingDepartmentId.value = null
+    departmentRenameDraft.value = ''
+  }
   catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '保存部门名称失败' }
   finally { savingDepartment.value = null }
 }
@@ -143,8 +211,10 @@ async function toggleDepartment(department: AdminDepartment) {
 }
 
 async function addDepartment() {
+  const name = departmentDraft.value.name.trim()
+  if (!name) { departmentError.value = '请输入部门名称'; return }
   creatingDepartment.value = true; departmentError.value = ''
-  try { departments.value = [await createAdminDepartment(departmentDraft.value), ...departments.value]; departmentDraft.value = { code: '', name: '' } }
+  try { departments.value = [await createAdminDepartment({ name }), ...departments.value]; departmentDraft.value = { name: '' } }
   catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '新增部门失败' }
   finally { creatingDepartment.value = false }
 }
@@ -211,32 +281,102 @@ onMounted(refresh)
       <h3 class="section-title">用户与角色</h3>
       <div class="table-wrap">
         <table><thead><tr><th>用户</th><th>角色</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><input v-model="user.role" aria-label="用户角色" /></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}（{{ department.code }}）</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
+          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><select v-model="user.role" aria-label="用户角色"><option v-for="role in roles" :key="role.id" :value="role.code">{{ role.name }}</option></select></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
           <tr v-if="!users.length"><td colspan="5" class="table-empty">暂无用户</td></tr>
         </tbody></table>
       </div>
-      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>角色代码</th><th>角色名称</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="role in roles" :key="role.id"><td>{{ role.code }}</td><td><span>{{ role.name }}</span> <input v-model="role.name" aria-label="角色名称" /></td><td><button class="btn btn-primary" type="button" :disabled="savingRole === role.id" @click="saveRole(role)">{{ savingRole === role.id ? '保存中...' : '保存' }}</button></td></tr>
-        <tr v-if="!roles.length"><td colspan="3" class="table-empty">暂无角色</td></tr>
-      </tbody></table></div>
     </section>
 
     <section class="section">
-      <div class="section-heading"><div><h3 class="section-title">部门管理</h3><p class="muted">停用后部门不再出现在新建需求的下拉选项中，历史记录仍保留；已无关联记录的部门可以直接删除。</p></div></div>
-      <div class="inline-actions" style="margin-bottom:8px"><input v-model="departmentDraft.code" placeholder="部门编码，如 dept-ops" aria-label="部门编码" :aria-invalid="departmentDraft.code.trim() !== '' && !departmentCodeValid" /><input v-model="departmentDraft.name" placeholder="部门名称" aria-label="部门名称" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
-      <p class="muted dept-code-hint" :class="{ 'is-invalid': departmentDraft.code.trim() !== '' && !departmentCodeValid }">编码规则：3-64 位，以小写字母开头，只能包含小写字母、数字或短横线（如 dept-ops）；创建后不可修改。部门名称可随时修改。</p>
+      <div class="section-heading">
+        <div><h3 class="section-title">部门管理</h3><p class="muted">停用后部门不再出现在新建需求的下拉选项中，历史记录仍保留；已无关联记录的部门可以直接删除。</p></div>
+        <div class="inline-actions"><input v-model="departmentDraft.name" class="text-input" placeholder="新部门名称" aria-label="部门名称" @keyup.enter="addDepartment" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
+      </div>
       <p v-if="notice" class="muted dept-code-hint" role="status">{{ notice }}</p>
       <p v-if="departmentError" class="error-note" role="alert">{{ departmentError }}</p>
-      <div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="department in departments" :key="department.id"><td><code>{{ department.code }}</code></td><td><input v-model="department.name" aria-label="部门名称" /></td><td>{{ department.isActive ? '启用' : '已停用' }}</td><td class="row-actions"><button class="btn btn-primary" type="button" :disabled="savingDepartment === department.id" @click="saveDepartment(department)">{{ savingDepartment === department.id ? '保存中...' : '保存名称' }}</button><button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="toggleDepartment(department)">{{ department.isActive ? '停用' : '启用' }}</button><template v-if="confirmingDepartmentId === department.id"><button class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="removeDepartment(department)">{{ savingDepartment === department.id ? '删除中...' : '确认删除' }}</button><button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="cancelRemoveDepartment">取消</button></template><button v-else class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="askRemoveDepartment(department)">删除</button></td></tr>
-        <tr v-if="!departments.length"><td colspan="4" class="table-empty">暂无部门</td></tr>
+      <div class="table-wrap"><table><thead><tr><th>部门名称</th><th>状态</th><th class="col-actions">操作</th></tr></thead><tbody>
+        <tr v-for="department in departments" :key="department.id">
+          <td>
+            <input v-if="renamingDepartmentId === department.id" v-model="departmentRenameDraft" class="text-input dept-rename-input" aria-label="部门新名称" @keyup.enter="saveDepartmentName(department)" />
+            <strong v-else>{{ department.name }}</strong>
+          </td>
+          <td>{{ department.isActive ? '启用' : '已停用' }}</td>
+          <td class="row-actions">
+            <template v-if="renamingDepartmentId === department.id">
+              <button class="btn btn-primary" type="button" :disabled="savingDepartment === department.id" @click="saveDepartmentName(department)">{{ savingDepartment === department.id ? '保存中...' : '保存名称' }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="cancelRenameDepartment">取消</button>
+            </template>
+            <template v-else>
+              <button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="startRenameDepartment(department)">重命名</button>
+              <button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="toggleDepartment(department)">{{ department.isActive ? '停用' : '启用' }}</button>
+              <span v-if="confirmingDepartmentId === department.id" class="confirm-actions">
+                <button class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="removeDepartment(department)">{{ savingDepartment === department.id ? '删除中...' : '确认删除' }}</button>
+                <button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="cancelRemoveDepartment">取消</button>
+              </span>
+              <button v-else class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="askRemoveDepartment(department)">删除</button>
+            </template>
+          </td>
+        </tr>
+        <tr v-if="!departments.length"><td colspan="3" class="table-empty">暂无部门</td></tr>
       </tbody></table></div>
     </section>
 
     <section class="section">
-      <div class="section-heading"><h3 class="section-title">系统设置</h3><button class="btn btn-primary" type="button" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button></div>
-      <div class="form-grid form-panel"><div v-for="(_, key) in settingsDraft" :key="key" class="form-field"><label :for="`setting-${key}`">{{ key }}</label><input :id="`setting-${key}`" v-model="settingsDraft[key]" /><small>{{ settingsDraft[key] }}</small></div><div v-if="!Object.keys(settingsDraft).length" class="table-empty">暂无系统设置</div></div>
-      <div class="settings-toggle"><div><strong>简历病毒扫描</strong><p class="muted">开启后，新上传简历会先进入隔离区并由 ClamAV 扫描；默认关闭。</p></div><label><input v-model="resumeVirusScanEnabled" type="checkbox" :disabled="savingResumeVirusScan" @change="saveResumeVirusScan" /> {{ resumeVirusScanEnabled ? '已开启' : '已关闭' }}</label></div>
+      <div class="section-heading">
+        <div><h3 class="section-title">系统设置</h3></div>
+        <button v-if="hasSettings" class="btn btn-primary" type="button" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button>
+      </div>
+      <div v-if="hasSettings" class="form-grid form-panel">
+        <div v-for="(_, key) in settingsDraft" :key="key" class="form-field">
+          <label :for="`setting-${key}`">{{ key }}</label>
+          <input :id="`setting-${key}`" v-model="settingsDraft[key]" />
+        </div>
+      </div>
+      <p v-else class="settings-empty">当前没有可编辑的系统设置项。</p>
+      <div class="settings-row">
+        <div><strong>简历病毒扫描</strong><p>开启后，新上传简历会先进入隔离区并由 ClamAV 扫描；默认关闭。</p></div>
+        <label class="switch">
+          <input type="checkbox" v-model="resumeVirusScanEnabled" :disabled="savingResumeVirusScan" @change="saveResumeVirusScan" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-label">{{ resumeVirusScanEnabled ? '已开启' : '已关闭' }}</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading">
+        <div><h3 class="section-title">AI 模型</h3><p class="muted">保存后写入 <code>ENV_FILE_PATH</code> 指定的 .env 文件，并立即对当前 API 进程生效。密钥为写入专用，保存后不再回显。</p></div>
+        <div class="inline-actions">
+          <button class="btn btn-primary" type="button" :disabled="savingAiSettings" @click="submitAiSettings">{{ savingAiSettings ? '保存中...' : '保存模型配置' }}</button>
+          <button class="btn btn-ghost" type="button" :disabled="testingAiConnection" @click="runAiConnectionTest">{{ testingAiConnection ? '测试中...' : '测试连接' }}</button>
+          <template v-if="aiSettings?.env.OPENAI_API_KEY.configured">
+            <button v-if="!confirmingAiKeyClear" class="btn btn-ghost" type="button" :disabled="savingAiSettings" @click="confirmingAiKeyClear = true">清除密钥</button>
+            <template v-else>
+              <button class="btn btn-danger" type="button" :disabled="savingAiSettings" @click="clearAiApiKey">{{ savingAiSettings ? '清除中...' : '确认清除密钥' }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="savingAiSettings" @click="confirmingAiKeyClear = false">取消</button>
+            </template>
+          </template>
+        </div>
+      </div>
+      <div v-if="aiSettings" class="form-panel">
+        <div class="form-grid ai-grid">
+          <div class="form-field"><label for="ai-base-url">接口地址</label><input id="ai-base-url" v-model="aiDraft.baseUrl" placeholder="https://api.deepseek.com/v1" /></div>
+          <div class="form-field">
+            <label for="ai-api-key">API 密钥</label>
+            <input id="ai-api-key" v-model="aiDraft.apiKey" type="password" :placeholder="aiSettings.env.OPENAI_API_KEY.configured ? '已配置，留空表示不修改' : '请输入 API 密钥'" autocomplete="new-password" />
+          </div>
+          <div class="form-field">
+            <label for="ai-model">模型</label>
+            <select id="ai-model" v-model="aiDraft.model">
+              <option value="" disabled>{{ aiModelOptions.length ? '请选择模型' : '点击测试连接获取模型列表' }}</option>
+              <option v-for="model in aiModelOptions" :key="model" :value="model">{{ model }}</option>
+            </select>
+          </div>
+          <div class="form-field"><label for="ai-timeout">超时（毫秒）</label><input id="ai-timeout" v-model="aiDraft.timeoutMs" placeholder="30000" /></div>
+        </div>
+        <p v-if="aiTestResult" :class="aiTestResult.ok ? 'muted' : 'error-note'">{{ aiTestResult.message }}（{{ aiTestResult.latencyMs }} 毫秒）</p>
+      </div>
+      <div v-else class="table-empty">正在读取模型配置...</div>
     </section>
 
     <section class="section">
@@ -251,14 +391,14 @@ onMounted(refresh)
     </section>
 
     <section class="section">
-      <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>任务</th><th>简历</th><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
-        <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.id }}</td><td>{{ task.resumeId }}</td><td>{{ task.attempts }}</td><td>{{ task.lastError || '—' }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="5" class="table-empty">暂无失败任务</td></tr>
+      <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
+        <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.attempts }}</td><td>{{ task.lastError || '—' }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="3" class="table-empty">暂无失败任务</td></tr>
       </tbody></table></div>
     </section>
 
     <section class="section">
-      <h3 class="section-title">管理审计日志</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源</th><th>操作人</th><th>请求 ID</th></tr></thead><tbody>
-        <tr v-for="log in auditLogs" :key="log.id"><td>{{ new Date(log.createdAt).toLocaleString() }}</td><td>{{ log.action }}</td><td>{{ log.resourceType }}{{ log.resourceId ? ` / ${log.resourceId}` : '' }}</td><td>{{ log.actorEmail || log.actorId || '—' }}</td><td>{{ log.requestId || '—' }}</td></tr><tr v-if="!auditLogs.length"><td colspan="5" class="table-empty">暂无管理审计日志</td></tr>
+      <h3 class="section-title">管理审计日志</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作人</th></tr></thead><tbody>
+        <tr v-for="log in auditLogs" :key="log.id"><td>{{ new Date(log.createdAt).toLocaleString() }}</td><td>{{ actionLabel(log.action) }}</td><td>{{ log.actorEmail || '—' }}</td></tr><tr v-if="!auditLogs.length"><td colspan="3" class="table-empty">暂无管理审计日志</td></tr>
       </tbody></table></div>
     </section>
 
@@ -306,9 +446,9 @@ onMounted(refresh)
               <td>{{ new Date(event.createdAt).toLocaleString() }}</td>
               <td>{{ subjectLabels[event.subjectType] }}</td>
               <td><strong>{{ subjectName(event) }}</strong></td>
-              <td>{{ actionName(event.action) }}</td>
-              <td>{{ statusText(event.fromStatus) }} → {{ statusText(event.toStatus) }}</td>
-              <td>{{ event.actorName || event.actorId }}</td>
+              <td>{{ actionLabel(event.action) }}</td>
+              <td>{{ statusLabel(event.fromStatus) }} → {{ statusLabel(event.toStatus) }}</td>
+              <td>{{ event.actorName || '系统' }}</td>
               <td>{{ event.reason || '—' }}</td>
             </tr>
             <tr v-if="!events.length"><td colspan="7" class="table-empty">暂无流程审计记录</td></tr>
@@ -325,7 +465,29 @@ onMounted(refresh)
 .filter { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-muted, #64748b); }
 .audit-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .audit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 13px; font-weight: 500; }
-.row-actions { display: flex; gap: 8px; }
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.confirm-actions { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .dept-code-hint { margin: 0 0 12px; font-size: 12.5px; color: var(--muted, #64748b); }
 .dept-code-hint.is-invalid { color: #b91c1c; }
+.col-actions { width: 320px; }
+.text-input { border: 1px solid #cbd5e1; border-radius: 7px; padding: 7px 10px; font-size: 12.5px; color: #1e293b; background: #fff; outline: none; }
+.text-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
+.dept-rename-input { width: 100%; max-width: 240px; }
+.settings-empty { margin: 0 0 10px; font-size: 12.5px; color: var(--muted, #64748b); }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.settings-row strong { font-size: 13px; color: #1e293b; }
+.settings-row p { margin: 4px 0 0; font-size: 12px; color: var(--muted, #64748b); }
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: #334155; cursor: pointer; white-space: nowrap; }
+.switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.switch-track { position: relative; flex: none; width: 36px; height: 20px; border-radius: 999px; background: #cbd5e1; transition: background .15s ease; }
+.switch-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s ease; }
+.switch input:checked + .switch-track { background: var(--primary); }
+.switch input:checked + .switch-track::after { transform: translateX(16px); }
+.switch input:disabled + .switch-track { opacity: .6; }
+.switch-label { min-width: 42px; }
+.btn-sm { padding: 4px 8px; font-size: 11.5px; }
+.form-field small .btn + .btn { margin-left: 6px; }
+.ai-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 0.7fr); }
+@media (max-width: 1180px) { .ai-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .ai-grid { grid-template-columns: 1fr; } }
 </style>

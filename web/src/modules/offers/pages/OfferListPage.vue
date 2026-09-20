@@ -19,6 +19,7 @@ import {
   type OfferRow,
 } from '../api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { applicationOptionLabel, employmentTypeLabel } from '../../../shared/utils/labels'
 import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
@@ -94,10 +95,6 @@ async function ensureApplications() {
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取申请失败').message
   }
-}
-
-function applicationLabel(app: ApiApplication): string {
-  return app.code ? `${app.code}（岗位 ${app.jobId}）` : app.id
 }
 
 function resetCreateForm() {
@@ -262,7 +259,7 @@ async function submitRevise() {
 
 function versionSummary(version?: ApiOfferVersion): string {
   if (!version) return '暂无版本'
-  return `${version.positionTitle} · ${version.employmentType} · ${version.compensation.baseSalary.amount} ${version.compensation.baseSalary.currency}`
+  return `${version.positionTitle} · ${employmentTypeLabel(version.employmentType)} · ${version.compensation.baseSalary.amount} ${version.compensation.baseSalary.currency}`
 }
 
 onMounted(refresh)
@@ -287,7 +284,7 @@ onMounted(refresh)
         <label>申请</label>
         <select v-model="createForm.applicationId">
           <option value="" disabled>选择申请</option>
-          <option v-for="app in applications" :key="app.id" :value="app.id">{{ applicationLabel(app) }}</option>
+          <option v-for="app in applications" :key="app.id" :value="app.id">{{ applicationOptionLabel(app) }}</option>
         </select>
       </div>
       <div class="form-field"><label>职位名称</label><input v-model="createForm.positionTitle" /></div>
@@ -316,7 +313,7 @@ onMounted(refresh)
 
   <div v-if="showRevise && reviseTarget" class="overlay" role="presentation" @click.self="showRevise = false">
     <div class="dialog" role="dialog" aria-modal="true" style="max-width:620px">
-      <h3>修订 Offer（{{ reviseTarget.code }}）</h3>
+      <h3>修订 Offer</h3>
       <div class="form-grid">
         <div class="form-field"><label>职位名称</label><input v-model="reviseForm.positionTitle" /></div>
         <div class="form-field"><label>部门</label><select v-model="reviseForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></div>
@@ -344,10 +341,8 @@ onMounted(refresh)
       <h3>Offer 详情</h3>
       <div v-if="detail" class="detail-card" style="margin-top:12px">
         <div class="detail-grid">
-          <div class="detail-item"><span>编号</span><strong>{{ detail.offer.code }}</strong></div>
           <div class="detail-item"><span>状态</span><StatusTag :status="detail.offer.status" /></div>
           <div class="detail-item"><span>审批</span><StatusTag :status="detail.offer.approval.status" /></div>
-          <div class="detail-item"><span>申请</span><strong>{{ detailApplicationCode || detail.offer.applicationId }}</strong></div>
           <div class="detail-item"><span>候选人</span><strong>{{ selectedCandidate }}</strong></div>
           <div class="detail-item"><span>岗位</span><strong>{{ selectedJob }}</strong></div>
           <div class="detail-item"><span>审批人</span><strong>{{ detail.offer.approval.approver || '待审批' }}</strong></div>

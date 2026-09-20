@@ -2,6 +2,7 @@ import { apiClient } from '../../../shared/api'
 
 export type OfferStatus = 'draft' | 'pending_approval' | 'approved' | 'sent' | 'accepted' | 'declined' | 'cancelled' | 'expired'
 export type OfferAction = 'submit-approval' | 'approve' | 'reject' | 'send' | 'accept' | 'decline' | 'expire' | 'cancel' | 'archive-onboarding'
+export type OnboardingStatus = 'pending' | 'scheduled' | 'completed' | 'cancelled'
 
 export interface MoneyAmount { amount: number; currency: string }
 
@@ -45,6 +46,7 @@ export interface ApiApplication { id: string; code: string; candidateId: string;
 
 interface ApiCandidateLookup { id: string; code: string; fullName: string }
 interface ApiJobLookup { id: string; code: string; title: string }
+interface ApiOnboardingLookup { id: string; offerId: string; status: OnboardingStatus }
 
 export interface CreateOfferInput {
   applicationId: string
@@ -73,6 +75,7 @@ export interface OfferRow {
   approver: string
   sentAt?: string
   respondedAt?: string
+  onboardingStatus?: OnboardingStatus
   updatedAt: string
 }
 
@@ -106,16 +109,17 @@ export const OFFER_ACTION_LABEL: Record<OfferAction, string> = {
 
 function candidateLabel(candidate: ApiCandidateLookup | undefined): string {
   if (!candidate) return '未知候选人'
-  return candidate.fullName ? `${candidate.fullName}（${candidate.code || candidate.id}）` : candidate.code || candidate.id
+  return candidate.fullName || '未知候选人'
 }
 
-function jobLabel(job: ApiJobLookup | undefined, jobId: string): string {
-  if (!job) return jobId || '未知岗位'
-  return `${job.title || job.code}（${job.code || job.id}）`
+function jobLabel(job: ApiJobLookup | undefined, _jobId: string): string {
+  if (!job) return '未知岗位'
+  return job.title || '未知岗位'
 }
 
-function toRow(row: ApiOffer, applicationMap: Map<string, ApiApplication>, candidateMap: Map<string, ApiCandidateLookup>, jobMap: Map<string, ApiJobLookup>): OfferRow {
+function toRow(row: ApiOffer, applicationMap: Map<string, ApiApplication>, candidateMap: Map<string, ApiCandidateLookup>, jobMap: Map<string, ApiJobLookup>, onboardingMap = new Map<string, ApiOnboardingLookup>()): OfferRow {
   const application = applicationMap.get(row.applicationId)
+  const onboarding = onboardingMap.get(row.id)
   return {
     id: row.id,
     entityId: row.id,
@@ -129,6 +133,7 @@ function toRow(row: ApiOffer, applicationMap: Map<string, ApiApplication>, candi
     approver: row.approval?.approver ?? '待审批',
     ...(row.sentAt ? { sentAt: row.sentAt } : {}),
     ...(row.respondedAt ? { respondedAt: row.respondedAt } : {}),
+    ...(onboarding ? { onboardingStatus: onboarding.status } : {}),
     updatedAt: (row.updatedAt ?? '').slice(0, 10),
   }
 }
@@ -147,16 +152,18 @@ export async function listOffers(status?: string): Promise<OfferRow[]> {
 
 export async function listOfferContextRows(status?: string): Promise<OfferRow[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : ''
-  const [offerResponse, applicationResponse, candidateResponse, jobResponse] = await Promise.all([
+  const [offerResponse, applicationResponse, candidateResponse, jobResponse, onboardingResponse] = await Promise.all([
     apiClient.getJson<ApiOffer[]>(`/offers${query}`),
     apiClient.getJson<ApiApplication[]>('/applications'),
     apiClient.getJson<ApiCandidateLookup[]>('/candidates'),
     apiClient.getJson<ApiJobLookup[]>('/jobs'),
+    apiClient.getJson<ApiOnboardingLookup[]>('/onboarding'),
   ])
   const applicationMap = new Map(applicationResponse.data.map((item) => [item.id, item]))
   const candidateMap = new Map(candidateResponse.data.map((item) => [item.id, item]))
   const jobMap = new Map(jobResponse.data.map((item) => [item.id, item]))
-  return offerResponse.data.map((row) => toRow(row, applicationMap, candidateMap, jobMap))
+  const onboardingMap = new Map(onboardingResponse.data.map((item) => [item.offerId, item]))
+  return offerResponse.data.map((row) => toRow(row, applicationMap, candidateMap, jobMap, onboardingMap))
 }
 
 export async function getOffer(id: string): Promise<OfferDetail> {

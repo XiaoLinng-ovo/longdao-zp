@@ -5,16 +5,20 @@ import {
   concludeInterview,
   createInterview,
   INTERVIEW_TYPE_LABEL,
-  loadApplicationsForSchedule,
+  loadInterviewScheduleData,
   loadInterviews,
   lockFeedback,
   RECOMMENDATION_LABEL,
   submitFeedback,
   type ApiApplication,
   type FeedbackRecommendation,
+  type InterviewScheduleData,
   type InterviewType,
   type InterviewView,
+  type ScheduleCandidate,
+  type ScheduleJob,
 } from '../api'
+import { createApplication } from '../../candidates/api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
@@ -26,20 +30,21 @@ const error = ref('')
 const feedback = ref('')
 const acting = ref(false)
 
+const candidates = ref<ScheduleCandidate[]>([])
+const jobs = ref<ScheduleJob[]>([])
 const applications = ref<ApiApplication[]>([])
+const candidateSearch = ref('')
 const router = useRouter()
 
 const showArrange = ref(false)
 const arrangeForm = ref({
-  applicationId: '',
+  candidateId: '',
+  jobId: '',
   title: '',
   type: 'technical' as InterviewType,
-  round: 1,
   scheduledAt: '',
-  timezone: 'Asia/Shanghai',
   location: '',
   meetingUrl: '',
-  interviewerId: '',
   interviewerName: '',
 })
 
@@ -59,6 +64,18 @@ const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 
 const interviewTypes = computed(() => Object.entries(INTERVIEW_TYPE_LABEL).map(([value, label]) => ({ value, label })))
 const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
+function candidateLabel(candidate: ScheduleCandidate): string {
+  return `${candidate.fullName}（${candidate.code}）`
+}
+
+const filteredCandidates = computed(() => {
+  const keyword = candidateSearch.value.trim().toLowerCase()
+  if (!keyword) return candidates.value.slice(0, 12)
+  return candidates.value.filter((candidate) => [candidate.fullName, candidate.code, candidate.email ?? ''].some((value) => value.toLowerCase().includes(keyword)))
+})
+const selectedCandidate = computed(() => candidates.value.find((candidate) => candidate.id === arrangeForm.value.candidateId))
+const selectedJob = computed(() => jobs.value.find((job) => job.id === arrangeForm.value.jobId))
+const existingApplication = computed(() => applications.value.find((application) => application.candidateId === arrangeForm.value.candidateId && application.jobId === arrangeForm.value.jobId))
 
 function clearFlags() { error.value = ''; feedback.value = '' }
 
@@ -74,52 +91,60 @@ async function refresh() {
   }
 }
 
-function applicationLabel(app: ApiApplication): string {
-  return app.code ? `${app.code}（岗位 ${app.jobId}）` : app.id
-}
-
 async function openArrange() {
   clearFlags()
+  candidateSearch.value = ''
   showArrange.value = true
-  if (!applications.value.length) {
+  if (!candidates.value.length && !jobs.value.length) {
     try {
-      applications.value = await loadApplicationsForSchedule()
+      const options: InterviewScheduleData = await loadInterviewScheduleData()
+      candidates.value = options.candidates
+      jobs.value = options.jobs
+      applications.value = options.applications
     } catch (cause) {
       error.value = describeApiFailure(cause, '读取申请失败').message
     }
   }
 }
 
+function syncCandidateFromSearch() {
+  const selected = candidates.value.find((candidate) => candidateLabel(candidate) === candidateSearch.value.trim())
+  arrangeForm.value.candidateId = selected?.id ?? ''
+  if (!selected) arrangeForm.value.jobId = ''
+}
+
 async function submitArrange() {
   if (acting.value) return
   const form = arrangeForm.value
-  if (!form.applicationId.trim()) { error.value = '请选择申请'; return }
+  if (!form.candidateId.trim()) { error.value = '请选择候选人'; return }
+  if (!form.jobId.trim()) { error.value = '请选择岗位'; return }
   if (!form.title.trim()) form.title = '面试'
-  if (!form.interviewerId.trim() && !form.interviewerName.trim()) { error.value = '请填写面试官'; return }
+  if (!form.interviewerName.trim()) { error.value = '请填写面试官'; return }
 
   acting.value = true
   clearFlags()
   const scheduledStartAt = form.scheduledAt ? new Date(form.scheduledAt).toISOString() : undefined
   try {
+    const application = existingApplication.value ?? await createApplication({ candidateId: form.candidateId, jobId: form.jobId })
+    applications.value = [...applications.value, application]
     await createInterview({
-      applicationId: form.applicationId,
-      round: form.round > 0 ? form.round : undefined,
+      applicationId: application.id,
       type: form.type,
       title: form.title.trim(),
       scheduledStartAt,
-      timezone: form.timezone || undefined,
       location: form.location.trim() || undefined,
       meetingUrl: form.meetingUrl.trim() || undefined,
       participants: [{
-        userId: form.interviewerId.trim() || form.interviewerName.trim() || 'current-interviewer',
-        name: form.interviewerName.trim() || undefined,
+        userId: form.interviewerName.trim(),
+        name: form.interviewerName.trim(),
         role: 'interviewer',
         required: true,
       }],
     })
     feedback.value = '面试已创建'
     showArrange.value = false
-    arrangeForm.value = { applicationId: '', title: '', type: 'technical', round: 1, scheduledAt: '', timezone: 'Asia/Shanghai', location: '', meetingUrl: '', interviewerId: '', interviewerName: '' }
+    candidateSearch.value = ''
+    arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerName: '' }
     await refresh()
   } catch (cause) {
     error.value = describeApiFailure(cause, '安排面试失败').message
@@ -132,7 +157,7 @@ function openFeedback(row: InterviewView) {
   clearFlags()
   feedbackTarget.value = row
   feedbackForm.value = {
-    interviewerId: row.interviewers[0] || '',
+    interviewerId: row.interviewerIds[0] || '',
     overallScore: 80,
     recommendation: 'yes',
     strengths: '',
@@ -216,34 +241,43 @@ onMounted(refresh)
   <div v-if="loading" class="loading-note">正在读取面试...</div>
   <InterviewTable v-else :rows="rows" @feedback="openFeedback" @conclude="openConclude" @detail="router.push(`/interviews/${$event.entityId}`)" />
 
-  <section v-if="showArrange" class="form-panel">
-    <div class="section-title">安排面试</div>
-    <div class="form-grid">
-      <div class="form-field">
-        <label>申请</label>
-        <select v-model="arrangeForm.applicationId">
-          <option value="" disabled>选择申请</option>
-          <option v-for="app in applications" :key="app.id" :value="app.id">{{ applicationLabel(app) }}</option>
-        </select>
+  <div v-if="showArrange" class="overlay" role="presentation" @click.self="showArrange = false">
+    <div class="dialog arrange-dialog" role="dialog" aria-modal="true">
+      <h3>安排面试</h3>
+      <div class="form-grid">
+        <div class="form-field candidate-search-field">
+          <label>候选人（简历库）</label>
+          <input v-model="candidateSearch" list="schedule-candidate-options" placeholder="输入候选人姓名或编号搜索" @input="syncCandidateFromSearch" />
+          <datalist id="schedule-candidate-options">
+            <option v-for="candidate in filteredCandidates" :key="candidate.id" :value="candidateLabel(candidate)" />
+          </datalist>
+          <small v-if="!filteredCandidates.length">没有匹配的简历库候选人</small>
+        </div>
+        <div class="form-field">
+          <label>岗位</label>
+          <select v-model="arrangeForm.jobId" aria-label="岗位" :disabled="!arrangeForm.candidateId">
+            <option value="" disabled>选择岗位</option>
+            <option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.title }}（{{ job.code }}）</option>
+          </select>
+          <small v-if="selectedJob && existingApplication">该候选人已有此岗位申请，将复用现有申请。</small>
+          <small v-else-if="selectedJob">该候选人尚未投递此岗位，创建面试时会自动创建职位申请。</small>
+        </div>
+        <div class="form-field"><label>面试标题</label><input v-model="arrangeForm.title" placeholder="例如：技术一面" /></div>
+        <div class="form-field">
+          <label>面试类型</label>
+          <select v-model="arrangeForm.type"><option v-for="t in interviewTypes" :key="t.value" :value="t.value">{{ t.label }}</option></select>
+        </div>
+        <div class="form-field"><label>开始时间</label><input v-model="arrangeForm.scheduledAt" type="datetime-local" /></div>
+        <div class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
+        <div class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
+        <div class="form-field"><label>面试官</label><input v-model="arrangeForm.interviewerName" placeholder="输入系统用户姓名或邮箱" /></div>
       </div>
-      <div class="form-field"><label>面试标题</label><input v-model="arrangeForm.title" placeholder="例如：技术一面" /></div>
-      <div class="form-field">
-        <label>面试类型</label>
-        <select v-model="arrangeForm.type"><option v-for="t in interviewTypes" :key="t.value" :value="t.value">{{ t.label }}</option></select>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showArrange = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitArrange">{{ acting ? '提交中...' : '创建面试' }}</button>
       </div>
-      <div class="form-field"><label>轮次</label><input v-model.number="arrangeForm.round" type="number" min="1" /></div>
-      <div class="form-field"><label>开始时间</label><input v-model="arrangeForm.scheduledAt" type="datetime-local" /></div>
-      <div class="form-field"><label>时区</label><input v-model="arrangeForm.timezone" placeholder="Asia/Shanghai" /></div>
-      <div class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
-      <div class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
-      <div class="form-field"><label>面试官 ID</label><input v-model="arrangeForm.interviewerId" placeholder="面试官工号" /></div>
-      <div class="form-field"><label>面试官姓名</label><input v-model="arrangeForm.interviewerName" placeholder="面试官姓名" /></div>
     </div>
-    <div class="inline-actions" style="margin-top:14px">
-      <button class="btn btn-primary" type="button" :disabled="acting" @click="submitArrange">{{ acting ? '提交中...' : '创建面试' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="acting" @click="showArrange = false">取消</button>
-    </div>
-  </section>
+  </div>
 
   <div v-if="showFeedback && feedbackTarget" class="overlay" role="presentation" @click.self="showFeedback = false">
     <div class="dialog" role="dialog" aria-modal="true">
@@ -287,3 +321,12 @@ onMounted(refresh)
     </div>
   </div>
 </template>
+
+<style scoped>
+.arrange-dialog {
+  max-width: 860px;
+  max-height: min(86vh, 760px);
+  overflow-y: auto;
+}
+
+</style>

@@ -472,14 +472,112 @@ describe('Phase 1 API', { concurrency: false }, () => {
     }
   })
 
-  it('standardizes interview question errors and enforces interview roles', async () => {
+  it('generates a job specification from the job title through the configured model', async () => {
+    const job = (await get('/api/v1/jobs')).body.data[0]
+    assert.ok(job)
+    const originalFetch = globalThis.fetch
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    process.env.OPENAI_BASE_URL = 'https://model.example.test/v1'
+    process.env.OPENAI_API_KEY = 'test-key'
+    process.env.OPENAI_MODEL = 'test-model'
+    globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      summary: '负责核心业务系统设计与开发。',
+      responsibilities: ['负责核心服务设计', '推动工程质量建设'],
+      requirements: [{ label: '三年以上开发经验', description: '具备复杂系统设计能力', required: true }],
+      skills: ['Java', 'PostgreSQL'],
+    }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    try {
+      const response = await requestJson('POST', `/api/v1/jobs/${job.id}/spec/generate`, {})
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.spec.title, job.title)
+      assert.equal(response.body.data.spec.summary, '负责核心业务系统设计与开发。')
+      assert.equal(response.body.data.spec.confirmed, false)
+      assert.deepEqual(response.body.data.spec.skills, ['Java', 'PostgreSQL'])
+    } finally {
+      globalThis.fetch = originalFetch
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+      if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+      if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+    }
+  })
+
+  it('falls back to local job specification generation when the model is not configured', async () => {
+    const job = (await get('/api/v1/jobs')).body.data[0]
+    assert.ok(job)
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_MODEL
+    try {
+      const response = await requestJson('POST', `/api/v1/jobs/${job.id}/spec/generate`, {})
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.spec.generatedBy, 'local_fallback')
+      assert.equal(response.body.data.spec.title, job.title)
+      assert.ok(response.body.data.spec.summary)
+      assert.ok(response.body.data.spec.responsibilities.length > 0)
+      assert.ok(response.body.data.spec.skills.length > 0)
+    } finally {
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+      if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+      if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+    }
+  })
+
+  it('generates a JD through the configured model', async () => {
+    const job = (await get('/api/v1/jobs')).body.data[0]
+    assert.ok(job)
+    const originalFetch = globalThis.fetch
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    process.env.OPENAI_BASE_URL = 'https://model.example.test/v1'
+    process.env.OPENAI_API_KEY = 'test-key'
+    process.env.OPENAI_MODEL = 'test-model'
+    globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ content: `岗位名称：${job.title}\n\n岗位概述\n负责核心业务。\n\n主要职责\n1. 负责交付\n\n任职要求\n- 三年以上经验\n\n技能要求\nJava` }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    try {
+      const response = await requestJson('POST', `/api/v1/jobs/${job.id}/jd/generate`, {})
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.jd.generatedBy, 'ai_assisted')
+      assert.match(response.body.data.jd.content, /主要职责/)
+      assert.equal(response.body.data.jd.confirmed, false)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+      if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+      if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+    }
+  })
+
+  it('falls back to local JD generation when the model is not configured', async () => {
+    const job = (await get('/api/v1/jobs')).body.data[0]
+    assert.ok(job)
+    const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_KEY
+    delete process.env.OPENAI_MODEL
+    try {
+      const specResponse = await requestJson('POST', `/api/v1/jobs/${job.id}/spec/generate`, {})
+      assert.equal(specResponse.status, 200, JSON.stringify(specResponse.body))
+      const response = await requestJson('POST', `/api/v1/jobs/${job.id}/jd/generate`, {})
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.jd.generatedBy, 'local_fallback')
+      assert.ok(response.body.data.spec)
+      assert.equal(response.body.data.spec.generatedBy, 'local_fallback')
+      assert.match(response.body.data.jd.content, /主要职责/)
+      assert.match(response.body.data.jd.content, /技能要求/)
+    } finally {
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = previous.baseUrl
+      if (previous.apiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous.apiKey
+      if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
+    }
+  })
+
+  it('falls back to local interview questions when AI is unavailable and enforces interview roles', async () => {
     const interview = (await get('/api/v1/interviews')).body.data[0]
     assert.ok(interview)
     const previous = { baseUrl: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL }
     delete process.env.OPENAI_BASE_URL; delete process.env.OPENAI_API_KEY; delete process.env.OPENAI_MODEL
     const unavailable = await requestJson('POST', `/api/v1/interviews/${interview.id}/questions`, { jobTitle: '工程师', jobRequirements: ['开发'], anonymizedResume: '匿名简历', analysisSummary: [], questionCount: 1 })
-    assert.equal(unavailable.status, 503)
-    assert.equal(unavailable.body.error.code, 'AI_NOT_CONFIGURED')
+    assert.equal(unavailable.status, 200)
+    assert.equal(unavailable.body.data.questions.length, 1)
     await loginAs('approver@smartrecruit.local', 'approver123')
     const forbidden = await requestJson('POST', `/api/v1/interviews/${interview.id}/questions`, { jobTitle: '工程师', jobRequirements: ['开发'], anonymizedResume: '匿名简历', analysisSummary: [], questionCount: 1 })
     assert.equal(forbidden.status, 403)

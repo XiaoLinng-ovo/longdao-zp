@@ -296,6 +296,14 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         throw makeApiError(response, payload, requestId || undefined)
       }
       if (!isSuccessfulStatus(response)) {
+        // API 的错误响应始终是带 error 字段的 JSON 信封；空响应体的 5xx 只可能来自网关或开发代理，
+        // 说明后端进程不可达。这里给出可诊断的提示，而不是笼统的「请求失败」。
+        if (response.status >= 500 && payload === undefined) {
+          throw new ApiNetworkError(`无法连接后端服务（HTTP ${response.status}），请确认 API 进程正在运行`, {
+            status: response.status,
+            requestId: requestId || undefined,
+          })
+        }
         throw makeApiError(response, payload, requestId || undefined)
       }
       if (payload === undefined && (response.status === 204 || response.status === 205)) {

@@ -1,5 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { readEnvValues, resolveEnvFilePath, writeEnvFile } from './env-file.js'
 
 export const DINGTALK_ENV_KEYS = [
   'DINGTALK_APP_KEY',
@@ -23,29 +22,6 @@ const SECRET_KEYS = new Set<DingTalkEnvKey>([
   'DINGTALK_CALLBACK_AES_KEY',
 ])
 
-function parseEnv(content: string): Map<string, string> {
-  const values = new Map<string, string>()
-  for (const raw of content.split(/\r?\n/u)) {
-    const line = raw.trim()
-    if (!line || line.startsWith('#')) continue
-    const index = line.indexOf('=')
-    if (index <= 0) continue
-    const key = line.slice(0, index).trim()
-    let value = line.slice(index + 1).trim()
-    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) value = value.slice(1, -1)
-    values.set(key, value)
-  }
-  return values
-}
-
-async function readEnvValues(filePath: string): Promise<Map<string, string>> {
-  let content = ''
-  try { content = await readFile(filePath, 'utf8') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-  return parseEnv(content)
-}
-
 function mask(value: string): string {
   if (!value) return ''
   if (value.length <= 4) return '••••'
@@ -60,9 +36,7 @@ function emptySettings(values: Map<string, string>): DingTalkEnvSettings {
   })) as DingTalkEnvSettings
 }
 
-export function resolveEnvFilePath(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.ENV_FILE_PATH?.trim() || resolve(process.cwd(), '.env'))
-}
+export { resolveEnvFilePath }
 
 export async function readDingTalkEnvSettings(filePath = resolveEnvFilePath()): Promise<DingTalkEnvSettings> {
   return emptySettings(await readEnvValues(filePath))
@@ -76,35 +50,9 @@ function validatePatch(patch: DingTalkEnvPatch): void {
   }
 }
 
-function replaceEnvLines(content: string, patch: Record<string, string>): string {
-  const lines = content.split(/(\r?\n)/u)
-  const seen = new Set<string>()
-  const output = lines.map((part) => {
-    if (part === '\n' || part === '\r\n') return part
-    const match = part.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=.*)$/u)
-    if (!match || !(match[2] as string in patch)) return part
-    const key = match[2] as string
-    seen.add(key)
-    return `${match[1]}${key}=${patch[key] ?? ''}`
-  }).join('')
-  const missing = Object.keys(patch).filter((key) => !seen.has(key)).map((key) => `${key}=${patch[key] ?? ''}`)
-  if (!missing.length) return output
-  return `${output}${output && !output.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`
-}
-
 export async function updateDingTalkEnvSettings(filePath = resolveEnvFilePath(), patch: DingTalkEnvPatch): Promise<DingTalkEnvSettings> {
   validatePatch(patch)
-  await mkdir(dirname(filePath), { recursive: true })
-  let content = ''
-  try { content = await readFile(filePath, 'utf8') } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-  const next = replaceEnvLines(content, patch)
-  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(temporaryPath, next, { encoding: 'utf8', mode: 0o600 })
-  await chmod(temporaryPath, 0o600)
-  await rename(temporaryPath, filePath)
-  for (const [key, value] of Object.entries(patch)) process.env[key] = value
+  await writeEnvFile(filePath, patch)
   return readDingTalkEnvSettings(filePath)
 }
 
@@ -113,17 +61,6 @@ export async function readResumeVirusScanSetting(filePath = resolveEnvFilePath()
 }
 
 export async function updateResumeVirusScanSetting(filePath = resolveEnvFilePath(), enabled: boolean): Promise<boolean> {
-  validatePatch({} as DingTalkEnvPatch)
-  await mkdir(dirname(filePath), { recursive: true })
-  const content = await readFile(filePath, 'utf8').catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
-    throw error
-  })
-  const next = replaceEnvLines(content, { [RESUME_VIRUS_SCAN_KEY]: String(enabled) })
-  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(temporaryPath, next, { encoding: 'utf8', mode: 0o600 })
-  await chmod(temporaryPath, 0o600)
-  await rename(temporaryPath, filePath)
-  process.env[RESUME_VIRUS_SCAN_KEY] = String(enabled)
+  await writeEnvFile(filePath, { [RESUME_VIRUS_SCAN_KEY]: String(enabled) })
   return enabled
 }

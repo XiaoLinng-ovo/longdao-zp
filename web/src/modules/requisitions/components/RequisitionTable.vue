@@ -49,7 +49,6 @@ function tone(action: RequisitionAction): string {
     <table>
       <thead>
         <tr>
-          <th>编号</th>
           <th>需求名称</th>
           <th>部门</th>
           <th>人数</th>
@@ -61,7 +60,6 @@ function tone(action: RequisitionAction): string {
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
-          <td>{{ row.id }}</td>
           <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.title }}</a></td>
           <td>{{ row.department }}</td>
           <td>{{ row.headcount }}</td>
@@ -95,7 +93,7 @@ function tone(action: RequisitionAction): string {
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="8">暂无需求记录</td>
+          <td class="table-empty" colspan="7">暂无需求记录</td>
         </tr>
       </tbody>
     </table>
@@ -104,7 +102,7 @@ function tone(action: RequisitionAction): string {
   <div v-if="pending" class="overlay" role="presentation" @click.self="pending = null">
     <div class="dialog" role="dialog" aria-modal="true">
       <h3>{{ REQ_ACTION_LABEL[pending.action] }}</h3>
-      <p>需求 {{ pending.row.title }}（{{ pending.row.id }}）</p>
+      <p>需求 {{ pending.row.title }}</p>
       <div class="form-field">
         <label for="req-reason">操作原因（必填）</label>
         <textarea id="req-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>

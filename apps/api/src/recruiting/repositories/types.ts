@@ -30,6 +30,8 @@ export interface RecruitmentRequestRecord extends IdMapping {
   departmentId: string | null
   departmentName: string | null
   requestedById: string | null
+  requesterName: string | null
+  requesterEmail: string | null
   hiringManagerId: string | null
   headcount: number
   budgetMin: number | null

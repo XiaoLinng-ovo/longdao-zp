@@ -13,14 +13,37 @@ describe('AdminService departments', () => {
     assert.deepEqual(departments[0], { id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-09-18T00:00:00.000Z', updatedAt: '2026-09-18T00:00:00.000Z' })
   })
 
-  it('creates a department and rejects blank code or name', async () => {
-    const calls: string[] = []
-    const pool = { query: async (sql: string) => { calls.push(sql); return { rows: [row({ code: 'dept-ops', name: '运营部' })] } } } as never
+  it('creates a department from its name with a generated unique code', async () => {
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql, ...(values === undefined ? {} : { values }) })
+        if (sql.startsWith('INSERT INTO departments')) return { rows: [row({ code: values?.[0], name: values?.[1] })] }
+        return { rows: [] }
+      },
+    } as never
     const service = new AdminService(pool)
-    const created = await service.createDepartment({ code: ' dept-ops ', name: ' 运营部 ' }, 'admin-1', 'req-1')
-    assert.equal(created.code, 'dept-ops')
-    await assert.rejects(() => service.createDepartment({ code: '', name: '运营部' }, 'admin-1'), AdminValidationError)
-    assert.ok(calls.some((sql) => sql.includes('INSERT INTO departments')))
+    const created = await service.createDepartment({ name: ' 运营部 ' }, 'admin-1', 'req-1')
+    assert.match(created.code, /^dept-[0-9a-f]{12}$/)
+    assert.equal(created.name, '运营部')
+    const insert = calls.find((call) => call.sql.startsWith('INSERT INTO departments'))
+    assert.deepEqual(insert?.values?.slice(0, 2), [created.code, '运营部'])
+    await assert.rejects(() => service.createDepartment({ name: ' ' }, 'admin-1'), AdminValidationError)
+  })
+
+  it('retries department code generation after a unique-key collision', async () => {
+    let attempts = 0
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        if (!sql.startsWith('INSERT INTO departments')) return { rows: [] }
+        attempts += 1
+        if (attempts === 1) throw Object.assign(new Error('duplicate'), { code: '23505' })
+        return { rows: [row({ code: values?.[0], name: values?.[1] })] }
+      },
+    } as never
+    const created = await new AdminService(pool).createDepartment({ name: '运营部' }, 'admin-1')
+    assert.equal(attempts, 2)
+    assert.match(created.code, /^dept-[0-9a-f]{12}$/)
   })
 
   it('renames and deactivates without changing the stable code', async () => {

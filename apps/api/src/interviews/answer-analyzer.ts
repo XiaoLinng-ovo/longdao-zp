@@ -1,5 +1,5 @@
 export interface InterviewAnswerAnalyzerConfig { baseUrl: string; apiKey: string; model: string; timeoutMs: number }
-export interface InterviewAnswerAnalysisInput { question: string; candidateAnswer: string; jobTitle: string; jobRequirements: string[]; priorContext: string[] }
+export interface InterviewAnswerAnalysisInput { question: string; candidateAnswer: string; jobTitle: string; jobRequirements: string[]; priorContext: string[]; resumeContext?: string[] }
 export interface InterviewDimensionScore { dimension: string; score: number; rationale: string }
 export interface InterviewAnswerAnalysis { summary: string; evidence: string[]; scores: InterviewDimensionScore[]; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none' }
 export type InterviewAnswerAnalysisErrorCode = 'AI_NOT_CONFIGURED' | 'INVALID_INPUT' | 'MODEL_HTTP_ERROR' | 'MODEL_REQUEST_FAILED' | 'MODEL_RESPONSE_INVALID'
@@ -59,7 +59,7 @@ export function createInterviewAnswerAnalyzer(config: InterviewAnswerAnalyzerCon
   const requestOnce = async (input: InterviewAnswerAnalysisInput): Promise<Omit<InterviewAnswerAnalysis, 'advisoryOnly' | 'applicationStatusMutation'>> => {
     let response: Response
     try {
-      response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: config.model, temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Analyze only the candidate answer using quoted evidence. Return strict JSON with summary, evidence, scores[{dimension,score 0-10,rationale}], concerns, confidence 0-1, nextQuestion. Never return a hiring, rejection, offer, or application-status decision.' }, { role: 'user', content: JSON.stringify(input) }] }), signal: AbortSignal.timeout(config.timeoutMs) })
+      response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: config.model, temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Analyze only the candidate answer using quoted evidence. Use resumeContext and priorContext when provided to check consistency and choose a useful follow-up question. Return strict JSON with summary, evidence, scores[{dimension,score 0-10,rationale}], concerns, confidence 0-1, nextQuestion. Never return a hiring, rejection, offer, or application-status decision.' }, { role: 'user', content: JSON.stringify(input) }] }), signal: AbortSignal.timeout(config.timeoutMs) })
     } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_REQUEST_FAILED', 'Interview answer model request failed.', error) }
     if (!response.ok) throw new InterviewAnswerAnalysisError('MODEL_HTTP_ERROR', `Interview answer model returned HTTP ${response.status}.`)
     let envelope: unknown

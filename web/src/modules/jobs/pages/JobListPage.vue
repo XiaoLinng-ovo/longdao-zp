@@ -117,28 +117,38 @@ onMounted(async () => {
   <div v-if="loading" class="loading-note">正在读取岗位...</div>
   <JobTable v-else :rows="rows" :acting-id="actingId" @action="runAction" @open="openJob" @open-doc="openDoc" />
 
-  <section v-if="showCreateJob" class="form-panel">
-    <div class="section-title">新建岗位</div>
-    <div v-if="error" class="error-note">{{ error }}</div>
-    <div class="form-grid">
-      <div class="form-field">
-        <label>招聘需求 <span class="required">*</span></label>
-        <select v-model="createForm.recruitmentRequestId">
-          <option value="" disabled>选择已审批需求</option>
-          <option v-for="item in approvedRequests" :key="item.id" :value="item.id">{{ item.title }}（{{ item.id }}）</option>
-        </select>
+  <div v-if="showCreateJob" class="overlay" role="presentation" @click.self="showCreateJob = false">
+    <div class="dialog job-create-dialog" role="dialog" aria-modal="true">
+      <h3>新建岗位</h3>
+      <div v-if="error" class="error-note">{{ error }}</div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>招聘需求 <span class="required">*</span></label>
+          <select v-model="createForm.recruitmentRequestId">
+            <option value="" disabled>选择已审批需求</option>
+            <option v-for="item in approvedRequests" :key="item.id" :value="item.id">{{ item.title }}</option>
+          </select>
+        </div>
+        <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="createForm.title" /></div>
+        <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="createForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.code" :disabled="!dept.isActive">{{ dept.name }}</option></select></div>
+        <div class="form-field"><label>负责人</label><input v-model="createForm.hiringManagerId" /></div>
+        <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="createForm.headcount" type="number" min="1" /></div>
+        <div class="form-field"><label>用工类型</label><select v-model="createForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
+        <div class="form-field"><label>工作模式</label><select v-model="createForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>
+        <div class="form-field"><label>工作地点</label><input v-model="createForm.location" /></div>
       </div>
-      <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="createForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="createForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.code" :disabled="!dept.isActive">{{ dept.name }}（{{ dept.code }}）</option></select></div>
-      <div class="form-field"><label>负责人</label><input v-model="createForm.hiringManagerId" /></div>
-      <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="createForm.headcount" type="number" min="1" /></div>
-      <div class="form-field"><label>用工类型</label><select v-model="createForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
-      <div class="form-field"><label>工作模式</label><select v-model="createForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>
-      <div class="form-field"><label>工作地点</label><input v-model="createForm.location" /></div>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="creatingJob" @click="showCreateJob = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="creatingJob" @click="submitCreateJob">{{ creatingJob ? '创建中...' : '创建岗位' }}</button>
+      </div>
     </div>
-    <div class="inline-actions" style="margin-top:14px">
-      <button class="btn btn-primary" type="button" :disabled="creatingJob" @click="submitCreateJob">{{ creatingJob ? '创建中...' : '创建岗位' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="creatingJob" @click="showCreateJob = false">取消</button>
-    </div>
-  </section>
+  </div>
 </template>
+
+<style scoped>
+.job-create-dialog {
+  max-width: 860px;
+  max-height: min(86vh, 760px);
+  overflow-y: auto;
+}
+</style>

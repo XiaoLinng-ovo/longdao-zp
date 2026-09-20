@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
-import { createJob, createJd, createSpec, getJob, jobAction, listJobDescriptionVersions, listJobSpecVersions, loadJobs, updateJob, type ApiJob, type ApiJobJdVersion, type ApiJobSpecVersion, type CreateSpecInput, type JobAction, type JobRequirement, type JobView, type UpdateJobInput } from '../api'
-import { JOB_ACTION_HINT, JOB_ACTION_LABEL, JOB_REASON_REQUIRED, JOB_STATUS_LABEL, editableFieldsForStatus, jobActionsFor, jobPublishHint, jobStatusLabel, validateJobForm } from '../workflow'
+import { createJd, createSpec, generateJobDescription, generateJobSpec, getJob, jobAction, listJobDescriptionVersions, listJobSpecVersions, updateJob, type ApiJob, type ApiJobJdVersion, type ApiJobSpecVersion, type JobAction, type JobRequirement, type UpdateJobInput } from '../api'
+import { JOB_ACTION_LABEL, JOB_REASON_REQUIRED, JOB_STATUS_LABEL, editableFieldsForStatus, jobActionsFor, jobPublishHint, jobStatusLabel, validateJobForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { actionLabel, employmentTypeLabel, statusLabel, workModeLabel } from '../../../shared/utils/labels'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
@@ -26,12 +27,12 @@ const error = ref('')
 const feedback = ref('')
 const acting = ref(false)
 
-const showSpec = ref(false)
-const showJd = ref(false)
 const showEdit = ref(false)
-const specForm = ref({ title: '', summary: '', responsibilitiesText: '', skillsText: '', requirements: [] as JobRequirement[] })
-const jdForm = ref({ language: 'zh-CN', content: '', generatedBy: 'human' as 'human' | 'ai_assisted' })
 const editForm = ref({ title: '', departmentId: '', hiringManagerId: '', employmentType: 'full_time', workMode: 'hybrid', location: '', headcount: 1 })
+const editingSpec = ref(false)
+const editingJd = ref(false)
+const specForm = ref({ title: '', summary: '', responsibilitiesText: '', requirementsText: '', skillsText: '' })
+const jdForm = ref({ language: 'zh-CN', content: '' })
 const specVersions = ref<ApiJobSpecVersion[]>([])
 const jdVersions = ref<ApiJobJdVersion[]>([])
 const auditEvents = ref<WorkflowEvent[]>([])
@@ -50,17 +51,40 @@ const publishDisabled = computed(() => {
   if (!specConfirmed.value || !jdConfirmed.value) return true
   return false
 })
-const publishNote = computed(() => {
-  if (!approvedRequestId.value) return '缺少关联需求或请求状态异常。'
-  if (!requestApproved.value) return '关联需求未处于已通过状态，不能发布。'
-  if (!specConfirmed.value) return '岗位说明书尚未确认。'
-  if (!jdConfirmed.value) return 'JD 尚未确认。'
-  return ''
-})
-const actionHint = computed(() => (pendingAction.value ? JOB_ACTION_HINT[pendingAction.value] : ''))
 const editableFields = computed(() => (job.value ? editableFieldsForStatus(job.value.status) : []))
 
 function clearFlags() { error.value = ''; feedback.value = ''; editError.value = '' }
+
+function splitList(text: string): string[] {
+  return text.split(/[，,、\n]/).map((item) => item.trim()).filter(Boolean)
+}
+
+function requirementsText(requirements: JobRequirement[]): string {
+  return requirements.map((item) => item.description ? `${item.label}：${item.description}` : item.label).join('\n')
+}
+
+function parseRequirements(text: string): JobRequirement[] {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const separator = line.search(/[：:]/)
+    if (separator < 0) return { label: line, required: true }
+    return { label: line.slice(0, separator).trim(), description: line.slice(separator + 1).trim(), required: true }
+  }).filter((item) => item.label)
+}
+
+function resetSpecForm() {
+  const spec = job.value?.spec
+  specForm.value = {
+    title: spec?.title || job.value?.title || '',
+    summary: spec?.summary || '',
+    responsibilitiesText: (spec?.responsibilities || []).join('\n'),
+    requirementsText: requirementsText(spec?.requirements || []),
+    skillsText: (spec?.skills || []).join('、'),
+  }
+}
+
+function resetJdForm() {
+  jdForm.value = { language: job.value?.jd?.language || 'zh-CN', content: job.value?.jd?.content || '' }
+}
 
 async function loadAuditEvents(jobIdValue: string) {
   loadingAudit.value = true
@@ -89,6 +113,8 @@ async function refresh() {
     departments.value = departmentRows
     specConfirmed.value = Boolean(job.value?.spec?.confirmed)
     jdConfirmed.value = Boolean(job.value?.jd?.confirmed)
+    resetSpecForm()
+    resetJdForm()
     await loadAuditEvents(jobId.value)
     if (approvedRequestId.value && !requestTitle.value) {
       try {
@@ -105,21 +131,6 @@ async function refresh() {
     loading.value = false
   }
 }
-
-function resetSpecForm() {
-  const spec = job.value?.spec
-  specForm.value = {
-    title: spec?.title || job.value?.title || '',
-    summary: spec?.summary || '',
-    responsibilitiesText: (spec?.responsibilities || []).join('，'),
-    skillsText: (spec?.skills || []).join('，'),
-    requirements: (spec?.requirements || []).map((item) => ({ label: item.label, description: item.description, required: item.required ?? true, weight: item.weight })),
-  }
-  if (!specForm.value.requirements.length) specForm.value.requirements.push({ label: '', description: '', required: true })
-}
-
-function addRequirement() { specForm.value.requirements.push({ label: '', description: '', required: true }) }
-function removeRequirement(index: number) { specForm.value.requirements.splice(index, 1) }
 
 function openEditForm() {
   if (!job.value) return
@@ -167,50 +178,99 @@ async function submitEdit() {
   }
 }
 
-async function submitSpec() {
+async function generateSpec() {
   if (acting.value || !job.value) return
-  if (!specForm.value.title.trim() || !specForm.value.summary.trim()) {
-    error.value = '请填写说明书标题与摘要'
-    return
-  }
-  const payload: CreateSpecInput = {
-    title: specForm.value.title.trim(),
-    summary: specForm.value.summary.trim(),
-    responsibilities: splitList(specForm.value.responsibilitiesText),
-    requirements: specForm.value.requirements.filter((item) => item.label.trim()),
-    skills: splitList(specForm.value.skillsText),
-  }
   acting.value = true
   clearFlags()
   try {
-    job.value = await createSpec(job.value.id, payload)
+    job.value = await generateJobSpec(job.value.id)
     specVersions.value = await listJobSpecVersions(job.value.id)
     specConfirmed.value = Boolean(job.value.spec?.confirmed)
-    feedback.value = '岗位说明书已创建（未确认）'
-    showSpec.value = false
+    editingSpec.value = false
+    resetSpecForm()
+    feedback.value = job.value.spec?.generatedBy === 'local_fallback'
+      ? '未配置 AI 大模型，已使用本地模板生成岗位说明书（未确认）'
+      : 'AI 已根据岗位名称生成岗位说明书（未确认）'
   } catch (cause) {
-    error.value = describeApiFailure(cause, '创建岗位说明书失败').message
+    error.value = describeApiFailure(cause, '生成岗位说明书失败').message
   } finally {
     acting.value = false
   }
 }
 
-async function submitJd() {
+async function generateJd() {
   if (acting.value || !job.value) return
-  if (!jdForm.value.content.trim()) {
-    error.value = '请填写 JD 内容'
+  acting.value = true
+  clearFlags()
+  try {
+    job.value = await generateJobDescription(job.value.id)
+    jdVersions.value = await listJobDescriptionVersions(job.value.id)
+    jdConfirmed.value = Boolean(job.value.jd?.confirmed)
+    editingJd.value = false
+    resetJdForm()
+    feedback.value = job.value.jd?.generatedBy === 'local_fallback'
+      ? '未配置 AI 大模型，已使用本地模板生成 JD（未确认）'
+      : 'AI 已根据岗位生成 JD（未确认）'
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '生成 JD 失败').message
+  } finally {
+    acting.value = false
+  }
+}
+
+function openSpecEditor() {
+  resetSpecForm()
+  editingSpec.value = true
+}
+
+function openJdEditor() {
+  resetJdForm()
+  editingJd.value = true
+}
+
+async function saveSpec() {
+  if (acting.value || !job.value) return
+  if (!specForm.value.title.trim() || !specForm.value.summary.trim()) {
+    error.value = '请填写说明书标题和摘要'
     return
   }
   acting.value = true
   clearFlags()
   try {
-    job.value = await createJd(job.value.id, { language: jdForm.value.language, content: jdForm.value.content.trim(), generatedBy: jdForm.value.generatedBy })
-    jdVersions.value = await listJobDescriptionVersions(job.value.id)
-    jdConfirmed.value = Boolean(job.value.jd?.confirmed)
-    feedback.value = 'JD 已创建（未确认）'
-    showJd.value = false
+    job.value = await createSpec(job.value.id, {
+      title: specForm.value.title.trim(),
+      summary: specForm.value.summary.trim(),
+      responsibilities: splitList(specForm.value.responsibilitiesText),
+      requirements: parseRequirements(specForm.value.requirementsText),
+      skills: splitList(specForm.value.skillsText),
+    })
+    specVersions.value = await listJobSpecVersions(job.value.id)
+    specConfirmed.value = false
+    editingSpec.value = false
+    feedback.value = '岗位说明书已保存为新版本（未确认）'
   } catch (cause) {
-    error.value = describeApiFailure(cause, '创建 JD 失败').message
+    error.value = describeApiFailure(cause, '保存岗位说明书失败').message
+  } finally {
+    acting.value = false
+  }
+}
+
+async function saveJd() {
+  if (acting.value || !job.value) return
+  if (!jdForm.value.content.trim()) {
+    error.value = 'JD 内容不能为空'
+    return
+  }
+  acting.value = true
+  clearFlags()
+  try {
+    job.value = await createJd(job.value.id, { language: jdForm.value.language, content: jdForm.value.content.trim(), generatedBy: 'human' })
+    jdVersions.value = await listJobDescriptionVersions(job.value.id)
+    jdConfirmed.value = false
+    editingJd.value = false
+    feedback.value = 'JD 已保存为新版本（未确认）'
+  } catch (cause) {
+    error.value = describeApiFailure(cause, '保存 JD 失败').message
   } finally {
     acting.value = false
   }
@@ -247,38 +307,32 @@ async function runAction(action: JobAction) {
 
 function submitPending() { if (pendingAction.value) void runAction(pendingAction.value) }
 
-function splitList(text: string): string[] {
-  return text.split(/[，,、]/).map((item) => item.trim()).filter(Boolean)
-}
-
 function requirementText(item: JobRequirement): string {
   const parts = [item.label, item.description].filter(Boolean)
   return parts.join('：')
 }
 
-function openSpecForm() {
-  resetSpecForm()
-  showSpec.value = true
+function jdSourceLabel(generatedBy: string): string {
+  if (generatedBy === 'local_fallback') return '本地生成'
+  if (generatedBy === 'ai_assisted') return 'AI 辅助'
+  return '人工'
 }
 
-function openJdForm() {
-  showJd.value = true
-}
-
-function applyDocQuery() {
+async function applyDocQuery() {
   const doc = route.query.doc
-  if (doc === 'spec') openSpecForm()
-  else if (doc === 'jd') openJdForm()
+  if (doc !== 'spec' && doc !== 'jd') return
+  await nextTick()
+  document.getElementById(`job-document-${doc}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 onMounted(async () => {
   await refresh()
-  applyDocQuery()
+  await applyDocQuery()
 })
 </script>
 
 <template>
-  <PageHeader title="岗位详情" :description="job ? `${job.title}（${job.code || job.id}）` : ''">
+  <PageHeader title="岗位详情" :description="job?.title || ''">
     <div class="inline-actions">
       <button class="btn btn-ghost" type="button" @click="router.back">返回列表</button>
       <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
@@ -292,124 +346,68 @@ onMounted(async () => {
   <section v-else-if="job" class="form-panel">
     <div class="section-title">基础信息</div>
     <div class="detail-grid">
-      <div class="detail-item"><span>岗位编号</span><strong>{{ job.code || job.id }}</strong></div>
       <div class="detail-item"><span>部门</span><strong>{{ job.department }}</strong></div>
       <div class="detail-item"><span>状态</span><StatusTag :status="job.status" /></div>
       <div class="detail-item"><span>招聘人数</span><strong>{{ job.headcount }} / 已入职 {{ job.filledCount }}</strong></div>
-      <div class="detail-item"><span>用工类型</span><strong>{{ job.employmentType }}</strong></div>
-      <div class="detail-item"><span>工作模式</span><strong>{{ job.workMode }}</strong></div>
-      <div class="detail-item"><span>需求来源</span><strong>{{ requestTitle || job.recruitmentRequestId || '—' }}</strong></div>
+      <div class="detail-item"><span>用工类型</span><strong>{{ employmentTypeLabel(job.employmentType) }}</strong></div>
+      <div class="detail-item"><span>工作模式</span><strong>{{ workModeLabel(job.workMode) }}</strong></div>
+      <div class="detail-item"><span>需求来源</span><strong>{{ requestTitle || '—' }}</strong></div>
       <div class="detail-item"><span>发布渠道</span><strong>{{ job.channels.length ? job.channels.join('、') : '未发布' }}</strong></div>
       <div class="detail-item"><span>更新日期</span><strong>{{ job.updatedAt.slice(0, 10) }}</strong></div>
     </div>
 
-    <div class="section-title" style="margin-top:18px">发布前检查</div>
-    <div class="detail-card">
-      <div class="detail-grid">
-        <div class="detail-item"><span>关联需求</span><strong>{{ approvedRequestId || '未设置' }}</strong></div>
-        <div class="detail-item"><span>需求审批状态</span><StatusTag :status="requestApproved ? 'approved' : 'pending_approval'" /></div>
-        <div class="detail-item"><span>说明书确认</span><StatusTag :status="specConfirmed ? 'approved' : 'pending'" /></div>
-        <div class="detail-item"><span>JD 确认</span><StatusTag :status="jdConfirmed ? 'approved' : 'pending'" /></div>
-        <div class="detail-item" style="grid-column:1 / -1"><span>发布提示</span><strong>{{ publishNote || '需求审批、说明书和 JD 已就绪，可尝试发布。' }}</strong></div>
-      </div>
-    </div>
-
-    <div v-if="!job.spec || !job.jd" class="doc-empty">
-      <div class="doc-empty-inner">
-        <span class="doc-empty-title">岗位文档待完善</span>
-        <div class="inline-actions">
-          <div v-if="!job.spec" class="doc-empty-item">
-            <span>尚未创建岗位说明书</span>
-            <button class="btn btn-primary" type="button" :disabled="acting" @click="openSpecForm()">新建说明书</button>
+    <div class="section-title" style="margin-top:18px">岗位文档</div>
+    <div class="document-grid">
+      <article id="job-document-spec" class="document-card">
+        <header>
+          <div><strong>岗位说明书</strong><span v-if="job.spec" class="list-muted">v{{ job.spec.version }} · {{ job.spec.generatedBy === 'local_fallback' ? '本地生成' : 'AI 生成' }} · {{ job.spec.confirmed ? '已确认' : '未确认' }}</span><span v-else class="list-muted">未创建</span></div>
+          <div class="inline-actions">
+            <template v-if="editingSpec">
+              <button class="btn btn-primary" type="button" :disabled="acting" @click="saveSpec">{{ acting ? '保存中...' : '保存' }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="editingSpec = false">取消</button>
+            </template>
+            <template v-else>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="generateSpec">{{ acting ? '生成中...' : (job.spec ? 'AI 重新生成' : 'AI 生成') }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="openSpecEditor">{{ job.spec ? '编辑' : '手动填写' }}</button>
+              <button v-if="job.spec && !job.spec.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-spec')">确认</button>
+            </template>
           </div>
-          <div v-if="!job.jd" class="doc-empty-item">
-            <span>尚未创建 JD</span>
-            <button class="btn btn-primary" type="button" :disabled="acting" @click="openJdForm()">新建 JD</button>
+        </header>
+        <template v-if="editingSpec">
+          <label>标题<input v-model="specForm.title" /></label>
+          <label>摘要<textarea v-model="specForm.summary" rows="2"></textarea></label>
+          <label>职责（每行一条）<textarea v-model="specForm.responsibilitiesText" rows="3"></textarea></label>
+          <label>要求（每行一条，可写“名称：描述”）<textarea v-model="specForm.requirementsText" rows="3"></textarea></label>
+          <label>技能（逗号分隔）<input v-model="specForm.skillsText" /></label>
+        </template>
+        <template v-else-if="job.spec">
+          <p>{{ job.spec.summary }}</p>
+          <div class="document-block"><span>职责</span><ul><li v-for="(item, index) in job.spec.responsibilities" :key="index">{{ item }}</li></ul></div>
+          <div class="document-block"><span>要求</span><ul><li v-for="(item, index) in job.spec.requirements" :key="index">{{ requirementText(item) }}</li></ul></div>
+          <div class="document-block"><span>技能</span><p>{{ job.spec.skills.join('、') || '—' }}</p></div>
+        </template>
+        <p v-else class="hint">尚未生成岗位说明书。</p>
+      </article>
+
+      <article id="job-document-jd" class="document-card">
+        <header>
+          <div><strong>JD</strong><span v-if="job.jd" class="list-muted">v{{ job.jd.version }} · {{ jdSourceLabel(job.jd.generatedBy) }} · {{ job.jd.confirmed ? '已确认' : '未确认' }}</span><span v-else class="list-muted">未创建</span></div>
+          <div class="inline-actions">
+            <template v-if="editingJd">
+              <button class="btn btn-primary" type="button" :disabled="acting" @click="saveJd">{{ acting ? '保存中...' : '保存' }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="editingJd = false">取消</button>
+            </template>
+            <template v-else>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="generateJd">{{ acting ? '生成中...' : (job.jd ? 'AI 重新生成' : 'AI 生成') }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting" @click="openJdEditor">{{ job.jd ? '编辑' : '手动填写' }}</button>
+              <button v-if="job.jd && !job.jd.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-jd')">确认</button>
+            </template>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="section-title" style="margin-top:18px">岗位说明书</div>
-    <div v-if="job.spec" class="detail-card">
-      <div class="detail-meta">
-        <span class="list-muted">版本 {{ job.spec.version }} · {{ job.spec.confirmed ? '已确认' : '未确认' }}</span>
-        <button v-if="!job.spec.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-spec')">确认说明书</button>
-      </div>
-      <strong>{{ job.spec.title }}</strong>
-      <p class="list-muted">{{ job.spec.summary }}</p>
-      <p class="list-muted">职责：{{ (job.spec.responsibilities || []).join('、') || '—' }}</p>
-      <p class="list-muted">技能：{{ (job.spec.skills || []).join('、') || '—' }}</p>
-      <ul v-if="job.spec.requirements.length">
-        <li v-for="(item, index) in job.spec.requirements" :key="index">{{ requirementText(item) }}<span v-if="item.required" class="list-muted">（必填）</span></li>
-      </ul>
-    </div>
-    <div v-else class="empty-note">
-      <span>暂无岗位说明书</span>
-      <button class="btn btn-primary" type="button" :disabled="acting" @click="openSpecForm()">新建说明书</button>
-    </div>
-
-    <div class="section-title" style="margin-top:18px">JD</div>
-    <div v-if="job.jd" class="detail-card">
-      <div class="detail-meta">
-        <span class="list-muted">版本 {{ job.jd.version }} · {{ job.jd.language }} · {{ job.jd.generatedBy === 'ai_assisted' ? 'AI 辅助' : '人工' }} · {{ job.jd.confirmed ? '已确认' : '未确认' }}</span>
-        <button v-if="!job.jd.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-jd')">确认 JD</button>
-      </div>
-      <p style="white-space:pre-wrap">{{ job.jd.content }}</p>
-    </div>
-    <div v-else class="empty-note">
-      <span>暂无 JD</span>
-      <button class="btn btn-primary" type="button" :disabled="acting" @click="openJdForm()">新建 JD</button>
-    </div>
-
-    <div v-if="specVersions.length" class="section-title" style="margin-top:18px">说明书版本历史</div>
-    <div v-if="specVersions.length" class="detail-card">
-      <table class="detail-table">
-        <thead><tr><th>版本</th><th>标题</th><th>状态</th><th>创建时间</th></tr></thead>
-        <tbody>
-          <tr v-for="item in specVersions" :key="item.jobId + '-spec-' + item.version">
-            <td>v{{ item.version }}</td>
-            <td>{{ item.title }}</td>
-            <td>{{ item.confirmed ? '已确认' : '未确认' }}</td>
-            <td>{{ (item.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div v-if="jdVersions.length" class="section-title" style="margin-top:18px">JD 版本历史</div>
-    <div v-if="jdVersions.length" class="detail-card">
-      <table class="detail-table">
-        <thead><tr><th>版本</th><th>语言</th><th>生成方式</th><th>状态</th><th>创建时间</th><th>内容</th></tr></thead>
-        <tbody>
-          <tr v-for="item in jdVersions" :key="item.jobId + '-jd-' + item.version">
-            <td>v{{ item.version }}</td>
-            <td>{{ item.language }}</td>
-            <td>{{ item.generatedBy === 'ai_assisted' ? 'AI 辅助' : '人工' }}</td>
-            <td>{{ item.confirmed ? '已确认' : '未确认' }}</td>
-            <td>{{ (item.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
-            <td><pre>{{ item.content }}</pre></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="section-title" style="margin-top:18px">流程审计</div>
-    <div v-if="loadingAudit" class="loading-note">正在读取审计记录...</div>
-    <div v-else-if="!auditEvents.length" class="hint">暂无流程审计记录</div>
-    <div v-else class="detail-card">
-      <table class="detail-table">
-        <thead><tr><th>时间</th><th>动作</th><th>状态流转</th><th>操作人</th><th>原因</th></tr></thead>
-        <tbody>
-          <tr v-for="event in auditEvents" :key="event.id">
-            <td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
-            <td>{{ event.action }}</td>
-            <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-            <td>{{ event.actorName || event.actorId || '系统' }}</td>
-            <td>{{ event.reason || '-' }}</td>
-          </tr>
-        </tbody>
-      </table>
+        </header>
+        <textarea v-if="editingJd" v-model="jdForm.content" rows="12"></textarea>
+        <pre v-else-if="job.jd">{{ job.jd.content }}</pre>
+        <p v-else class="hint">尚未生成 JD。</p>
+      </article>
     </div>
 
     <div class="section-title" style="margin-top:18px">可执行动作</div>
@@ -428,42 +426,31 @@ onMounted(async () => {
       <span v-if="!actions.length" class="hint">当前状态无可执行动作</span>
       <span class="hint">{{ publishHint || `当前状态：${JOB_STATUS_LABEL[job.status] ?? job.status}` }}</span>
     </div>
-  </section>
 
-  <section v-if="showSpec" class="form-panel">
-    <div class="section-title">新建岗位说明书</div>
-    <div class="form-grid">
-      <div class="form-field"><label>标题</label><input v-model="specForm.title" /></div>
-      <div class="form-field"><label>摘要</label><input v-model="specForm.summary" /></div>
-      <div class="form-field"><label>职责（逗号分隔）</label><input v-model="specForm.responsibilitiesText" /></div>
-      <div class="form-field"><label>技能（逗号分隔）</label><input v-model="specForm.skillsText" /></div>
-      <div class="form-field" style="grid-column: 1 / -1">
-        <label>要求</label>
-        <div v-for="(item, index) in specForm.requirements" :key="index" class="requirement-row">
-          <input v-model="item.label" placeholder="名称，例如：本科及以上学历" />
-          <input v-model="item.description" placeholder="描述，例如：计算机相关专业" />
-          <label><input type="checkbox" v-model="item.required" /> 必填</label>
-          <button class="btn btn-ghost" type="button" @click="removeRequirement(index)">删除</button>
-        </div>
-        <button class="btn btn-ghost" type="button" @click="addRequirement">添加要求</button>
-      </div>
-    </div>
-    <div class="inline-actions" style="margin-top:14px">
-      <button class="btn btn-primary" type="button" :disabled="acting" @click="submitSpec">{{ acting ? '保存中...' : '保存说明书' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="acting" @click="showSpec = false">取消</button>
-    </div>
-  </section>
-
-  <section v-if="showJd" class="form-panel">
-    <div class="section-title">新建 JD</div>
-    <div class="form-grid">
-      <div class="form-field"><label>语言</label><select v-model="jdForm.language"><option value="zh-CN">中文</option><option value="en">英文</option></select></div>
-      <div class="form-field"><label>生成方式</label><select v-model="jdForm.generatedBy"><option value="human">人工</option><option value="ai_assisted">AI 辅助</option></select></div>
-      <div class="form-field" style="grid-column: 1 / -1"><label>内容</label><textarea v-model="jdForm.content" rows="5" placeholder="请输入岗位描述"></textarea></div>
-    </div>
-    <div class="inline-actions" style="margin-top:14px">
-      <button class="btn btn-primary" type="button" :disabled="acting" @click="submitJd">{{ acting ? '保存中...' : '保存 JD' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="acting" @click="showJd = false">取消</button>
+    <div class="details-stack">
+      <details v-if="specVersions.length">
+        <summary>说明书版本历史（{{ specVersions.length }}）</summary>
+        <table class="detail-table">
+          <thead><tr><th>版本</th><th>标题</th><th>状态</th><th>创建时间</th></tr></thead>
+          <tbody><tr v-for="item in specVersions" :key="item.jobId + '-spec-' + item.version"><td>v{{ item.version }}</td><td>{{ item.title }}</td><td>{{ item.confirmed ? '已确认' : '未确认' }}</td><td>{{ (item.createdAt || '').slice(0, 19).replace('T', ' ') }}</td></tr></tbody>
+        </table>
+      </details>
+      <details v-if="jdVersions.length">
+        <summary>JD 版本历史（{{ jdVersions.length }}）</summary>
+        <table class="detail-table">
+          <thead><tr><th>版本</th><th>生成方式</th><th>状态</th><th>创建时间</th></tr></thead>
+          <tbody><tr v-for="item in jdVersions" :key="item.jobId + '-jd-' + item.version"><td>v{{ item.version }}</td><td>{{ jdSourceLabel(item.generatedBy) }}</td><td>{{ item.confirmed ? '已确认' : '未确认' }}</td><td>{{ (item.createdAt || '').slice(0, 19).replace('T', ' ') }}</td></tr></tbody>
+        </table>
+      </details>
+      <details>
+        <summary>流程审计（{{ auditEvents.length }}）</summary>
+        <div v-if="loadingAudit" class="loading-note">正在读取审计记录...</div>
+        <p v-else-if="!auditEvents.length" class="hint">暂无流程审计记录</p>
+        <table v-else class="detail-table">
+          <thead><tr><th>时间</th><th>动作</th><th>状态流转</th><th>操作人</th><th>原因</th></tr></thead>
+          <tbody><tr v-for="event in auditEvents" :key="event.id"><td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td><td>{{ actionLabel(event.action) }}</td><td>{{ statusLabel(event.fromStatus) }} → {{ statusLabel(event.toStatus) }}</td><td>{{ event.actorName || '系统' }}</td><td>{{ event.reason || '-' }}</td></tr></tbody>
+        </table>
+      </details>
     </div>
   </section>
 
@@ -472,7 +459,7 @@ onMounted(async () => {
     <div v-if="editError" class="error-note">{{ editError }}</div>
     <div class="form-grid">
       <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="editForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}（{{ department.code }}）{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
+      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
       <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="editForm.headcount" type="number" min="1" /></div>
       <div class="form-field"><label>用工类型 <span class="required">*</span></label><select v-model="editForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
       <div class="form-field"><label>工作模式 <span class="required">*</span></label><select v-model="editForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>
@@ -504,33 +491,26 @@ onMounted(async () => {
 <style scoped>
 p { margin: 8px 0; }
 ul { margin: 8px 0 0; padding-left: 20px; }
-.doc-empty {
-  margin: 14px 0;
-  padding: 14px;
-  background: #fff7ed;
-  border: 1px solid #fed7aa;
-  border-left: 3px solid #f97316;
-  border-radius: var(--radius);
-}
-.doc-empty-inner {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-.doc-empty-title {
-  font-weight: 700;
-  color: #9a3412;
-}
-.doc-empty-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: #7c2d12;
-  font-size: 12.5px;
-}
+.document-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.document-card { border: 1px solid var(--border); background: #fff; padding: 16px; min-width: 0; }
+.document-card header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.document-card header strong { display: block; margin-bottom: 4px; }
+.document-card header span { display: block; }
+.document-card label { display: grid; gap: 6px; margin-bottom: 10px; font-size: 13px; color: var(--text-muted); }
+.document-card input, .document-card textarea { width: 100%; }
+.document-card > pre { margin: 0; white-space: pre-wrap; font-family: inherit; line-height: 1.7; }
+.document-block { margin-top: 14px; }
+.document-block > span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--text-muted); }
+.details-stack { display: grid; gap: 10px; margin-top: 18px; }
+.details-stack details { border: 1px solid var(--border); background: #fff; padding: 12px 14px; }
+.details-stack summary { cursor: pointer; font-weight: 600; }
+.details-stack .detail-table { margin-top: 12px; }
 .detail-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .detail-table th, .detail-table td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 13px; }
 .detail-table th { background: #f9fafb; }
 .detail-table pre { margin: 0; white-space: pre-wrap; font-family: inherit; }
+@media (max-width: 900px) {
+  .document-grid { grid-template-columns: 1fr; }
+  .document-card header { flex-direction: column; }
+}
 </style>

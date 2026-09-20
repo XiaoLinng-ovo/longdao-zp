@@ -13,6 +13,7 @@ import {
   lockFeedback,
   submitFeedback,
   INTERVIEW_TYPE_LABEL,
+  PARTICIPANT_ROLE_LABEL,
   RECOMMENDATION_LABEL,
   type ApiInterviewDetail,
   type FeedbackRecommendation,
@@ -44,12 +45,23 @@ const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
 const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
 const interviewerOptions = computed(() => detail.value?.participants.filter((participant) => participant.role === 'interviewer') ?? [])
+const scheduleText = computed(() => {
+  if (!detail.value) return ''
+  const start = formatDate(detail.value.scheduledStartAt)
+  return detail.value.scheduledEndAt ? `${start} - ${formatDate(detail.value.scheduledEndAt)}` : start
+})
+const participantText = computed(() => detail.value?.participants
+  .map((participant) => `${participant.name || '待确认'}（${PARTICIPANT_ROLE_LABEL[participant.role] || '面试官'}${participant.required ? '，必须参加' : ''}）`)
+  .join('、') || '未设置')
 
 function interviewerName(userId: string): string {
   return detail.value?.participants.find((participant) => participant.userId === userId)?.name || userId
 }
 
-function clearFlags() { error.value = ''; feedback.value = '' }
+function clearFlags() {
+  error.value = ''
+  feedback.value = ''
+}
 
 async function loadAuditEvents(interviewId: string) {
   loadingAudit.value = true
@@ -170,134 +182,297 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page">
-    <PageHeader
-      title="面试详情"
-      subtitle="查看面试安排、候选人与反馈记录"
-      icon="④"
-      :crumb="detail ? `面试 / ${detail.code || detail.id}` : '面试 / 详情'"
-    />
+  <PageHeader
+    title="面试详情"
+    :description="detail ? `${candidateName} · ${jobTitle}` : '查看面试安排、候选人与反馈记录'"
+  >
+    <div class="inline-actions">
+      <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
+        进入 AI 面试室
+      </button>
+      <button v-if="detail && detail.feedbackStatus !== 'locked' && detail.status !== 'cancelled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openFeedback">
+        填写并锁定反馈
+      </button>
+      <button v-if="detail && detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openConclude">
+        完成面试
+      </button>
+      <button class="btn btn-ghost" type="button" @click="router.push('/interviews')">返回面试中心</button>
+      <button class="btn btn-ghost" type="button" @click="load">刷新</button>
+    </div>
+  </PageHeader>
 
-    <div v-if="loading" class="list-muted">正在加载面试详情...</div>
-    <div v-else-if="error" class="feedback error">{{ error }}</div>
+  <div v-if="loading" class="loading-note">正在加载面试详情...</div>
+  <div v-else-if="error" class="error-note">{{ error }}</div>
 
-    <section v-else-if="detail" class="detail-grid">
-      <div class="card">
-        <div class="section-title">基础信息</div>
-        <dl class="info-list">
-          <div><dt>编号</dt><dd>{{ detail.code || detail.id }}</dd></div>
-          <div><dt>候选人</dt><dd>{{ candidateName }}</dd></div>
-          <div><dt>岗位</dt><dd>{{ jobTitle }}</dd></div>
-          <div><dt>申请</dt><dd>{{ detail.application?.code || detail.application?.id }}</dd></div>
-          <div><dt>轮次</dt><dd>{{ detail.round }} 轮</dd></div>
-          <div><dt>类型</dt><dd>{{ INTERVIEW_TYPE_LABEL[detail.type] || detail.type }}</dd></div>
-          <div><dt>状态</dt><dd><StatusTag :status="detail.status" /></dd></div>
-          <div><dt>反馈状态</dt><dd><StatusTag :status="detail.feedbackStatus" /></dd></div>
-          <div><dt>开始时间</dt><dd>{{ formatDate(detail.scheduledStartAt) }}</dd></div>
-          <div><dt>结束时间</dt><dd>{{ formatDate(detail.scheduledEndAt) }}</dd></div>
-          <div><dt>时区</dt><dd>{{ detail.timezone || '未设置' }}</dd></div>
-          <div><dt>面试地点</dt><dd>{{ detail.location || '未设置' }}</dd></div>
-          <div><dt>会议链接</dt><dd>{{ detail.meetingUrl || '未设置' }}</dd></div>
-        </dl>
-      </div>
+  <template v-else-if="detail">
+    <div v-if="feedback" class="success-note">{{ feedback }}</div>
 
-      <div class="card">
-        <div class="section-title">面试操作</div>
-        <div class="inline-actions" style="flex-wrap: wrap">
-          <button v-if="detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">进入 AI 面试室</button>
-          <button v-if="detail.feedbackStatus !== 'locked' && detail.status !== 'cancelled'" class="btn btn-primary" type="button" :disabled="acting" @click="openFeedback">填写并锁定反馈</button>
-          <button v-if="detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openConclude">完成面试</button>
-          <span v-if="detail.status === 'cancelled'" class="list-muted">已取消面试</span>
+    <section class="interview-summary" aria-label="面试关键信息">
+      <div class="summary-head">
+        <div class="summary-title">
+          <strong>{{ INTERVIEW_TYPE_LABEL[detail.type] || detail.type }}</strong>
+          <span>第 {{ detail.round }} 轮</span>
         </div>
-        <div v-if="feedback" class="feedback success" style="margin-top:10px">{{ feedback }}</div>
+        <div class="summary-status">
+          <StatusTag :status="detail.status" />
+          <StatusTag :status="detail.feedbackStatus" />
+        </div>
       </div>
+      <dl class="summary-facts">
+        <div><dt>时间</dt><dd>{{ scheduleText }}</dd></div>
+        <div>
+          <dt>地点 / 会议</dt>
+          <dd><a v-if="detail.meetingUrl" :href="detail.meetingUrl" target="_blank" rel="noreferrer">{{ detail.meetingUrl }}</a><span v-else>{{ detail.location || '未设置' }}</span></dd>
+        </div>
+        <div><dt>参与人</dt><dd>{{ participantText }}</dd></div>
+      </dl>
+    </section>
 
-      <div class="card">
-        <div class="section-title">面试参与人</div>
-        <div v-if="detail.participants.length" class="person-list">
-          <div v-for="participant in detail.participants" :key="participant.userId" class="person-item">
-            <strong>{{ participant.name || participant.userId }}</strong>
-            <span>{{ participant.role }}</span>
-            <span>{{ participant.required ? '必须参加' : '可选' }}</span>
+    <section v-if="detail.feedback.length" class="form-panel">
+      <div class="section-title">面试反馈</div>
+      <div class="feedback-list">
+        <article v-for="item in detail.feedback" :key="item.id" class="feedback-item">
+          <div class="feedback-head">
+            <strong>{{ interviewerName(item.interviewerId) }}</strong>
+            <StatusTag :status="item.status" />
           </div>
-        </div>
-        <div v-else class="list-muted">暂无参与人</div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">面试反馈</div>
-        <div v-if="detail.feedback.length" class="feedback-list">
-          <article v-for="item in detail.feedback" :key="item.id" class="feedback-card">
-            <div class="feedback-head">
-              <strong>{{ interviewerName(item.interviewerId) }}</strong>
-              <StatusTag :status="item.status" />
-            </div>
-            <div class="feedback-meta">
-              <span>总分：{{ item.overallScore ?? '未评分' }}</span>
-              <span>结论：{{ recommendationLabel(item.recommendation) }}</span>
-              <span>提交时间：{{ formatDate(item.submittedAt) }}</span>
-              <span>锁定时间：{{ formatDate(item.lockedAt) }}</span>
-            </div>
-            <dl class="info-list compact">
-              <div><dt>优点</dt><dd>{{ item.strengths.join('、') || '无' }}</dd></div>
-              <div><dt>顾虑</dt><dd>{{ item.concerns.join('、') || '无' }}</dd></div>
-              <div><dt>备注</dt><dd>{{ item.notes || '无' }}</dd></div>
-            </dl>
-          </article>
-        </div>
-        <div v-else class="list-muted">暂无反馈，可直接在本页填写并锁定反馈。</div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">流程审计</div>
-        <WorkflowEventTable :events="auditEvents" :loading="loadingAudit" />
-      </div>
-
-      <div class="inline-actions">
-        <button class="btn btn-ghost" type="button" @click="router.push('/interviews')">返回面试中心</button>
+          <div class="feedback-meta">
+            <span>总分：{{ item.overallScore ?? '未评分' }}</span>
+            <span>结论：{{ recommendationLabel(item.recommendation) }}</span>
+            <span>提交：{{ formatDate(item.submittedAt) }}</span>
+            <span>锁定：{{ formatDate(item.lockedAt) }}</span>
+          </div>
+          <div class="feedback-detail">
+            <p><strong>优点：</strong>{{ item.strengths.join('、') || '无' }}</p>
+            <p><strong>顾虑：</strong>{{ item.concerns.join('、') || '无' }}</p>
+            <p><strong>备注：</strong>{{ item.notes || '无' }}</p>
+          </div>
+        </article>
       </div>
     </section>
 
-    <div v-if="showFeedback && detail" class="overlay" role="presentation" @click.self="showFeedback = false">
-      <div class="dialog" role="dialog" aria-modal="true">
-        <h3>填写面试反馈</h3>
-        <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-field"><label>面试官</label><select v-model="feedbackForm.interviewerId"><option value="" disabled>请选择面试官</option><option v-for="p in interviewerOptions" :key="p.userId" :value="p.userId">{{ p.name || p.userId }}</option></select></div>
-          <div class="form-field"><label>综合评分（0-100）</label><input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" /></div>
-          <div class="form-field" style="grid-column:1 / -1">
-            <label>推荐结论</label>
-            <select v-model="feedbackForm.recommendation"><option v-for="r in recommendations" :key="r.value" :value="r.value">{{ r.label }}</option></select>
-          </div>
-          <div class="form-field" style="grid-column:1 / -1"><label>优点（逗号分隔）</label><input v-model="feedbackForm.strengths" /></div>
-          <div class="form-field" style="grid-column:1 / -1"><label>顾虑（逗号分隔）</label><input v-model="feedbackForm.concerns" /></div>
-          <div class="form-field" style="grid-column:1 / -1"><label>备注</label><textarea v-model="feedbackForm.notes" rows="2"></textarea></div>
-        </div>
-        <div class="dialog-buttons">
-          <button class="btn btn-ghost" type="button" :disabled="acting" @click="showFeedback = false">取消</button>
-          <button class="btn btn-primary" type="button" :disabled="acting" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
-        </div>
-      </div>
-    </div>
+    <details class="form-panel audit-details">
+      <summary>流程审计 <span class="list-muted">{{ auditEvents.length }} 条</span></summary>
+      <WorkflowEventTable :events="auditEvents" :loading="loadingAudit" />
+    </details>
+  </template>
 
-    <div v-if="showConclude && detail" class="overlay" role="presentation" @click.self="showConclude = false">
-      <div class="dialog" role="dialog" aria-modal="true">
-        <h3>完成面试</h3>
-        <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
+  <div v-if="showFeedback && detail" class="overlay" role="presentation" @click.self="showFeedback = false">
+    <div class="dialog" role="dialog" aria-modal="true">
+      <h3>填写面试反馈</h3>
+      <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
+      <div class="form-grid">
         <div class="form-field">
-          <label>面试结论</label>
-          <select v-model="concludeOutcome">
-            <option value="continue">进入下一轮</option>
-            <option value="offer">通过，进入 Offer</option>
-            <option value="reject">未通过</option>
+          <label>面试官</label>
+          <select v-model="feedbackForm.interviewerId">
+            <option value="" disabled>请选择面试官</option>
+            <option v-for="p in interviewerOptions" :key="p.userId" :value="p.userId">{{ p.name || '待确认' }}</option>
           </select>
         </div>
-        <p class="list-muted">请先确保所有面试官反馈均已提交并锁定；提交后结论将写入申请状态。</p>
-        <div class="dialog-buttons">
-          <button class="btn btn-ghost" type="button" :disabled="acting" @click="showConclude = false">取消</button>
-          <button class="btn btn-primary" type="button" :disabled="acting" @click="submitConclude">{{ acting ? '提交中...' : '确认完成' }}</button>
+        <div class="form-field">
+          <label>综合评分（0-100）</label>
+          <input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" />
         </div>
+        <div class="form-field">
+          <label>推荐结论</label>
+          <select v-model="feedbackForm.recommendation">
+            <option v-for="r in recommendations" :key="r.value" :value="r.value">{{ r.label }}</option>
+          </select>
+        </div>
+        <div class="form-field form-wide"><label>优点（逗号分隔）</label><input v-model="feedbackForm.strengths" /></div>
+        <div class="form-field form-wide"><label>顾虑（逗号分隔）</label><input v-model="feedbackForm.concerns" /></div>
+        <div class="form-field form-wide"><label>备注</label><textarea v-model="feedbackForm.notes" rows="3"></textarea></div>
+      </div>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showFeedback = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="showConclude && detail" class="overlay" role="presentation" @click.self="showConclude = false">
+    <div class="dialog" role="dialog" aria-modal="true">
+      <h3>完成面试</h3>
+      <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
+      <div class="form-field">
+        <label>面试结论</label>
+        <select v-model="concludeOutcome">
+          <option value="continue">进入下一轮</option>
+          <option value="offer">通过，进入 Offer</option>
+          <option value="reject">未通过</option>
+        </select>
+      </div>
+      <p class="list-muted">请先确保所有面试官反馈均已提交并锁定；提交后结论将写入申请状态。</p>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showConclude = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitConclude">{{ acting ? '提交中...' : '确认完成' }}</button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.interview-summary {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.summary-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.summary-title strong {
+  color: #1e293b;
+  font-size: 16px;
+}
+
+.summary-title span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.summary-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.summary-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 14px 0 0;
+}
+
+.summary-facts div {
+  min-width: 0;
+}
+
+.summary-facts dt {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.summary-facts dd {
+  margin: 0;
+  color: #1e293b;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.summary-facts a {
+  color: var(--primary);
+}
+
+.success-note {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid #bbf7d0;
+  border-radius: 7px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 12px;
+}
+
+.feedback-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.feedback-item {
+  padding: 12px 0;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.feedback-item:last-child {
+  border-bottom: 0;
+}
+
+.feedback-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.feedback-head strong {
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.feedback-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.feedback-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.feedback-detail p {
+  margin: 0;
+  color: #475569;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.feedback-detail p + p {
+  margin-top: 4px;
+}
+
+.list-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.form-wide {
+  grid-column: 1 / -1;
+}
+
+.audit-details summary {
+  cursor: pointer;
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.audit-details summary .list-muted {
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+.audit-details[open] summary {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 900px) {
+  .summary-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-head {
+    flex-direction: column;
+  }
+}
+</style>

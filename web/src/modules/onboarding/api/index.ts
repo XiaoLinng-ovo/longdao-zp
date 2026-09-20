@@ -40,20 +40,14 @@ export const ONBOARDING_STATUS_LABEL: Record<OnboardingStatus, string> = {
   cancelled: '已取消',
 }
 
-function label(value: string, fallback: string): string {
-  return value || fallback
+function candidateLabel(candidate: ApiCandidate | undefined, _application: ApiApplication | undefined): string {
+  if (!candidate) return '未知候选人'
+  return candidate.fullName || '未知候选人'
 }
 
-function candidateLabel(candidate: ApiCandidate | undefined, application: ApiApplication | undefined): string {
-  const fallback = application?.candidateId || '未知候选人'
-  if (!candidate) return fallback
-  return label(candidate.fullName, candidate.code || candidate.id)
-}
-
-function jobLabel(job: ApiJob | undefined, application: ApiApplication | undefined): string {
-  const fallback = application?.jobId || '未知岗位'
-  if (!job) return fallback
-  return label(job.title, job.code || job.id)
+function jobLabel(job: ApiJob | undefined, _application: ApiApplication | undefined): string {
+  if (!job) return '未知岗位'
+  return job.title || '未知岗位'
 }
 
 export function toOnboardingRow(

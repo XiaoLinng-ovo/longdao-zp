@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { anonymizeText, buildResumeAnalysisPrompt, buildRuleBasedReport, parseLlmResumeSuggestion, parseResume } from '../src/index.js'
+import { anonymizeText, buildResumeAnalysisPrompt, buildRuleBasedReport, extractResume, parseLlmResumeSuggestion, parseResume } from '../src/index.js'
 
 const resume = `张三
 zhangsan@example.com
@@ -54,14 +54,28 @@ test('builds a privacy-aware LLM prompt', () => {
   assert.equal(prompt.includes('[EMAIL]'), true)
 })
 
+test('classifies Chinese resume section headings and extracts content', () => {
+  const parsed = parseResume({ fileName: 'resume.txt', mimeType: 'text/plain', text: resume, source: 'test' })
+  const kinds = parsed.sections.map((section) => section.kind)
+  assert.ok(kinds.includes('experience'), '工作经历 should map to experience')
+  assert.ok(kinds.includes('education'), '教育经历 should map to education')
+  assert.ok(kinds.includes('skills'), '技能 should map to skills')
+  const extraction = extractResume(parsed)
+  assert.ok(extraction.experience.length > 0)
+  assert.ok(extraction.education.length > 0)
+  assert.ok(extraction.skills.length > 0)
+  assert.equal(extraction.skills.some((skill) => skill.canonical === 'typescript'), true)
+})
+
 test('validates the structured LLM suggestion contract', () => {
   const suggestion = parseLlmResumeSuggestion({
-    summary: '建议人工复核', strengths: ['TypeScript'], risks: [],
+    summary: '建议人工复核', score: 82, strengths: ['TypeScript'], risks: [],
     matchedRequirements: [], conflicts: [], interviewQuestions: ['请介绍项目'], confidence: 0.8,
   })
+  assert.equal(suggestion.score, 82)
   assert.equal(suggestion.confidence, 0.8)
   assert.throws(() => parseLlmResumeSuggestion({ summary: 42 }), /summary/u)
   assert.throws(() => parseLlmResumeSuggestion({
-    summary: 'x', strengths: [], risks: [], matchedRequirements: [], conflicts: [], interviewQuestions: [], confidence: 2,
+    summary: 'x', score: 80, strengths: [], risks: [], matchedRequirements: [], conflicts: [], interviewQuestions: [], confidence: 2,
   }), /confidence/u)
 })

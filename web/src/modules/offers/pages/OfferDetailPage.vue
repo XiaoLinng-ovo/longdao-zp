@@ -6,6 +6,7 @@ import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { employmentTypeLabel } from '../../../shared/utils/labels'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import {
   getOffer,
@@ -228,7 +229,7 @@ onMounted(load)
       title="Offer 详情"
       subtitle="查看录用审批、版本、薪资本内容和状态轨迹"
       icon="⑥"
-      :crumb="offer ? `录用 / ${offer.code}` : '录用 / Offer 详情'"
+      crumb="录用 / Offer 详情"
     />
 
     <div v-if="loading" class="list-muted">正在加载 Offer 详情...</div>
@@ -238,13 +239,11 @@ onMounted(load)
       <div class="card">
         <div class="section-title">Offer 基础信息</div>
         <dl class="info-list">
-          <div><dt>编号</dt><dd>{{ offer.code }}</dd></div>
           <div><dt>状态</dt><dd><StatusTag :status="offer.status" /></dd></div>
           <div><dt>审批状态</dt><dd><StatusTag :status="offer.approval?.status || 'pending'" /></dd></div>
           <div><dt>审批人</dt><dd>{{ offer.approval?.approver || '待审批' }}</dd></div>
           <div><dt>候选人</dt><dd>{{ candidateName }}</dd></div>
           <div><dt>岗位</dt><dd>{{ jobTitle }}</dd></div>
-          <div><dt>申请</dt><dd>{{ applicationCode || offer.applicationId }}</dd></div>
           <div><dt>当前版本</dt><dd>V{{ offer.version }}</dd></div>
           <div><dt>发送时间</dt><dd>{{ date(offer.sentAt) }}</dd></div>
           <div><dt>回应时间</dt><dd>{{ date(offer.respondedAt) }}</dd></div>
@@ -278,7 +277,7 @@ onMounted(load)
         <dl class="info-list">
           <div><dt>职位名称</dt><dd>{{ currentVersion.positionTitle }}</dd></div>
           <div><dt>部门</dt><dd>{{ departmentName || currentVersion.departmentId }}</dd></div>
-          <div><dt>用工类型</dt><dd>{{ currentVersion.employmentType }}</dd></div>
+          <div><dt>用工类型</dt><dd>{{ employmentTypeLabel(currentVersion.employmentType) }}</dd></div>
           <div><dt>入职日期</dt><dd>{{ currentVersion.startDate || '—' }}</dd></div>
           <div><dt>基本薪资</dt><dd>{{ money(currentVersion.compensation.baseSalary) }}</dd></div>
           <div><dt>奖金</dt><dd>{{ money(currentVersion.compensation.bonus) }}</dd></div>
@@ -320,7 +319,7 @@ onMounted(load)
     <div v-if="pendingAction" class="overlay" role="presentation" @click.self="pendingAction = null">
       <div class="dialog" role="dialog" aria-modal="true">
         <h3>{{ OFFER_ACTION_LABEL[pendingAction] }}</h3>
-        <p>Offer {{ offer?.code }}（{{ applicationCode || offer?.applicationId }}）</p>
+        <p>Offer {{ candidateName }} · {{ jobTitle }}</p>
         <div class="form-field">
           <label for="offer-detail-reason">操作原因（必填）</label>
           <textarea id="offer-detail-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>
@@ -334,7 +333,7 @@ onMounted(load)
 
     <div v-if="showRevise" class="overlay" role="presentation" @click.self="showRevise = false">
       <div class="dialog" role="dialog" aria-modal="true" style="max-width:620px">
-        <h3>修订 Offer（{{ offer?.code }}）</h3>
+        <h3>修订 Offer</h3>
         <div class="form-grid">
           <div class="form-field"><label>职位名称</label><input v-model="reviseForm.positionTitle" /></div>
           <div class="form-field"><label>部门</label><input v-model="reviseForm.departmentId" /></div>

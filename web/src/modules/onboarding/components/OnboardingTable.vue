@@ -12,9 +12,6 @@ const emit = defineEmits<{ open: [row: OnboardingRow] }>()
     <table>
       <thead>
         <tr>
-          <th>入职归档</th>
-          <th>申请</th>
-          <th>Offer</th>
           <th>候选人</th>
           <th>岗位</th>
           <th>状态</th>
@@ -25,10 +22,7 @@ const emit = defineEmits<{ open: [row: OnboardingRow] }>()
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.id">
-          <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.id.slice(0, 8) }}</a></td>
-          <td>{{ row.applicationCode }}</td>
-          <td><strong>{{ row.offerCode }}</strong></td>
-          <td>{{ row.candidate }}</td>
+          <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.candidate }}</a></td>
           <td>{{ row.job }}</td>
           <td><StatusTag :status="row.status" /></td>
           <td>{{ row.plannedStartDate || '未排期' }}</td>
@@ -36,7 +30,7 @@ const emit = defineEmits<{ open: [row: OnboardingRow] }>()
           <td><button class="btn btn-ghost" type="button" @click="emit('open', row)">详情</button></td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="9">暂无入职归档记录。可在「录用审批与 Offer」中将已接受 Offer 执行「入职归档」。</td>
+          <td class="table-empty" colspan="6">暂无入职归档记录。可在「录用审批与 Offer」中将已接受 Offer 执行「入职归档」。</td>
         </tr>
       </tbody>
     </table>

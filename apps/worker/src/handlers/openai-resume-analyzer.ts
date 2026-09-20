@@ -39,13 +39,25 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
   const request = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 30_000
   return async ({ task, content, context }): Promise<ResumeAnalysisResult> => {
+    const requirementLabels = task.payload.jobRequirements ?? []
+    const job = {
+      ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }),
+      title: task.payload.jobTitle ?? '',
+      requirements: requirementLabels.map((label, index) => ({
+        id: `${task.payload.jobId ?? 'job'}-requirement-${index + 1}`,
+        label,
+        kind: 'other' as const,
+        keywords: [label],
+        hard: index === 0,
+      })),
+    }
     const report = buildRuleBasedReport({
       resume: {
         documentId: task.payload.resumeId, fileName: content.fileName, text: content.text,
         ...(content.mimeType === undefined ? {} : { mimeType: content.mimeType }),
         ...(task.payload.source === undefined ? {} : { source: task.payload.source }),
       },
-      job: { ...(task.payload.jobId === undefined ? {} : { jobId: task.payload.jobId }), title: '', requirements: [] },
+      job,
       subject: {
         resumeId: task.payload.resumeId,
         ...(task.payload.applicationId === undefined ? {} : { applicationId: task.payload.applicationId }),
@@ -72,7 +84,7 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
           temperature: 0,
           messages: [
             { role: 'system', content: '只返回符合要求的 JSON。分析仅供人工参考，不得作出自动招聘决定。' },
-            { role: 'user', content: buildResumeAnalysisPrompt({ anonymizedResumeText: anonymized.text, job: { title: '', requirements: [] } }) },
+            { role: 'user', content: buildResumeAnalysisPrompt({ anonymizedResumeText: anonymized.text, job }) },
           ],
         }),
         signal: controller.signal,
@@ -102,6 +114,8 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
     }
     report.assessment = {
       ...report.assessment,
+      score: suggestion.score,
+      recommendation: suggestion.score >= 85 ? 'strong_match' : suggestion.score >= 70 ? 'match' : suggestion.score >= 55 ? 'needs_review' : 'weak_match',
       strengths: suggestion.strengths,
       risks: suggestion.risks,
       interviewQuestions: suggestion.interviewQuestions,

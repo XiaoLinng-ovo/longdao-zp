@@ -86,7 +86,7 @@ export async function listAdminDepartments(): Promise<AdminDepartment[]> {
   return (await apiClient.getJson<AdminDepartment[]>('/admin/departments')).data
 }
 
-export async function createAdminDepartment(input: { code: string; name: string }): Promise<AdminDepartment> {
+export async function createAdminDepartment(input: { name: string }): Promise<AdminDepartment> {
   return (await apiClient.postJson<AdminDepartment>('/admin/departments', input)).data
 }
 
@@ -125,6 +125,42 @@ export async function getResumeVirusScanSetting(): Promise<ResumeVirusScanSettin
 
 export async function updateResumeVirusScanSetting(enabled: boolean): Promise<ResumeVirusScanSetting> {
   return (await apiClient.patchJson<ResumeVirusScanSetting>('/admin/resume-virus-scan', { enabled })).data
+}
+
+export interface AiEnvSetting { value: string; configured: boolean; masked: boolean }
+
+export type AiEnvSettings = Record<'OPENAI_BASE_URL' | 'OPENAI_API_KEY' | 'OPENAI_MODEL' | 'OPENAI_TIMEOUT_MS', AiEnvSetting>
+
+export interface AiSettings {
+  configured: boolean
+  baseUrlHost: string
+  model: string
+  timeoutMs: number
+  apiKeyConfigured: boolean
+  missing: string[]
+  env: AiEnvSettings
+}
+
+export interface AiConnectionTestResult {
+  ok: boolean
+  status?: number
+  message: string
+  latencyMs: number
+  models: string[]
+}
+
+export async function getAiSettings(): Promise<AiSettings> {
+  return (await apiClient.getJson<AiSettings>('/admin/ai-settings')).data
+}
+
+export interface AiConnectionTestInput { baseUrl?: string; apiKey?: string }
+
+export async function testAiConnection(input: AiConnectionTestInput = {}): Promise<AiConnectionTestResult> {
+  return (await apiClient.postJson<AiConnectionTestResult>('/admin/ai-connection-test', input)).data
+}
+
+export async function saveAiSettings(patch: Partial<Record<keyof AiEnvSettings, string>>): Promise<AiSettings> {
+  return (await apiClient.patchJson<AiSettings>('/admin/ai-settings', patch)).data
 }
 
 export async function listFailedAnalysisTasks(): Promise<AdminAnalysisTask[]> {
