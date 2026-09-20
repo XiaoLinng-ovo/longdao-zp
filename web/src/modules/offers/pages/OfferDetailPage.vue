@@ -26,6 +26,8 @@ const offer = ref<ApiOffer | null>(null)
 const currentVersion = ref<ApiOfferVersion | null>(null)
 const candidateName = ref('')
 const jobTitle = ref('')
+const applicationCode = ref('')
+const departmentName = ref('')
 const loading = ref(true)
 const error = ref('')
 const feedback = ref('')
@@ -95,14 +97,17 @@ async function load() {
     offer.value = detail.offer
     currentVersion.value = detail.version ?? null
 
-    const [applicationRes, candidateRes, jobRes] = await Promise.all([
+    const [applicationRes, candidateRes, jobRes, departmentRes] = await Promise.all([
       apiClient.getJson<Array<{ id: string; code: string; candidateId: string; jobId: string; status: string }>>('/applications'),
       apiClient.getJson<Array<{ id: string; fullName: string; code?: string }>>('/candidates'),
       apiClient.getJson<Array<{ id: string; title: string }>>('/jobs'),
+      apiClient.getJson<Array<{ id: string; name: string }>>('/departments'),
     ])
     const application = applicationRes.data.find((item) => item.id === detail.offer.applicationId)
     candidateName.value = candidateRes.data.find((item) => item.id === application?.candidateId)?.fullName || application?.candidateId || '未知候选人'
     jobTitle.value = jobRes.data.find((item) => item.id === application?.jobId)?.title || application?.jobId || '未知岗位'
+    applicationCode.value = application?.code || ''
+    departmentName.value = departmentRes.data.find((item) => item.id === detail.version?.departmentId)?.name || detail.version?.departmentId || ''
     await loadAuditEvents(id)
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取 Offer 详情失败').message
@@ -239,7 +244,7 @@ onMounted(load)
           <div><dt>审批人</dt><dd>{{ offer.approval?.approver || '待审批' }}</dd></div>
           <div><dt>候选人</dt><dd>{{ candidateName }}</dd></div>
           <div><dt>岗位</dt><dd>{{ jobTitle }}</dd></div>
-          <div><dt>申请</dt><dd>{{ offer.applicationId }}</dd></div>
+          <div><dt>申请</dt><dd>{{ applicationCode || offer.applicationId }}</dd></div>
           <div><dt>当前版本</dt><dd>V{{ offer.version }}</dd></div>
           <div><dt>发送时间</dt><dd>{{ date(offer.sentAt) }}</dd></div>
           <div><dt>回应时间</dt><dd>{{ date(offer.respondedAt) }}</dd></div>
@@ -272,7 +277,7 @@ onMounted(load)
         <div class="section-title">当前版本内容</div>
         <dl class="info-list">
           <div><dt>职位名称</dt><dd>{{ currentVersion.positionTitle }}</dd></div>
-          <div><dt>部门</dt><dd>{{ currentVersion.departmentId }}</dd></div>
+          <div><dt>部门</dt><dd>{{ departmentName || currentVersion.departmentId }}</dd></div>
           <div><dt>用工类型</dt><dd>{{ currentVersion.employmentType }}</dd></div>
           <div><dt>入职日期</dt><dd>{{ currentVersion.startDate || '—' }}</dd></div>
           <div><dt>基本薪资</dt><dd>{{ money(currentVersion.compensation.baseSalary) }}</dd></div>
@@ -315,7 +320,7 @@ onMounted(load)
     <div v-if="pendingAction" class="overlay" role="presentation" @click.self="pendingAction = null">
       <div class="dialog" role="dialog" aria-modal="true">
         <h3>{{ OFFER_ACTION_LABEL[pendingAction] }}</h3>
-        <p>Offer {{ offer?.code }}（{{ offer?.applicationId }}）</p>
+        <p>Offer {{ offer?.code }}（{{ applicationCode || offer?.applicationId }}）</p>
         <div class="form-field">
           <label for="offer-detail-reason">操作原因（必填）</label>
           <textarea id="offer-detail-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>

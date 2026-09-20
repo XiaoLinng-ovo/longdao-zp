@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
 import { createJob, jobAction, loadJobs, type JobAction, type JobView } from '../api'
+import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
 import { JOB_ACTION_LABEL } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import PageHeader from '../../../shared/components/PageHeader.vue'
@@ -19,6 +20,7 @@ const actingId = ref('')
 const showCreateJob = ref(false)
 const creatingJob = ref(false)
 const approvedRequests = ref<Array<{ id: string; title: string }>>([])
+const departments = ref<ApiDepartment[]>([])
 const createForm = ref({ recruitmentRequestId: '', title: '', departmentId: '', hiringManagerId: '', employmentType: 'full_time', workMode: 'hybrid', location: '', headcount: 1 })
 
 function clearFlags() { error.value = ''; feedback.value = '' }
@@ -27,9 +29,10 @@ async function refresh() {
   loading.value = true
   clearFlags()
   try {
-    const [jobs, requests] = await Promise.all([loadJobs(), apiClient.getJson<any[]>('/recruitment-requests').then(res => res.data).catch(() => [])])
+    const [jobs, requests, depts] = await Promise.all([loadJobs(), apiClient.getJson<any[]>('/recruitment-requests').then(res => res.data).catch(() => []), loadDepartments().catch(() => [])])
     rows.value = jobs
     approvedRequests.value = requests.filter((item) => item.status === 'approved').map((item) => ({ id: item.id, title: item.title }))
+    departments.value = depts
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取岗位失败').message
   } finally {
@@ -126,7 +129,7 @@ onMounted(async () => {
         </select>
       </div>
       <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="createForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><input v-model="createForm.departmentId" /></div>
+      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="createForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.code" :disabled="!dept.isActive">{{ dept.name }}（{{ dept.code }}）</option></select></div>
       <div class="form-field"><label>负责人</label><input v-model="createForm.hiringManagerId" /></div>
       <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="createForm.headcount" type="number" min="1" /></div>
       <div class="form-field"><label>用工类型</label><select v-model="createForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>

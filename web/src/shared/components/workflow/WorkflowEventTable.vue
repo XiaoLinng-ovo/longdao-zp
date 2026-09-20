@@ -21,7 +21,7 @@ defineProps<{
           <td>{{ event.subjectLabel || event.subjectId }}</td>
           <td>{{ event.action }}</td>
           <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-          <td>{{ event.actorId || '系统' }}</td>
+          <td>{{ event.actorName || event.actorId || '系统' }}</td>
           <td>{{ event.reason || '-' }}</td>
         </tr>
       </tbody>

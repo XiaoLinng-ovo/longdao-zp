@@ -43,6 +43,11 @@ const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
 const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
+const interviewerOptions = computed(() => detail.value?.participants.filter((participant) => participant.role === 'interviewer') ?? [])
+
+function interviewerName(userId: string): string {
+  return detail.value?.participants.find((participant) => participant.userId === userId)?.name || userId
+}
 
 function clearFlags() { error.value = ''; feedback.value = '' }
 
@@ -110,7 +115,7 @@ function splitList(text: string): string[] {
 async function submitFeedbackForm() {
   if (!detail.value || acting.value) return
   const form = feedbackForm.value
-  if (!form.interviewerId.trim()) { error.value = '请填写面试官 ID'; return }
+  if (!form.interviewerId.trim()) { error.value = '请选择面试官'; return }
   const score = Number(form.overallScore)
   if (!Number.isFinite(score) || score < 0 || score > 100) { error.value = '综合评分需在 0-100 之间'; return }
 
@@ -224,7 +229,7 @@ onMounted(load)
         <div v-if="detail.feedback.length" class="feedback-list">
           <article v-for="item in detail.feedback" :key="item.id" class="feedback-card">
             <div class="feedback-head">
-              <strong>{{ item.interviewerId }}</strong>
+              <strong>{{ interviewerName(item.interviewerId) }}</strong>
               <StatusTag :status="item.status" />
             </div>
             <div class="feedback-meta">
@@ -258,7 +263,7 @@ onMounted(load)
         <h3>填写面试反馈</h3>
         <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
         <div class="form-grid" style="grid-template-columns:1fr 1fr">
-          <div class="form-field"><label>面试官 ID</label><input v-model="feedbackForm.interviewerId" /></div>
+          <div class="form-field"><label>面试官</label><select v-model="feedbackForm.interviewerId"><option value="" disabled>请选择面试官</option><option v-for="p in interviewerOptions" :key="p.userId" :value="p.userId">{{ p.name || p.userId }}</option></select></div>
           <div class="form-field"><label>综合评分（0-100）</label><input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" /></div>
           <div class="form-field" style="grid-column:1 / -1">
             <label>推荐结论</label>

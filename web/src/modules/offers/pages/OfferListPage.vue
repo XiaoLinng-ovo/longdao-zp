@@ -19,6 +19,7 @@ import {
   type OfferRow,
 } from '../api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import OfferTable from '../components/OfferTable.vue'
@@ -31,6 +32,8 @@ const feedback = ref('')
 const actingId = ref('')
 
 const applications = ref<ApiApplication[]>([])
+const departments = ref<ApiDepartment[]>([])
+const detailApplicationCode = ref('')
 const showCreate = ref(false)
 const creating = ref(false)
 const createForm = ref({
@@ -85,7 +88,9 @@ async function refresh() {
 async function ensureApplications() {
   if (applications.value.length) return
   try {
-    applications.value = await loadApplicationsForOffer()
+    const [apps, depts] = await Promise.all([loadApplicationsForOffer(), loadDepartments().catch(() => [])])
+    applications.value = apps
+    departments.value = depts
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取申请失败').message
   }
@@ -178,10 +183,13 @@ async function openDetail(row: OfferRow) {
   clearFlags()
   selectedCandidate.value = row.candidate
   selectedJob.value = row.job
+  detailApplicationCode.value = ''
   showDetail.value = true
   detail.value = null
   try {
     detail.value = await getOffer(row.entityId)
+    await ensureApplications()
+    detailApplicationCode.value = applications.value.find((app) => app.id === detail.value?.offer.applicationId)?.code || ''
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取 Offer 详情失败').message
   }
@@ -283,7 +291,7 @@ onMounted(refresh)
         </select>
       </div>
       <div class="form-field"><label>职位名称</label><input v-model="createForm.positionTitle" /></div>
-      <div class="form-field"><label>部门</label><input v-model="createForm.departmentId" /></div>
+      <div class="form-field"><label>部门</label><select v-model="createForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></div>
       <div class="form-field">
         <label>用工类型</label>
         <select v-model="createForm.employmentType">
@@ -311,7 +319,7 @@ onMounted(refresh)
       <h3>修订 Offer（{{ reviseTarget.code }}）</h3>
       <div class="form-grid">
         <div class="form-field"><label>职位名称</label><input v-model="reviseForm.positionTitle" /></div>
-        <div class="form-field"><label>部门</label><input v-model="reviseForm.departmentId" /></div>
+        <div class="form-field"><label>部门</label><select v-model="reviseForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></div>
         <div class="form-field">
           <label>用工类型</label>
           <select v-model="reviseForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select>
@@ -339,7 +347,7 @@ onMounted(refresh)
           <div class="detail-item"><span>编号</span><strong>{{ detail.offer.code }}</strong></div>
           <div class="detail-item"><span>状态</span><StatusTag :status="detail.offer.status" /></div>
           <div class="detail-item"><span>审批</span><StatusTag :status="detail.offer.approval.status" /></div>
-          <div class="detail-item"><span>申请</span><strong>{{ detail.offer.applicationId }}</strong></div>
+          <div class="detail-item"><span>申请</span><strong>{{ detailApplicationCode || detail.offer.applicationId }}</strong></div>
           <div class="detail-item"><span>候选人</span><strong>{{ selectedCandidate }}</strong></div>
           <div class="detail-item"><span>岗位</span><strong>{{ selectedJob }}</strong></div>
           <div class="detail-item"><span>审批人</span><strong>{{ detail.offer.approval.approver || '待审批' }}</strong></div>

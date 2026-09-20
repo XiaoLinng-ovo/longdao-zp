@@ -26,7 +26,7 @@ const emit = defineEmits<{ open: [row: OnboardingRow] }>()
       <tbody>
         <tr v-for="row in rows" :key="row.id">
           <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.id.slice(0, 8) }}</a></td>
-          <td>{{ row.applicationId }}</td>
+          <td>{{ row.applicationCode }}</td>
           <td><strong>{{ row.offerCode }}</strong></td>
           <td>{{ row.candidate }}</td>
           <td>{{ row.job }}</td>

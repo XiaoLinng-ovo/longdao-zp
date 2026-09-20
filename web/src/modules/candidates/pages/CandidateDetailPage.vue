@@ -14,6 +14,7 @@ import {
   uploadResume,
 } from '../api'
 import type { ApiAnalysisResult, ApiApplication, ApiCandidateDetail, CandidateStatus } from '../api'
+import { humanReviewStatusLabel, recommendationLabel } from '../labels'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { isApiClientError } from '../../../shared/api'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
@@ -505,7 +506,7 @@ onMounted(refresh)
           <strong>综合评分：{{ result.result?.assessment?.score != null ? result.result.assessment.score : '—' }}</strong>
           <StatusTag :status="result.humanReviewStatus" />
         </div>
-        <div class="list-muted">推荐结论：{{ result.result?.assessment?.recommendation || '—' }}</div>
+        <div class="list-muted">推荐结论：{{ recommendationLabel(result.result?.assessment?.recommendation) }}</div>
         <div class="list-muted">生成于 {{ (result.createdAt || '').slice(0, 10) || '—' }}</div>
         <div class="inline-actions" style="margin-top:8px">
           <button class="btn btn-ghost btn-sm" type="button" @click="openReview(result)">人工复核</button>

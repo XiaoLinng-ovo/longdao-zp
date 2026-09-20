@@ -65,6 +65,7 @@ export interface OfferRow {
   entityId: string
   code: string
   applicationId: string
+  applicationCode: string
   candidate: string
   job: string
   status: OfferStatus
@@ -120,6 +121,7 @@ function toRow(row: ApiOffer, applicationMap: Map<string, ApiApplication>, candi
     entityId: row.id,
     code: row.code,
     applicationId: row.applicationId,
+    applicationCode: application?.code || row.applicationId,
     candidate: candidateLabel(candidateMap.get(application?.candidateId ?? '')),
     job: jobLabel(jobMap.get(application?.jobId ?? ''), application?.jobId ?? ''),
     status: row.status,

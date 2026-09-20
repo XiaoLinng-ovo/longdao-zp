@@ -70,7 +70,7 @@ function submitReason() {
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
           <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.code }}</a></td>
-          <td>{{ row.applicationId }}</td>
+          <td>{{ row.applicationCode }}</td>
           <td><strong>{{ row.candidate }}</strong></td>
           <td>{{ row.job }}</td>
           <td><StatusTag :status="row.status" /></td>
@@ -106,7 +106,7 @@ function submitReason() {
   <div v-if="pending" class="overlay" role="presentation" @click.self="pending = null">
     <div class="dialog" role="dialog" aria-modal="true">
       <h3>{{ OFFER_ACTION_LABEL[pending.action] }}</h3>
-      <p>Offer {{ pending.row.code }}（{{ pending.row.applicationId }}）</p>
+      <p>Offer {{ pending.row.code }}（{{ pending.row.applicationCode }}）</p>
       <div class="form-field">
         <label for="offer-reason">操作原因（必填）</label>
         <textarea id="offer-reason" v-model="reason" rows="3" placeholder="请填写操作原因"></textarea>

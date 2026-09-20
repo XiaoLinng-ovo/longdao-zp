@@ -6,6 +6,7 @@ import { createJob, createJd, createSpec, getJob, jobAction, listJobDescriptionV
 import { JOB_ACTION_HINT, JOB_ACTION_LABEL, JOB_REASON_REQUIRED, JOB_STATUS_LABEL, editableFieldsForStatus, jobActionsFor, jobPublishHint, jobStatusLabel, validateJobForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
+import { loadDepartments, type ApiDepartment } from '../../requisitions/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
@@ -14,6 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const jobId = computed(() => String(route.params.id || ''))
 const job = ref<ApiJob | null>(null)
+const departments = ref<ApiDepartment[]>([])
 const specConfirmed = ref(false)
 const jdConfirmed = ref(false)
 const approvedRequestId = computed(() => (job.value ? job.value.recruitmentRequestId || route.query.recruitmentRequestId || '' : ''))
@@ -77,12 +79,14 @@ async function refresh() {
   clearFlags()
   try {
     job.value = await getJob(jobId.value)
-    const [specHistory, jdHistory] = await Promise.all([
+    const [specHistory, jdHistory, departmentRows] = await Promise.all([
       listJobSpecVersions(jobId.value),
       listJobDescriptionVersions(jobId.value),
+      loadDepartments().catch(() => []),
     ])
     specVersions.value = specHistory
     jdVersions.value = jdHistory
+    departments.value = departmentRows
     specConfirmed.value = Boolean(job.value?.spec?.confirmed)
     jdConfirmed.value = Boolean(job.value?.jd?.confirmed)
     await loadAuditEvents(jobId.value)
@@ -119,6 +123,9 @@ function removeRequirement(index: number) { specForm.value.requirements.splice(i
 
 function openEditForm() {
   if (!job.value) return
+  if (job.value.departmentId && !departments.value.some((item) => item.code === job.value?.departmentId)) {
+    departments.value.push({ id: `legacy-${job.value.departmentId}`, code: job.value.departmentId, name: job.value.department || job.value.departmentId, isActive: false })
+  }
   editForm.value = {
     title: job.value.title,
     departmentId: job.value.departmentId,
@@ -291,7 +298,7 @@ onMounted(async () => {
       <div class="detail-item"><span>招聘人数</span><strong>{{ job.headcount }} / 已入职 {{ job.filledCount }}</strong></div>
       <div class="detail-item"><span>用工类型</span><strong>{{ job.employmentType }}</strong></div>
       <div class="detail-item"><span>工作模式</span><strong>{{ job.workMode }}</strong></div>
-      <div class="detail-item"><span>需求来源</span><strong>{{ job.recruitmentRequestId || '—' }}</strong></div>
+      <div class="detail-item"><span>需求来源</span><strong>{{ requestTitle || job.recruitmentRequestId || '—' }}</strong></div>
       <div class="detail-item"><span>发布渠道</span><strong>{{ job.channels.length ? job.channels.join('、') : '未发布' }}</strong></div>
       <div class="detail-item"><span>更新日期</span><strong>{{ job.updatedAt.slice(0, 10) }}</strong></div>
     </div>
@@ -398,7 +405,7 @@ onMounted(async () => {
             <td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
             <td>{{ event.action }}</td>
             <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-            <td>{{ event.actorId || '系统' }}</td>
+            <td>{{ event.actorName || event.actorId || '系统' }}</td>
             <td>{{ event.reason || '-' }}</td>
           </tr>
         </tbody>
@@ -465,7 +472,7 @@ onMounted(async () => {
     <div v-if="editError" class="error-note">{{ editError }}</div>
     <div class="form-grid">
       <div class="form-field"><label>岗位名称 <span class="required">*</span></label><input v-model="editForm.title" /></div>
-      <div class="form-field"><label>部门 <span class="required">*</span></label><input v-model="editForm.departmentId" /></div>
+      <div class="form-field"><label>部门 <span class="required">*</span></label><select v-model="editForm.departmentId"><option value="" disabled>请选择部门</option><option v-for="department in departments" :key="department.id" :value="department.code" :disabled="!department.isActive">{{ department.name }}（{{ department.code }}）{{ department.isActive ? '' : '（已停用，仅保留历史）' }}</option></select></div>
       <div class="form-field"><label>招聘人数 <span class="required">*</span></label><input v-model.number="editForm.headcount" type="number" min="1" /></div>
       <div class="form-field"><label>用工类型 <span class="required">*</span></label><select v-model="editForm.employmentType"><option value="full_time">全职</option><option value="part_time">兼职</option><option value="internship">实习</option></select></div>
       <div class="form-field"><label>工作模式 <span class="required">*</span></label><select v-model="editForm.workMode"><option value="hybrid">混合办公</option><option value="onsite">现场办公</option><option value="remote">远程</option></select></div>

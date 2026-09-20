@@ -109,7 +109,7 @@ onMounted(refresh)
         <div class="detail-grid">
           <div class="detail-item"><span>入职档案</span><strong>{{ selected.id }}</strong></div>
           <div class="detail-item"><span>状态</span><StatusTag :status="selected.status" /></div>
-          <div class="detail-item"><span>申请</span><strong>{{ selected.applicationId }}</strong></div>
+          <div class="detail-item"><span>申请</span><strong>{{ selected.applicationCode }}</strong></div>
           <div class="detail-item"><span>Offer</span><strong>{{ selected.offerCode }}</strong></div>
           <div class="detail-item"><span>候选人</span><strong>{{ selected.candidate }}</strong></div>
           <div class="detail-item"><span>岗位</span><strong>{{ selected.job }}</strong></div>

@@ -22,6 +22,7 @@ interface ApiOffer { id: string; code: string; applicationId: string; status: st
 export interface OnboardingRow {
   id: string
   applicationId: string
+  applicationCode: string
   offerId: string
   candidate: string
   job: string
@@ -65,6 +66,7 @@ export function toOnboardingRow(
   return {
     id: record.id,
     applicationId: record.applicationId,
+    applicationCode: application?.code || record.applicationId,
     offerId: record.offerId,
     candidate: candidateLabel(candidate, application),
     job: jobLabel(job, application),

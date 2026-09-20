@@ -15,6 +15,7 @@ import {
 } from '../api'
 import type { ApiAnalysisResult, ApiApplication } from '../api'
 import type { Job } from '../../../shared/types/recruiting'
+import { humanReviewStatusLabel, recommendationLabel } from '../labels'
 import { isApiClientError } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import CandidateTable from '../components/CandidateTable.vue'
@@ -317,8 +318,8 @@ onMounted(refresh)
     <div class="section-title">最近分析结果（人工复核）</div>
     <div class="review-metrics">
       <div class="review-metric"><span>综合评分</span><strong>{{ score != null ? score : '—' }}</strong></div>
-      <div class="review-metric"><span>推荐结论</span><strong class="review-recommendation">{{ recommendation || '—' }}</strong></div>
-      <div class="review-metric"><span>复核状态</span><strong>{{ lastResult.humanReviewStatus }}</strong></div>
+      <div class="review-metric"><span>推荐结论</span><strong class="review-recommendation">{{ recommendationLabel(recommendation) }}</strong></div>
+      <div class="review-metric"><span>复核状态</span><strong>{{ humanReviewStatusLabel(lastResult.humanReviewStatus) }}</strong></div>
     </div>
     <div class="form-field review-comment">
       <label for="review-comment">复核说明</label>

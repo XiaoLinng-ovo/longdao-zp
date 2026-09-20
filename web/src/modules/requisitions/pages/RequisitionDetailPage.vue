@@ -239,7 +239,7 @@ onMounted(refresh)
               <td>{{ (event.createdAt || '').slice(0, 19).replace('T', ' ') }}</td>
               <td>{{ event.action }}</td>
               <td>{{ event.fromStatus || '-' }} → {{ event.toStatus || '-' }}</td>
-              <td>{{ event.actorId || '系统' }}</td>
+              <td>{{ event.actorName || event.actorId || '系统' }}</td>
               <td>{{ event.reason || '-' }}</td>
             </tr>
           </tbody>

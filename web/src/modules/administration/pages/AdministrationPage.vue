@@ -308,7 +308,7 @@ onMounted(refresh)
               <td><strong>{{ subjectName(event) }}</strong></td>
               <td>{{ actionName(event.action) }}</td>
               <td>{{ statusText(event.fromStatus) }} → {{ statusText(event.toStatus) }}</td>
-              <td>{{ event.actorId }}</td>
+              <td>{{ event.actorName || event.actorId }}</td>
               <td>{{ event.reason || '—' }}</td>
             </tr>
             <tr v-if="!events.length"><td colspan="7" class="table-empty">暂无流程审计记录</td></tr>

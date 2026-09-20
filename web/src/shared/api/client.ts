@@ -227,6 +227,29 @@ function createFetchUnavailableError(): ApiNetworkError {
   return new ApiNetworkError('当前运行环境不支持 fetch，请检查前端运行时配置', { retryable: false })
 }
 
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+let csrfToken: string | undefined
+let csrfInFlight: Promise<string | undefined> | null = null
+
+async function fetchCsrfToken(): Promise<string | undefined> {
+  try {
+    const response = await fetch('/api/v1/auth/csrf', { credentials: 'include' })
+    if (!response.ok) return undefined
+    const payload: unknown = await response.json()
+    const token = isRecord(payload) && isRecord(payload.data) && typeof payload.data.token === 'string' ? payload.data.token : undefined
+    if (token) csrfToken = token
+    return token
+  } catch {
+    return undefined
+  }
+}
+
+function ensureCsrfToken(): Promise<string | undefined> {
+  if (csrfToken) return Promise.resolve(csrfToken)
+  if (!csrfInFlight) csrfInFlight = fetchCsrfToken().finally(() => { csrfInFlight = null })
+  return csrfInFlight
+}
+
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? DEFAULT_API_BASE_URL
   const requestIdHeader = options.requestIdHeader ?? DEFAULT_REQUEST_ID_HEADER
@@ -234,63 +257,70 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   const requestJson = async <T>(path: string, requestOptions: JsonRequestOptions = {}): Promise<ApiSuccessResponse<T>> => {
     const { method = 'GET', body, headers: requestHeaders, ...fetchOptions } = requestOptions
-    const serializedBody = serializeBody(body)
-    const requestInit: RequestInit = {
-      ...fetchOptions,
-      method,
-      headers: createHeaders(options.defaultHeaders, requestHeaders, serializedBody !== undefined),
-      credentials: fetchOptions.credentials ?? credentials,
-      ...(serializedBody !== undefined ? { body: serializedBody } : {}),
-    }
     const url = resolveApiUrl(baseUrl, path)
     const fetcher = options.fetcher ?? globalThis.fetch
+    if (typeof fetcher !== 'function') throw createFetchUnavailableError()
 
-    if (typeof fetcher !== 'function') {
-      throw createFetchUnavailableError()
-    }
+    const isWrite = WRITE_METHODS.has((method ?? 'GET').toUpperCase())
+    const serializedBody = serializeBody(body)
 
-    let response: Response
-    try {
-      response = await fetcher(url, requestInit)
-    } catch (cause) {
-      if (isAbortError(cause)) {
-        throw new ApiAbortError('请求已取消', { cause })
+    const execute = async (): Promise<ApiSuccessResponse<T>> => {
+      const headers = createHeaders(options.defaultHeaders, requestHeaders, serializedBody !== undefined)
+      if (isWrite) {
+        const token = await ensureCsrfToken()
+        if (token) headers.set('x-csrf-token', token)
       }
-      throw new ApiNetworkError('无法连接招聘平台服务，请检查网络连接后重试', { cause })
-    }
+      const requestInit: RequestInit = {
+        ...fetchOptions,
+        method,
+        headers,
+        credentials: fetchOptions.credentials ?? credentials,
+        ...(serializedBody !== undefined ? { body: serializedBody } : {}),
+      }
 
-    const headerRequestId = response.headers.get(requestIdHeader) ?? response.headers.get(DEFAULT_REQUEST_ID_HEADER) ?? undefined
-    const payload = await parseJsonBody(response, headerRequestId)
-    const requestId = requireRequestId(payload, response, requestIdHeader)
+      let response: Response
+      try {
+        response = await fetcher(url, requestInit)
+      } catch (cause) {
+        if (isAbortError(cause)) {
+          throw new ApiAbortError('请求已取消', { cause })
+        }
+        throw new ApiNetworkError('无法连接招聘平台服务，请检查网络连接后重试', { cause })
+      }
 
-    if (isApiErrorResponse(payload)) {
-      throw makeApiError(response, payload, requestId || undefined)
-    }
+      const headerRequestId = response.headers.get(requestIdHeader) ?? response.headers.get(DEFAULT_REQUEST_ID_HEADER) ?? undefined
+      const payload = await parseJsonBody(response, headerRequestId)
+      const requestId = requireRequestId(payload, response, requestIdHeader)
 
-    if (!isSuccessfulStatus(response)) {
-      throw makeApiError(response, payload, requestId || undefined)
-    }
-
-    if (payload === undefined && (response.status === 204 || response.status === 205)) {
+      if (isApiErrorResponse(payload)) {
+        throw makeApiError(response, payload, requestId || undefined)
+      }
+      if (!isSuccessfulStatus(response)) {
+        throw makeApiError(response, payload, requestId || undefined)
+      }
+      if (payload === undefined && (response.status === 204 || response.status === 205)) {
+        return { ok: true, data: undefined as T, requestId }
+      }
+      if (!isApiSuccessResponse<T>(payload)) {
+        throw new ApiProtocolError('服务返回的数据不符合 API 契约', { status: response.status, requestId: requestId || undefined })
+      }
       return {
         ok: true,
-        data: undefined as T,
+        data: payload.data,
         requestId,
+        ...(isRecord(payload.meta) ? { meta: payload.meta } : {}),
       }
     }
 
-    if (!isApiSuccessResponse<T>(payload)) {
-      throw new ApiProtocolError('服务返回的数据不符合 API 契约', {
-        status: response.status,
-        requestId: requestId || undefined,
-      })
-    }
-
-    return {
-      ok: true,
-      data: payload.data,
-      requestId,
-      ...(isRecord(payload.meta) ? { meta: payload.meta } : {}),
+    try {
+      return await execute()
+    } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (isWrite && (code === 'CSRF_TOKEN_INVALID' || code === 'CSRF_ORIGIN_MISMATCH')) {
+        csrfToken = undefined
+        return await execute()
+      }
+      throw error
     }
   }
 
