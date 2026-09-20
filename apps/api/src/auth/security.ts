@@ -33,9 +33,9 @@ export function parseAllowedOrigins(value: string | undefined): string[] {
     .filter(Boolean)
 }
 
-/** Whether CSRF checks should run for a request method and configuration flag. */
+/** Whether CSRF checks should run for a request method and configuration flag. Defaults to enabled. */
 export function shouldProtectCsrf(method: string | undefined, requireCsrf: string | undefined): boolean {
-  return requireCsrf === 'true' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes((method ?? '').toUpperCase())
+  return requireCsrf !== 'false' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes((method ?? '').toUpperCase())
 }
 
 export function validateCsrf(requestToken: string | undefined, cookieToken: string | undefined): boolean {

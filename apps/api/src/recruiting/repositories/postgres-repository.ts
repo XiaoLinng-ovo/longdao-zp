@@ -182,12 +182,13 @@ export class NormalizedRecruitingRepository {
       const requestNo = businessNumber('REQ', 'rr', input.businessId ?? input.requestNo ?? input.id, this.generateBusinessId)
       const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId)
       const requestedById = await resolveForeignKey(client, 'users', 'id', 'email', input.requestedById)
+      const hiringManagerId = input.hiringManagerId ? await resolveForeignKey(client, 'users', 'id', 'email', input.hiringManagerId).catch(() => null) : null
       const row = await queryOne<RecruitmentRequestRow>(client,
         `INSERT INTO recruitment_requests
-          (id, request_no, title, department_id, requested_by, headcount, budget_min, budget_max, reason, status, version)
-         VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11)
+          (id, request_no, title, department_id, requested_by, hiring_manager_id, headcount, budget_min, budget_max, employment_type, work_mode, location, reason, status, version)
+         VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING ${REQUEST_COLUMNS}`,
-        [id, requestNo, required(input.title, 'title'), departmentId, requestedById, input.headcount, input.budgetMin ?? null, input.budgetMax ?? null, input.reason ?? '', input.status ?? 'draft', input.version ?? 1],
+        [id, requestNo, required(input.title, 'title'), departmentId, requestedById, hiringManagerId, input.headcount, input.budgetMin ?? null, input.budgetMax ?? null, input.employmentType ?? null, input.workMode ?? null, input.location ?? null, input.reason ?? '', input.status ?? 'draft', input.version ?? 1],
       )
       return this.getRecruitmentRequestWithExecutor(client, id)
     })
@@ -205,6 +206,10 @@ export class NormalizedRecruitingRepository {
       if (input.headcount !== undefined) add('headcount', input.headcount)
       if (input.budgetMin !== undefined) add('budget_min', input.budgetMin)
       if (input.budgetMax !== undefined) add('budget_max', input.budgetMax)
+      if (input.hiringManagerId !== undefined) add('hiring_manager_id', input.hiringManagerId ? await resolveForeignKey(client, 'users', 'id', 'email', input.hiringManagerId).catch(() => null) : null, '::uuid')
+      if (input.employmentType !== undefined) add('employment_type', input.employmentType)
+      if (input.workMode !== undefined) add('work_mode', input.workMode)
+      if (input.location !== undefined) add('location', input.location)
       if (input.reason !== undefined) add('reason', input.reason)
       if (input.status !== undefined) add('status', input.status)
       if (input.version !== undefined) add('version', input.version)
@@ -247,10 +252,10 @@ export class NormalizedRecruitingRepository {
       const createdById = await resolveForeignKey(client, 'users', 'id', 'email', input.createdById)
       const row = await queryOne<JobRow>(client,
         `INSERT INTO jobs
-          (id, job_no, recruitment_request_id, department_id, title, status, headcount, created_by)
-         VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::uuid)
+          (id, job_no, recruitment_request_id, department_id, title, status, headcount, employment_type, work_mode, location, created_by)
+         VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11::uuid)
          RETURNING ${JOB_COLUMNS}`,
-        [id, jobNo, requestId, departmentId, required(input.title, 'title'), input.status ?? 'draft', input.headcount, createdById],
+        [id, jobNo, requestId, departmentId, required(input.title, 'title'), input.status ?? 'draft', input.headcount, input.employmentType ?? null, input.workMode ?? null, input.location ?? null, createdById],
       )
       return this.getJobWithExecutor(client, id)
     })
@@ -266,6 +271,9 @@ export class NormalizedRecruitingRepository {
       if (input.title !== undefined) add('title', required(input.title, 'title'))
       if (input.status !== undefined) add('status', input.status)
       if (input.headcount !== undefined) add('headcount', input.headcount)
+      if (input.employmentType !== undefined) add('employment_type', input.employmentType)
+      if (input.workMode !== undefined) add('work_mode', input.workMode)
+      if (input.location !== undefined) add('location', input.location)
       if (input.createdById !== undefined) add('created_by', await resolveForeignKey(client, 'users', 'id', 'email', input.createdById), '::uuid')
       if (!assignments.length) return this.getJobWithExecutor(client, id)
       values.push(id)
@@ -877,8 +885,16 @@ export class NormalizedRecruitingRepository {
     if (text(filter.subjectId)) conditions.push(`e.subject_id = $${values.push(required(filter.subjectId, 'subjectId'))}::uuid`)
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     const limit = Math.max(1, Math.min(filter.limit ?? 200, 500))
-    const result = await this.pool.query<WorkflowEventRow>(`SELECT ${WORKFLOW_EVENT_COLUMNS} FROM workflow_events e ${where} ORDER BY e.created_at DESC, e.id LIMIT ${limit}`, values)
+    const result = await this.pool.query<WorkflowEventRow>(`SELECT e.id, e.subject_type, e.subject_id, e.event_type, e.from_status, e.to_status, e.actor_user_id, u.display_name AS actor_name, e.reason, e.metadata, e.created_at FROM workflow_events e LEFT JOIN users u ON u.id = e.actor_user_id ${where} ORDER BY e.created_at DESC, e.id LIMIT ${limit}`, values)
     return result.rows.map(mapWorkflowEvent)
+  }
+
+  /** 批量解析用户 display_name，用于面试参与人、审计操作人等只读展示。 */
+  async resolveUserDisplayNames(userIds: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(userIds.filter(Boolean))]
+    if (!unique.length) return new Map()
+    const result = await this.pool.query<{ id: string; display_name: string }>('SELECT id, display_name FROM users WHERE id = ANY($1::uuid[])', [unique])
+    return new Map(result.rows.map((row) => [row.id, row.display_name]))
   }
 
   // ===== 内部辅助 =====
@@ -1005,10 +1021,10 @@ function jsonArray<T>(value: unknown): T[] {
 }
 
 interface RecruitmentRequestRow extends QueryResultRow {
-  id: string; request_no: string; title: string; department_id: string | null; department_name: string | null; department_code: string | null; requested_by: string | null; headcount: number; budget_min: string | number | null; budget_max: string | number | null; reason: string; status: string; version: number; created_at: string | Date; updated_at: string | Date
+  id: string; request_no: string; title: string; department_id: string | null; department_name: string | null; department_code: string | null; requested_by: string | null; hiring_manager_id: string | null; headcount: number; budget_min: string | number | null; budget_max: string | number | null; employment_type: string | null; work_mode: string | null; location: string | null; reason: string; status: string; version: number; created_at: string | Date; updated_at: string | Date
 }
 interface JobRow extends QueryResultRow {
-  id: string; job_no: string; recruitment_request_id: string | null; recruitment_request_no: string | null; department_id: string; department_name: string | null; department_code: string | null; title: string; status: string; headcount: number; created_by: string | null; created_at: string | Date; updated_at: string | Date
+  id: string; job_no: string; recruitment_request_id: string | null; recruitment_request_no: string | null; department_id: string; department_name: string | null; department_code: string | null; title: string; status: string; headcount: number; employment_type: string | null; work_mode: string | null; location: string | null; created_by: string | null; created_at: string | Date; updated_at: string | Date
 }
 interface CandidateRow extends QueryResultRow {
   id: string; candidate_no: string; name: string; email: string | null; phone: string | null; location: string | null; source: string | null; consent_status: string; created_at: string | Date; updated_at: string | Date
@@ -1029,10 +1045,10 @@ interface InterviewFeedbackRow extends QueryResultRow { id: string; interview_id
 interface OfferRow extends QueryResultRow { id: string; application_id: string; status: string; current_version_id: string | null; approval_status: string; sent_at: string | Date | null; responded_at: string | Date | null; expires_at: string | Date | null; version: number; created_at: string | Date; updated_at: string | Date }
 interface OfferVersionRow extends QueryResultRow { id: string; offer_id: string; version: number; position_title: string; department_id: string; employment_type: string; start_date: string | Date | null; compensation: unknown; benefits: unknown; content: string; created_at: string | Date }
 interface OnboardingRow extends QueryResultRow { id: string; application_id: string; offer_id: string; planned_start_date: string | Date | null; status: string; notes: string | null; archived_at: string | Date | null; created_at: string | Date; updated_at: string | Date }
-interface WorkflowEventRow extends QueryResultRow { id: string; subject_type: string; subject_id: string; event_type: string; from_status: string | null; to_status: string | null; actor_user_id: string | null; reason: string | null; metadata: unknown; created_at: string | Date }
+interface WorkflowEventRow extends QueryResultRow { id: string; subject_type: string; subject_id: string; event_type: string; from_status: string | null; to_status: string | null; actor_user_id: string | null; actor_name?: string | null; reason: string | null; metadata: unknown; created_at: string | Date }
 
-const REQUEST_COLUMNS = 'id, request_no, title, department_id, NULL::text AS department_name, requested_by, headcount, budget_min, budget_max, reason, status, version, created_at, updated_at'
-const JOB_COLUMNS = 'id, job_no, recruitment_request_id, NULL::text AS recruitment_request_no, department_id, NULL::text AS department_name, title, status, headcount, created_by, created_at, updated_at'
+const REQUEST_COLUMNS = 'id, request_no, title, department_id, NULL::text AS department_name, requested_by, hiring_manager_id, headcount, budget_min, budget_max, employment_type, work_mode, location, reason, status, version, created_at, updated_at'
+const JOB_COLUMNS = 'id, job_no, recruitment_request_id, NULL::text AS recruitment_request_no, department_id, NULL::text AS department_name, title, status, headcount, employment_type, work_mode, location, created_by, created_at, updated_at'
 const CANDIDATE_COLUMNS = 'id, candidate_no, name, email, phone, location, source, consent_status, created_at, updated_at'
 const APPLICATION_COLUMNS = 'id, application_no, candidate_id, NULL::text AS candidate_no, job_id, NULL::text AS job_no, status, recruiter_id, source, applied_at, rejected_reason, withdrawn_at, created_at, updated_at'
 const ANALYSIS_TASK_COLUMNS = 'SELECT id, resume_id, application_id, status, attempts, idempotency_key, last_error, available_at, started_at, completed_at, created_at'
@@ -1052,10 +1068,10 @@ const WORKFLOW_EVENT_COLUMNS = 'id, subject_type, subject_id, event_type, from_s
 const FEEDBACK_RETURNING = 'id, interview_id, interviewer_id, status, overall_score, recommendation, ratings, strengths, concerns, notes, submitted_at, locked_at'
 const OFFER_VERSION_RETURNING = 'id, offer_id, version, position_title, department_id, employment_type, start_date, compensation, benefits, content, created_at'
 
-const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, d.code AS department_code, rr.requested_by, rr.headcount, rr.budget_min, rr.budget_max, rr.reason, rr.status, rr.version, rr.created_at, rr.updated_at
+const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, d.code AS department_code, rr.requested_by, rr.hiring_manager_id, rr.headcount, rr.budget_min, rr.budget_max, rr.employment_type, rr.work_mode, rr.location, rr.reason, rr.status, rr.version, rr.created_at, rr.updated_at
   FROM recruitment_requests rr
   LEFT JOIN departments d ON d.id = rr.department_id`
-const JOB_SELECT = `SELECT j.id, j.job_no, j.recruitment_request_id, rr.request_no AS recruitment_request_no, j.department_id, d.name AS department_name, d.code AS department_code, j.title, j.status, j.headcount, j.created_by, j.created_at, j.updated_at
+const JOB_SELECT = `SELECT j.id, j.job_no, j.recruitment_request_id, rr.request_no AS recruitment_request_no, j.department_id, d.name AS department_name, d.code AS department_code, j.title, j.status, j.headcount, j.employment_type, j.work_mode, j.location, j.created_by, j.created_at, j.updated_at
   FROM jobs j
   LEFT JOIN recruitment_requests rr ON rr.id = j.recruitment_request_id
   LEFT JOIN departments d ON d.id = j.department_id`
@@ -1076,11 +1092,11 @@ const ONBOARDING_SELECT = `SELECT r.id, r.application_id, r.offer_id, r.planned_
   LEFT JOIN applications a ON a.id = r.application_id`
 
 function mapRecruitmentRequest(row: RecruitmentRequestRow): RecruitmentRequestRecord {
-  return { id: row.id, businessId: row.request_no, legacyId: legacyId('REQ', row.request_no), code: row.request_no, title: row.title, departmentId: row.department_code ?? row.department_id ?? '', departmentName: row.department_name, requestedById: row.requested_by, headcount: row.headcount, budgetMin: numberValue(row.budget_min), budgetMax: numberValue(row.budget_max), reason: row.reason, status: row.status, version: row.version, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  return { id: row.id, businessId: row.request_no, legacyId: legacyId('REQ', row.request_no), code: row.request_no, title: row.title, departmentId: row.department_code ?? row.department_id ?? '', departmentName: row.department_name, requestedById: row.requested_by, hiringManagerId: row.hiring_manager_id, headcount: row.headcount, budgetMin: numberValue(row.budget_min), budgetMax: numberValue(row.budget_max), employmentType: row.employment_type, workMode: row.work_mode, location: row.location, reason: row.reason, status: row.status, version: row.version, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapJob(row: JobRow): JobRecord {
-  return { id: row.id, businessId: row.job_no, legacyId: legacyId('JOB', row.job_no), code: row.job_no, recruitmentRequestId: row.recruitment_request_id, recruitmentRequestBusinessId: row.recruitment_request_no, departmentId: row.department_code ?? row.department_id, departmentName: row.department_name, title: row.title, status: row.status, headcount: row.headcount, createdById: row.created_by, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  return { id: row.id, businessId: row.job_no, legacyId: legacyId('JOB', row.job_no), code: row.job_no, recruitmentRequestId: row.recruitment_request_id, recruitmentRequestBusinessId: row.recruitment_request_no, departmentId: row.department_code ?? row.department_id, departmentName: row.department_name, title: row.title, status: row.status, headcount: row.headcount, employmentType: row.employment_type, workMode: row.work_mode, location: row.location, createdById: row.created_by, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapCandidate(row: CandidateRow): CandidateRecord {
@@ -1128,7 +1144,7 @@ function mapOnboarding(row: OnboardingRow): OnboardingDbRecord {
 }
 
 function mapWorkflowEvent(row: WorkflowEventRow): WorkflowEventDbRecord {
-  return { id: row.id, subjectType: row.subject_type, subjectId: row.subject_id, action: row.event_type, fromStatus: row.from_status, toStatus: row.to_status, actorId: row.actor_user_id, reason: row.reason, metadata: jsonObject(row.metadata), createdAt: iso(row.created_at) }
+  return { id: row.id, subjectType: row.subject_type, subjectId: row.subject_id, action: row.event_type, fromStatus: row.from_status, toStatus: row.to_status, actorId: row.actor_user_id, actorName: row.actor_name ?? null, reason: row.reason, metadata: jsonObject(row.metadata), createdAt: iso(row.created_at) }
 }
 
 function mapApprovalInstance(row: ApprovalInstanceRow): RecruitmentApprovalInstanceRecord {

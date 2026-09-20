@@ -30,9 +30,13 @@ export interface RecruitmentRequestRecord extends IdMapping {
   departmentId: string | null
   departmentName: string | null
   requestedById: string | null
+  hiringManagerId: string | null
   headcount: number
   budgetMin: number | null
   budgetMax: number | null
+  employmentType: string | null
+  workMode: string | null
+  location: string | null
   reason: string
   status: RepositoryStatus
   version: number
@@ -49,6 +53,9 @@ export interface JobRecord extends IdMapping {
   title: string
   status: RepositoryStatus
   headcount: number
+  employmentType: string | null
+  workMode: string | null
+  location: string | null
   createdById: string | null
   createdAt: string
   updatedAt: string
@@ -89,9 +96,13 @@ export interface RecruitmentRequestCreateInput {
   title: string
   departmentId?: string | null
   requestedById?: string | null
+  hiringManagerId?: string | null
   headcount: number
   budgetMin?: number | null
   budgetMax?: number | null
+  employmentType?: string | null
+  workMode?: string | null
+  location?: string | null
   reason?: string
   status?: string
   version?: number
@@ -108,6 +119,9 @@ export interface JobCreateInput {
   title: string
   status?: string
   headcount: number
+  employmentType?: string | null
+  workMode?: string | null
+  location?: string | null
   createdById?: string | null
 }
 
@@ -455,6 +469,7 @@ export interface WorkflowEventDbRecord {
   fromStatus: string | null
   toStatus: string | null
   actorId: string | null
+  actorName: string | null
   reason: string | null
   metadata: Record<string, unknown>
   createdAt: string

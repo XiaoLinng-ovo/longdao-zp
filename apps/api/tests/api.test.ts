@@ -11,6 +11,8 @@ let server: ReturnType<typeof import('../src/server.js').createHttpServer>;
 let baseUrl: string;
 let testDirectory: string;
 let authHeader: Record<string, string> = {};
+let csrfToken: string | undefined = undefined;
+let csrfCookieHeader: string | undefined = undefined;
 const previousQuarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT;
 const previousNodeEnv = process.env.NODE_ENV;
 const previousDingTalkToken = process.env.DINGTALK_INTEGRATION_TOKEN;
@@ -39,9 +41,11 @@ function get(path: string, headers: Record<string, string> = {}): Promise<{ stat
 function requestJson(method: string, path: string, payload?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl)
+    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    const csrfHeaders = isWrite && csrfToken && csrfCookieHeader ? { 'x-csrf-token': csrfToken, cookie: csrfCookieHeader } : {}
     const requestInstance = request(url, {
       method,
-      headers: { ...authHeader, ...headers, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
+      headers: { ...authHeader, ...csrfHeaders, ...headers, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
     }, (response) => {
       const chunks: Buffer[] = []
       response.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -57,11 +61,14 @@ async function loginAs(email: string, password: string): Promise<void> {
   const response = await requestJson('POST', '/api/v1/auth/login', { email, password });
   assert.equal(response.status, 200);
   const setCookie = response.headers['set-cookie'];
-  const cookie = Array.isArray(setCookie) ? setCookie.join(';') : setCookie;
-  const match = cookie?.split(';').find((item) => item.trim().startsWith('smartrecruit_session='));
-  assert.ok(match);
-  const token = decodeURIComponent(match.trim().slice('smartrecruit_session='.length));
+  const cookies = Array.isArray(setCookie) ? setCookie : (setCookie ? [setCookie] : []);
+  const sessionCookie = cookies.find((item) => item?.startsWith('smartrecruit_session='))?.split(';')[0];
+  const csrfCookie = cookies.find((item) => item?.startsWith('smartrecruit_csrf='))?.split(';')[0];
+  assert.ok(sessionCookie, 'login must issue a session cookie');
+  const token = decodeURIComponent(sessionCookie.slice('smartrecruit_session='.length));
   authHeader = { authorization: `Bearer ${token}` };
+  csrfToken = csrfCookie ? decodeURIComponent(csrfCookie.slice('smartrecruit_csrf='.length)) : undefined;
+  csrfCookieHeader = csrfCookie ? `${sessionCookie}; ${csrfCookie}` : undefined;
 }
 
 async function login(): Promise<void> {

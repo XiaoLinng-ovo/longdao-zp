@@ -32,11 +32,14 @@ test('parses comma separated origin allowlist and removes whitespace and blanks'
   assert.deepEqual(parseAllowedOrigins(undefined), [])
 })
 
-test('csrf protection is enabled only for write methods when configured', () => {
+test('csrf protection is enabled for write methods by default', () => {
   assert.equal(shouldProtectCsrf('POST', 'true'), true)
   assert.equal(shouldProtectCsrf('DELETE', 'true'), true)
   assert.equal(shouldProtectCsrf('GET', 'true'), false)
   assert.equal(shouldProtectCsrf('POST', 'false'), false)
+  assert.equal(shouldProtectCsrf('POST', undefined), true)
+  assert.equal(shouldProtectCsrf('PATCH', undefined), true)
+  assert.equal(shouldProtectCsrf('GET', undefined), false)
 })
 
 test('reads prefixed csrf cookie in production', () => {

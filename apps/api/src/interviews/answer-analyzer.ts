@@ -21,24 +21,42 @@ export function loadInterviewAnswerAnalyzerConfig(env: NodeJS.ProcessEnv = proce
   return { baseUrl, apiKey, model, timeoutMs }
 }
 
+// 模型可能把 JSON 包在 markdown 代码块里，或在其前后夹杂解释性文本。先提取纯 JSON 文本再解析。
+function extractJsonContent(content: string): string {
+  const trimmed = content.trim()
+  if (trimmed.startsWith('{')) return trimmed
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fence) return fence[1]!.trim()
+  const start = trimmed.indexOf('{'); const end = trimmed.lastIndexOf('}')
+  if (start >= 0 && end > start) return trimmed.slice(start, end + 1)
+  return trimmed
+}
+
+const REQUIRED_KEYS = ['summary', 'evidence', 'scores', 'concerns', 'confidence', 'nextQuestion'] as const
+// fail-closed：模型绝不能越权输出招聘/录用/拒绝决策。出现这些键一律拒绝。
+const DECISION_KEYS = ['decision', 'recommendation', 'verdict', 'outcome', 'hire', 'reject', 'offer', 'hiringDecision', 'rejection', 'applicationStatus', 'applicationStatusMutation'] as const
+
 function parseAnalysis(content: unknown): Omit<InterviewAnswerAnalysis, 'advisoryOnly' | 'applicationStatusMutation'> {
   if (!isText(content)) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response content is empty.')
   let value: unknown
-  try { value = JSON.parse(content) } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response content is not valid JSON.', error) }
-  const keys = ['concerns', 'confidence', 'evidence', 'nextQuestion', 'scores', 'summary']
-  if (!isRecord(value) || Object.keys(value).sort().join('|') !== keys.join('|')) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response does not match the answer analysis schema.')
+  try { value = JSON.parse(extractJsonContent(content)) } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response content is not valid JSON.', error) }
+  if (!isRecord(value)) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response is not a JSON object.')
+  for (const key of DECISION_KEYS) if (key in value) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', `Model response must not include a hiring or rejection decision (found "${key}").`)
+  for (const key of REQUIRED_KEYS) if (!(key in value)) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', `Model response is missing required field "${key}".`)
+  const evidence = Array.isArray(value.evidence) ? value.evidence.filter(isText) : undefined
+  const concerns = Array.isArray(value.concerns) ? value.concerns.filter(isText) : undefined
+  const scores = Array.isArray(value.scores) ? value.scores : undefined
+  if (!evidence || !concerns || !scores || scores.length === 0) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response contains invalid evidence, concerns, or scores.')
   if (!isText(value.summary) || !isText(value.nextQuestion) || typeof value.confidence !== 'number' || value.confidence < 0 || value.confidence > 1) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response contains invalid summary, question, or confidence.')
-  if (!Array.isArray(value.evidence) || !value.evidence.every(isText) || !Array.isArray(value.concerns) || !value.concerns.every(isText) || !Array.isArray(value.scores) || value.scores.length === 0) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response contains invalid evidence, concerns, or scores.')
-  const scores = value.scores.map((entry) => {
-    if (!isRecord(entry) || Object.keys(entry).sort().join('|') !== 'dimension|rationale|score' || !isText(entry.dimension) || !isText(entry.rationale) || typeof entry.score !== 'number' || entry.score < 0 || entry.score > 10) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response contains an invalid dimension score.')
+  const parsedScores = scores.map((entry) => {
+    if (!isRecord(entry) || typeof entry.score !== 'number' || entry.score < 0 || entry.score > 10 || !isText(entry.dimension) || !isText(entry.rationale)) throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response contains an invalid dimension score.')
     return { dimension: entry.dimension, score: entry.score, rationale: entry.rationale }
   })
-  return { summary: value.summary, evidence: value.evidence, scores, concerns: value.concerns, confidence: value.confidence, nextQuestion: value.nextQuestion }
+  return { summary: value.summary, evidence, scores: parsedScores, concerns, confidence: value.confidence, nextQuestion: value.nextQuestion }
 }
 
 export function createInterviewAnswerAnalyzer(config: InterviewAnswerAnalyzerConfig, fetchImpl: FetchLike = fetch) {
-  return { async analyze(input: InterviewAnswerAnalysisInput): Promise<InterviewAnswerAnalysis> {
-    if (![input.question, input.candidateAnswer, input.jobTitle].every(isText) || !input.jobRequirements.length) throw new InterviewAnswerAnalysisError('INVALID_INPUT', 'Question, candidate answer, job title, and requirements are required.')
+  const requestOnce = async (input: InterviewAnswerAnalysisInput): Promise<Omit<InterviewAnswerAnalysis, 'advisoryOnly' | 'applicationStatusMutation'>> => {
     let response: Response
     try {
       response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: config.model, temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Analyze only the candidate answer using quoted evidence. Return strict JSON with summary, evidence, scores[{dimension,score 0-10,rationale}], concerns, confidence 0-1, nextQuestion. Never return a hiring, rejection, offer, or application-status decision.' }, { role: 'user', content: JSON.stringify(input) }] }), signal: AbortSignal.timeout(config.timeoutMs) })
@@ -47,6 +65,16 @@ export function createInterviewAnswerAnalyzer(config: InterviewAnswerAnalyzerCon
     let envelope: unknown
     try { envelope = await response.json() } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response envelope is not valid JSON.', error) }
     const content = isRecord(envelope) && Array.isArray(envelope.choices) && isRecord(envelope.choices[0]) && isRecord(envelope.choices[0].message) ? envelope.choices[0].message.content : undefined
-    return { ...parseAnalysis(content), advisoryOnly: true, applicationStatusMutation: 'none' }
+    return parseAnalysis(content)
+  }
+  return { async analyze(input: InterviewAnswerAnalysisInput): Promise<InterviewAnswerAnalysis> {
+    if (![input.question, input.candidateAnswer, input.jobTitle].every(isText) || !input.jobRequirements.length) throw new InterviewAnswerAnalysisError('INVALID_INPUT', 'Question, candidate answer, job title, and requirements are required.')
+    // 模型偶发输出结构不合规时重试一次，显著降低单次抖动导致的整体失败。
+    let lastError: unknown
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { const analysis = await requestOnce(input); return { ...analysis, advisoryOnly: true, applicationStatusMutation: 'none' } }
+      catch (error) { lastError = error; if (!(error instanceof InterviewAnswerAnalysisError) || error.code !== 'MODEL_RESPONSE_INVALID') throw error }
+    }
+    throw lastError
   } }
 }

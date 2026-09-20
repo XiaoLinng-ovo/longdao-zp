@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { LocalRecruitingStore } from './store.js'
 import { createRecruitingStore } from './postgres-store.js'
 import { createNormalizedRecruitingRepository, type NormalizedRecruitingRepository } from './repositories/postgres-repository.js'
-import type { AnalysisTaskRecord as RepositoryAnalysisTask, AnalysisResultRecord as RepositoryAnalysisResult, JobRecord as RepositoryJob, InterviewDbRecord as RepositoryInterview, InterviewFeedbackDbRecord as RepositoryInterviewFeedback, OfferDbRecord as RepositoryOffer, OnboardingDbRecord as RepositoryOnboarding } from './repositories/types.js'
+import type { AnalysisTaskRecord as RepositoryAnalysisTask, AnalysisResultRecord as RepositoryAnalysisResult, JobRecord as RepositoryJob, JobSpecVersionDbRecord as RepositoryJobSpecVersion, JobDescriptionVersionDbRecord as RepositoryJobDescriptionVersion, InterviewDbRecord as RepositoryInterview, InterviewFeedbackDbRecord as RepositoryInterviewFeedback, OfferDbRecord as RepositoryOffer, OnboardingDbRecord as RepositoryOnboarding } from './repositories/types.js'
 import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, ApprovalAuditRecord, ApprovalInstanceRecord, ApprovalRecord, ApprovalStepRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord, InterviewParticipant } from './types.js'
 import { RecruitingWorkflowError, transitionJob, transitionRequest } from './workflow.js'
 import { validateResumeUpload } from './file-security.js'
@@ -83,6 +83,37 @@ function positiveInteger(value: unknown, field: string): number {
   const result = Number(value)
   if (!Number.isInteger(result) || result < 1) throw new RecruitingWorkflowError('VALIDATION_ERROR', `${field} 必须是大于 0 的整数`, 400)
   return result
+}
+
+/** 把仓储层的说明书版本（job_spec_versions 行）还原成领域 spec 对象，供 getJob 详情回填。 */
+function specFromDbVersion(item: RepositoryJobSpecVersion): JobSpecRecord {
+  const content = item.content && typeof item.content === 'object' ? item.content as Record<string, unknown> : {}
+  const requirements = Array.isArray(content.requirements) ? content.requirements.map((entry) => {
+    const row = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {}
+    return { label: String(row.label ?? ''), description: String(row.description ?? ''), required: row.required !== false, ...(typeof row.weight === 'number' ? { weight: row.weight } : {}) }
+  }) : []
+  return {
+    version: item.version,
+    title: String(content.title ?? ''),
+    summary: String(content.summary ?? ''),
+    responsibilities: Array.isArray(content.responsibilities) ? content.responsibilities.map(String) : [],
+    requirements,
+    skills: Array.isArray(content.skills) ? content.skills.map(String) : [],
+    confirmed: item.confirmedAt != null,
+    ...(item.confirmedAt ? { confirmedAt: item.confirmedAt } : {}),
+  }
+}
+
+/** 把仓储层的 JD 版本（job_description_versions 行）还原成领域 jd 对象。JD 语言未落库，默认中文。 */
+function jdFromDbVersion(item: RepositoryJobDescriptionVersion): JobDescriptionRecord {
+  return {
+    version: item.version,
+    language: 'zh-CN',
+    content: item.content,
+    generatedBy: item.status === 'ai_assisted' ? 'ai_assisted' : 'human',
+    confirmed: item.confirmedAt != null,
+    ...(item.confirmedAt ? { confirmedAt: item.confirmedAt } : {}),
+  }
 }
 
 function addEvent(state: RecruitingStoreState, event: Omit<WorkflowEventRecord, 'id' | 'createdAt'>): void {
@@ -329,6 +360,11 @@ export class RecruitingService {
       if (job && (!job.jd || job.jd.version < version.version)) job.jd = { version: version.version, language: version.language, content: version.content, generatedBy: version.generatedBy, confirmed: version.confirmed, ...(version.confirmedAt ? { confirmedAt: version.confirmedAt } : {}) }
     }
 
+    // 面试参与人通常只落 userId（不落 name），这里批量补 display_name，避免前端展示裸 UUID。
+    const participantUserIds = [...new Set(interviews.flatMap((item) => item.participants.map((participant) => participant.userId)).filter(Boolean))]
+    const userNameMap = await repository.resolveUserDisplayNames(participantUserIds)
+    const mappedInterviews = interviews.map((item) => this.mapRepositoryInterview(item)).map((interview) => ({ ...interview, participants: interview.participants.map((participant) => { if (participant.name) return participant; const displayName = userNameMap.get(participant.userId); return displayName ? { ...participant, name: displayName } : participant }) }))
+
     const state: RecruitingStoreState = {
       recruitmentRequests: requests.map((item) => this.mapRepositoryRequest(item)),
       jobs: mappedJobs,
@@ -337,7 +373,7 @@ export class RecruitingService {
       resumes: resumes.map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt })),
       analysisTasks: tasks.map((item) => ({ id: item.id, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), status: item.status as AnalysisTaskRecord['status'], attempts: item.attempts, idempotencyKey: item.idempotencyKey, ...(item.lastError ? { lastError: item.lastError } : {}), availableAt: item.availableAt, ...(item.startedAt ? { startedAt: item.startedAt } : {}), ...(item.completedAt ? { completedAt: item.completedAt } : {}), createdAt: item.createdAt })),
       analysisResults: results.map((item) => ({ id: item.id, analysisTaskId: item.analysisTaskId, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), result: item.result, analyzerVersion: item.analyzerVersion ?? '', inputHash: item.inputHash ?? '', humanReviewStatus: item.humanReviewStatus as AnalysisResultRecord['humanReviewStatus'], createdAt: item.createdAt })),
-      interviews: interviews.map((item) => this.mapRepositoryInterview(item)),
+      interviews: mappedInterviews,
       interviewFeedback: feedback.map((item) => this.mapRepositoryFeedback(item)),
       offers: offers.map((item) => this.mapRepositoryOffer(item)),
       offerVersions: offerVersions.map((item) => ({ id: item.id, offerId: item.offerId, version: item.version, positionTitle: item.positionTitle, departmentId: item.departmentId, employmentType: item.employmentType, ...(item.startDate ? { startDate: item.startDate } : {}), compensation: item.compensation as unknown as OfferVersionRecord['compensation'], benefits: item.benefits, content: item.content, createdAt: item.createdAt })),
@@ -347,7 +383,7 @@ export class RecruitingService {
       approvalInstances: [],
       approvalSteps: [],
       approvalRecords: [],
-      workflowEvents: events.map((item) => ({ id: item.id, subjectType: item.subjectType as WorkflowEventRecord['subjectType'], subjectId: item.subjectId, action: item.action, ...(item.fromStatus ? { fromStatus: item.fromStatus } : {}), ...(item.toStatus ? { toStatus: item.toStatus } : {}), actorId: item.actorId ?? '', ...(item.reason ? { reason: item.reason } : {}), createdAt: item.createdAt })),
+      workflowEvents: events.map((item) => ({ id: item.id, subjectType: item.subjectType as WorkflowEventRecord['subjectType'], subjectId: item.subjectId, action: item.action, ...(item.fromStatus ? { fromStatus: item.fromStatus } : {}), ...(item.toStatus ? { toStatus: item.toStatus } : {}), actorId: item.actorId ?? '', ...(item.actorName ? { actorName: item.actorName } : {}), ...(item.reason ? { reason: item.reason } : {}), createdAt: item.createdAt })),
       candidateTags: [],
       nextRequestNumber: requests.length + 1,
       nextJobNumber: jobs.length + 1,
@@ -389,11 +425,11 @@ export class RecruitingService {
   }
 
   private mapRepositoryRequest(item: import('./repositories/types.js').RecruitmentRequestRecord): RecruitmentRequestRecord {
-    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId ?? '', department: item.departmentName ?? item.departmentId ?? '', requesterId: item.requestedById ?? '', headcount: item.headcount, employmentType: 'full_time', workMode: 'onsite', ...(item.budgetMin === null && item.budgetMax === null ? {} : { salaryRange: { ...(item.budgetMin === null ? {} : { min: { amount: item.budgetMin, currency: 'CNY' } }), ...(item.budgetMax === null ? {} : { max: { amount: item.budgetMax, currency: 'CNY' } }) } }), justification: item.reason, status: item.status as RecruitmentRequestRecord['status'], approval: { status: item.status === 'approved' ? 'approved' : item.status === 'rejected' ? 'rejected' : 'pending', approver: '' }, convertedJobIds: [], version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId ?? '', department: item.departmentName ?? item.departmentId ?? '', requesterId: item.requestedById ?? '', ...(item.hiringManagerId ? { hiringManagerId: item.hiringManagerId } : {}), headcount: item.headcount, employmentType: item.employmentType ?? 'full_time', workMode: item.workMode ?? 'onsite', ...(item.location ? { location: item.location } : {}), ...(item.budgetMin === null && item.budgetMax === null ? {} : { salaryRange: { ...(item.budgetMin === null ? {} : { min: { amount: item.budgetMin, currency: 'CNY' } }), ...(item.budgetMax === null ? {} : { max: { amount: item.budgetMax, currency: 'CNY' } }) } }), justification: item.reason, status: item.status as RecruitmentRequestRecord['status'], approval: { status: item.status === 'approved' ? 'approved' : item.status === 'rejected' ? 'rejected' : 'pending', approver: '' }, convertedJobIds: [], version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   private mapRepositoryJob(item: import('./repositories/types.js').JobRecord): JobRecord {
-    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: item.employmentType ?? 'full_time', workMode: item.workMode ?? 'onsite', ...(item.location ? { location: item.location } : {}), status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   /** 目标部门下的岗位 id 集合：候选人/申请/面试/Offer 的部门归属都由此推出。 */
@@ -462,7 +498,7 @@ export class RecruitingService {
 
   async createRequest(input: CreateRecruitmentRequestInput, actorId = 'user-demo'): Promise<RecruitmentRequestRecord> {
     if (this.repository) {
-      const row = await this.repository.createRecruitmentRequest({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, requestedById: actorId, headcount: positiveInteger(input.headcount, '招聘人数'), budgetMin: input.salaryRange?.min?.amount ?? null, budgetMax: input.salaryRange?.max?.amount ?? null, reason: input.justification, status: 'draft' })
+      const row = await this.repository.createRecruitmentRequest({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, requestedById: actorId, hiringManagerId: input.hiringManagerId ?? null, headcount: positiveInteger(input.headcount, '招聘人数'), budgetMin: input.salaryRange?.min?.amount ?? null, budgetMax: input.salaryRange?.max?.amount ?? null, employmentType: input.employmentType ?? null, workMode: input.workMode ?? null, location: input.location ?? null, reason: input.justification, status: 'draft' })
       return this.mapRepositoryRequest(row)
     }
     return this.store.transaction((state) => {
@@ -479,7 +515,7 @@ export class RecruitingService {
     if (this.repository) {
       const current = await this.repository.getRecruitmentRequest(id)
       if (current.status !== 'draft' && current.status !== 'rejected') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_EDITABLE', '只有草稿或已驳回需求可以编辑')
-      const row = await this.repository.updateRecruitmentRequest(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '招聘人数') }), ...(input.justification === undefined ? {} : { reason: input.justification }), ...(input.salaryRange?.min ? { budgetMin: input.salaryRange.min.amount } : {}), ...(input.salaryRange?.max ? { budgetMax: input.salaryRange.max.amount } : {}), version: current.version + 1 })
+      const row = await this.repository.updateRecruitmentRequest(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.hiringManagerId === undefined ? {} : { hiringManagerId: input.hiringManagerId ?? null }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '招聘人数') }), ...(input.employmentType === undefined ? {} : { employmentType: input.employmentType ?? null }), ...(input.workMode === undefined ? {} : { workMode: input.workMode ?? null }), ...(input.location === undefined ? {} : { location: input.location ?? null }), ...(input.justification === undefined ? {} : { reason: input.justification }), ...(input.salaryRange?.min ? { budgetMin: input.salaryRange.min.amount } : {}), ...(input.salaryRange?.max ? { budgetMax: input.salaryRange.max.amount } : {}), version: current.version + 1 })
       return this.mapRepositoryRequest(row)
     }
     return this.store.transaction((state) => {
@@ -561,14 +597,21 @@ export class RecruitingService {
   }
 
   async getJob(id: string): Promise<JobRecord> {
-    if (this.repository) return this.mapRepositoryJob(await this.repository.getJob(id))
+    if (this.repository) {
+      const row = await this.repository.getJob(id)
+      const mapped = this.mapRepositoryJob(row)
+      const [specVersions, jdVersions] = await Promise.all([this.repository.listJobSpecVersions(row.id), this.repository.listJobDescriptionVersions(row.id)])
+      if (specVersions[0]) mapped.spec = specFromDbVersion(specVersions[0])
+      if (jdVersions[0]) mapped.jd = jdFromDbVersion(jdVersions[0])
+      return mapped
+    }
     const state = await this.store.read()
     return jobOrThrow(state, id)
   }
 
   async createJob(input: CreateJobInput, actorId = 'user-demo'): Promise<JobRecord> {
     if (this.repository) {
-      const row = await this.repository.createJob({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, recruitmentRequestId: input.recruitmentRequestId, headcount: positiveInteger(input.headcount, '岗位人数'), status: 'draft', createdById: actorId })
+      const row = await this.repository.createJob({ title: required(input.title, '岗位名称'), departmentId: input.departmentId, recruitmentRequestId: input.recruitmentRequestId, headcount: positiveInteger(input.headcount, '岗位人数'), status: 'draft', employmentType: input.employmentType ?? null, workMode: input.workMode ?? null, location: input.location ?? null, createdById: actorId })
       return this.mapRepositoryJob(row)
     }
     return this.store.transaction((state) => {
@@ -586,7 +629,7 @@ export class RecruitingService {
 
   async updateJob(id: string, input: UpdateJobInput, actorId = 'user-demo'): Promise<JobRecord> {
     if (this.repository) {
-      const row = await this.repository.updateJob(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '岗位人数') }) })
+      const row = await this.repository.updateJob(id, { ...(input.title === undefined ? {} : { title: input.title }), ...(input.departmentId === undefined ? {} : { departmentId: input.departmentId }), ...(input.headcount === undefined ? {} : { headcount: positiveInteger(input.headcount, '岗位人数') }), ...(input.employmentType === undefined ? {} : { employmentType: input.employmentType ?? null }), ...(input.workMode === undefined ? {} : { workMode: input.workMode ?? null }), ...(input.location === undefined ? {} : { location: input.location ?? null }) })
       return this.mapRepositoryJob(row)
     }
     return this.store.transaction((state) => {

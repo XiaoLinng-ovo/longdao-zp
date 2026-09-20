@@ -184,6 +184,11 @@ const routeMiddleware: Middleware = async (context, next) => {
       checks: {
         configuration: 'ok',
         auth: context.auth ? 'ok' : 'anonymous',
+        externalServices: {
+          funasr: (() => { try { loadFunAsrConfig(); return 'ok' } catch { return 'unavailable' } })(),
+          llm: (() => { try { loadInterviewAnswerAnalyzerConfig(); return 'ok' } catch { return 'unavailable' } })(),
+          ocr: process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable',
+        },
       }
     });
     return;
@@ -298,9 +303,11 @@ const routeMiddleware: Middleware = async (context, next) => {
 
   try {
     if (shouldProtectCsrf(method, process.env.REQUIRE_CSRF)) {
-      const origin = Array.isArray(context.req.headers.origin) ? undefined : context.req.headers.origin;
       const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
-      if (!isAllowedOrigin(origin, allowed)) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
+      if (allowed.length > 0) {
+        const origin = Array.isArray(context.req.headers.origin) ? undefined : context.req.headers.origin;
+        if (!isAllowedOrigin(origin, allowed)) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
+      }
       const headerToken = Array.isArray(context.req.headers['x-csrf-token']) ? undefined : context.req.headers['x-csrf-token'];
       const cookieHeader = Array.isArray(context.req.headers.cookie) ? undefined : context.req.headers.cookie;
       const cookieToken = readCookie(cookieHeader, 'smartrecruit_csrf', { production: process.env.NODE_ENV === 'production' });
@@ -436,7 +443,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/interviews' && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertApplicationInScope(String((await readJson(context)).applicationId ?? ''), departmentScope(auth)); sendSuccess(context, await recruiting.createInterview(await readJson(context) as never, auth.user.id), 201); return; }
     const liveSessionCreateMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/live-sessions$/);
     if (liveSessionCreateMatch && method === 'GET') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); sendSuccess(context, await liveInterviewSessions.findActive(liveSessionCreateMatch[1]!) ?? null); return; }
-    if (liveSessionCreateMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); sendSuccess(context, await liveInterviewSessions.create(liveSessionCreateMatch[1]!, auth.user.id), 201); return; }
+    if (liveSessionCreateMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); const existing = await liveInterviewSessions.findActive(liveSessionCreateMatch[1]!); if (existing) throw new HttpError(409, 'LIVE_SESSION_ALREADY_ACTIVE', '该面试已存在进行中的实时会话，请先结束当前会话再创建新的会话'); sendSuccess(context, await liveInterviewSessions.create(liveSessionCreateMatch[1]!, auth.user.id), 201); return; }
     const liveSessionPath = parseLiveSessionPath(path);
     if (liveSessionPath && method === 'GET' && !liveSessionPath.action) { requireRole(auth, INTERVIEW_WRITE_ROLES); const result=await liveInterviewSessions.get(liveSessionPath.sessionId); await recruiting.assertInterviewInScope(result.session.interviewId, departmentScope(auth)); sendSuccess(context,result); return; }
     if (liveSessionPath && method === 'POST' && liveSessionPath.action === 'end') { requireRole(auth, INTERVIEW_WRITE_ROLES); const current=await liveInterviewSessions.get(liveSessionPath.sessionId); await recruiting.assertInterviewInScope(current.session.interviewId, departmentScope(auth)); sendSuccess(context,await liveInterviewSessions.end(liveSessionPath.sessionId)); return; }

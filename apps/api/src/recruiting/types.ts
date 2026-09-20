@@ -210,6 +210,7 @@ export interface WorkflowEventRecord {
   fromStatus?: string
   toStatus?: string
   actorId: string
+  actorName?: string
   reason?: string
   createdAt: string
 }

@@ -23,7 +23,28 @@ describe('interview answer analyzer', () => {
   })
 
   it('fails closed when model adds a hiring decision', async () => {
-    const analyzer = createInterviewAnswerAnalyzer({ baseUrl: 'https://llm.example/v1', apiKey: 'key', model: 'model', timeoutMs: 2000 }, async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...valid, decision: 'hire' }) } }] }), { status: 200 }))
+    const analyzer = createInterviewAnswerAnalyzer({ baseUrl: 'https://llm.example/v1', apiKey: 'k', model: 'model', timeoutMs: 2000 }, async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...valid, decision: 'hire' }) } }] }), { status: 200 }))
     await assert.rejects(analyzer.analyze({ question: '问题', candidateAnswer: '回答内容足够长', jobTitle: '岗位', jobRequirements: ['要求'], priorContext: [] }), (error: unknown) => error instanceof InterviewAnswerAnalysisError && error.code === 'MODEL_RESPONSE_INVALID')
+  })
+
+  it('tolerates markdown fences, empty concerns, and blank evidence entries', async () => {
+    const content = '```json\n' + JSON.stringify({ ...valid, concerns: [], evidence: ['使用 EXPLAIN ANALYZE 定位瓶颈', '   '] }) + '\n```'
+    const analyzer = createInterviewAnswerAnalyzer({ baseUrl: 'https://llm.example/v1', apiKey: 'k', model: 'model', timeoutMs: 2000 }, async () => new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 }))
+    const result = await analyzer.analyze({ question: '如何排查慢查询？', candidateAnswer: '我会先看监控。', jobTitle: '后端工程师', jobRequirements: ['PostgreSQL'], priorContext: [] })
+    assert.equal(result.concerns.length, 0)
+    assert.deepEqual(result.evidence, ['使用 EXPLAIN ANALYZE 定位瓶颈'])
+    assert.equal(result.summary, valid.summary)
+  })
+
+  it('retries once when the model returns malformed content then recovers', async () => {
+    let calls = 0
+    const analyzer = createInterviewAnswerAnalyzer({ baseUrl: 'https://llm.example/v1', apiKey: 'k', model: 'model', timeoutMs: 2000 }, async () => {
+      calls += 1
+      const content = calls === 1 ? 'not json at all' : JSON.stringify(valid)
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 })
+    })
+    const result = await analyzer.analyze({ question: '如何排查慢查询？', candidateAnswer: '我会先看监控。', jobTitle: '后端工程师', jobRequirements: ['PostgreSQL'], priorContext: [] })
+    assert.equal(calls, 2)
+    assert.equal(result.summary, valid.summary)
   })
 })
