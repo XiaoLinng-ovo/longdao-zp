@@ -254,6 +254,7 @@ async function main() {
   if (!postgresReady) {
     warn('PostgreSQL was not reachable. API startup may fail until the database service is running.')
   }
+  let startupFailed = !postgresReady
 
   const components = [
     {
@@ -299,7 +300,16 @@ async function main() {
   for (const [name, url, timeoutMs] of checks) {
     const ready = await waitForHttp(url, timeoutMs)
     if (ready) log(`${name} is ready: ${url}`)
-    else warn(`${name} did not become ready within ${Math.round(timeoutMs / 1000)} seconds: ${url}`)
+    else {
+      startupFailed = true
+      warn(`${name} did not become ready within ${Math.round(timeoutMs / 1000)} seconds: ${url}`)
+    }
+  }
+
+  if (startupFailed) {
+    warn('One or more services are not ready. Check the service windows for the first error.')
+    process.exitCode = 1
+    return
   }
 
   openUrl('http://127.0.0.1:5174')
