@@ -5,7 +5,7 @@ export { loadJobs } from '../../jobs/api'
 
 interface ApiJob { id: string; title: string }
 export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; score?: number; aiStatus: string; updatedAt: string; rejectionReason?: string }
-export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number; applications: ApiApplication[] }
+export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number; analysisStatus?: string; analysisProgress?: number; analysisAttempts?: number; analysisError?: string; applications: ApiApplication[] }
 export interface ApiResume { id: string; candidateId: string; applicationId?: string; originalFilename: string; mimeType: string; sizeBytes: number; contentHash: string; scanStatus: string; createdAt: string }
 export interface ApiAnalysisTask { id: string; resumeId: string; applicationId?: string; status: string; attempts: number; completedAt?: string; lastError?: string }
 
@@ -109,6 +109,10 @@ function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
     job: application ? jobs.get(application.jobId) || application.jobId : '未关联岗位',
     score: application?.score ?? row.score ?? 0,
     aiStatus: application?.aiStatus === 'completed' || row.aiStatus === 'completed' ? 'completed' : 'pending',
+    analysisStatus: row.analysisStatus,
+    analysisProgress: row.analysisProgress,
+    analysisAttempts: row.analysisAttempts,
+    analysisError: row.analysisError,
     applicationStatus: (application?.status === 'interviewing' ? 'scheduled' : application?.status || 'pending') as Candidate['applicationStatus'],
     updatedAt: (application?.updatedAt || row.updatedAt).slice(0, 10),
     tags: row.tags,

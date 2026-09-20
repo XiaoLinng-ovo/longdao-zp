@@ -333,6 +333,13 @@ function analysisReport(result: unknown): { assessment?: { score?: number }; ext
   }
 }
 
+function analysisTaskProgress(status: string | undefined): number {
+  if (status === 'queued') return 15
+  if (status === 'processing') return 65
+  if (status === 'completed' || status === 'failed') return 100
+  return 0
+}
+
 function mapRepositoryJobForAnalysis(item: RepositoryJob): JobRecord {
   return { id: item.id, code: item.businessId, title: item.title, departmentId: item.departmentId, department: item.departmentName ?? item.departmentId, recruitmentRequestId: item.recruitmentRequestId ?? '', headcount: item.headcount, filledCount: 0, employmentType: 'full_time', workMode: 'onsite', status: item.status as JobRecord['status'], channels: [], version: 1, createdAt: item.createdAt, updatedAt: item.updatedAt }
 }
@@ -881,14 +888,15 @@ export class RecruitingService {
     })
   }
 
-  async listCandidates(departmentId?: string): Promise<Array<CandidateRecord & { applications: ApplicationRecord[]; aiStatus: 'completed' | 'pending'; score?: number }>> {
+  async listCandidates(departmentId?: string): Promise<Array<CandidateRecord & { applications: ApplicationRecord[]; aiStatus: 'completed' | 'pending'; score?: number; analysisStatus?: 'queued' | 'processing' | 'completed' | 'failed'; analysisProgress?: number; analysisAttempts?: number; analysisError?: string }>> {
     const jobIds = departmentId ? await this.jobIdsInDepartment(departmentId) : undefined
     if (this.repository) {
-      const [candidates, applications, results, resumes] = await Promise.all([
+      const [candidates, applications, results, resumes, tasks] = await Promise.all([
         this.repository.listCandidates(),
         this.repository.listApplications(),
         this.repository.listAnalysisResults(),
         this.repository.listResumes(),
+        this.repository.listAnalysisTasks(),
       ])
       const resultByApplication = new Map(results.filter((r) => r.applicationId).map((r) => [r.applicationId!, r]))
       const applicationCandidate = new Map(applications.map((app) => [app.id, app.candidateId]))
@@ -899,6 +907,11 @@ export class RecruitingService {
         const candidateId = result.applicationId ? applicationCandidate.get(result.applicationId) : resumeCandidate.get(result.resumeId)
         if (candidateId && !latestResultByCandidate.has(candidateId)) latestResultByCandidate.set(candidateId, result)
       }
+      const latestTaskByCandidate = new Map<string, (typeof tasks)[number]>()
+      for (const task of tasks) {
+        const candidateId = resumeCandidate.get(task.resumeId)
+        if (candidateId && !latestTaskByCandidate.has(candidateId)) latestTaskByCandidate.set(candidateId, task)
+      }
       const rows = candidates.map((item) => {
         const candidateApplications = applications.filter((app) => app.candidateId === item.id).map((app) => {
           const result = resultByApplication.get(app.id)
@@ -906,8 +919,10 @@ export class RecruitingService {
           return { id: app.id, code: app.businessId, candidateId: app.candidateId, jobId: app.jobId, status: app.status as ApplicationRecord['status'], ...(app.source ? { source: app.source } : {}), ...(typeof score === 'number' ? { score } : {}), aiStatus: result ? 'completed' : 'pending', appliedAt: app.appliedAt, updatedAt: app.updatedAt }
         })
         const latestResult = latestResultByCandidate.get(item.id)
+        const latestTask = latestTaskByCandidate.get(item.id)
         const latestScore = analysisReport(latestResult?.result).assessment?.score
-        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, aiStatus: (latestResult ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof latestScore === 'number' ? { score: latestScore } : {}), applications: candidateApplications as ApplicationRecord[] }
+        const analysisStatus = latestTask?.status as 'queued' | 'processing' | 'completed' | 'failed' | undefined
+        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, aiStatus: (latestResult ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof latestScore === 'number' ? { score: latestScore } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: candidateApplications as ApplicationRecord[] }
       })
       return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
     }
@@ -918,8 +933,10 @@ export class RecruitingService {
       const resumeIds = new Set(scoped.resumes.filter((resume) => resume.candidateId === candidate.id).map((resume) => resume.id))
       const applicationIds = new Set(scoped.applications.filter((application) => application.candidateId === candidate.id).map((application) => application.id))
       const latest = scoped.analysisResults.filter((result) => resumeIds.has(result.resumeId) || (result.applicationId ? applicationIds.has(result.applicationId) : false)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
+      const latestTask = scoped.analysisTasks.filter((task) => resumeIds.has(task.resumeId)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
       const score = analysisReport(latest?.result).assessment?.score
-      return { ...candidate, aiStatus: (latest ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof score === 'number' ? { score } : {}), applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }
+      const analysisStatus = latestTask?.status as 'queued' | 'processing' | 'completed' | 'failed' | undefined
+      return { ...candidate, aiStatus: (latest ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof score === 'number' ? { score } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }
     })
     return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
   }

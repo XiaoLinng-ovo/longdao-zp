@@ -94,6 +94,33 @@ describe('interview question generation', () => {
     )
   })
 
+  it('accepts common model variations such as string groundedIn or missing rationale', async () => {
+    const generator = createInterviewQuestionGenerator(
+      { baseUrl: 'https://llm.example/v1', apiKey: 'secret', model: 'model', timeoutMs: 2_000 },
+      async () => responseWith(JSON.stringify({
+        questions: [{
+          question: '请描述一次你排查线上性能问题的经历。',
+          category: 'technical',
+          difficulty: 'hard',
+          groundedIn: '岗位要求：高并发；简历：8 年后端经验',
+          scoringRubric: [{ criterion: '定位过程', points: 3 }, { criterion: '量化结果', points: 2 }],
+        }],
+      })),
+    )
+
+    const result = await generator.generate({
+      jobTitle: '后端工程师',
+      jobRequirements: ['高并发'],
+      anonymizedResume: '[NAME] 有后端经验',
+      analysisSummary: [],
+      questionCount: 1,
+    })
+
+    assert.deepEqual(result.questions[0]?.groundedIn, ['岗位要求：高并发；简历：8 年后端经验'])
+    assert.equal(typeof result.questions[0]?.rationale, 'string')
+    assert.equal(result.questions[0]?.scoringRubric.length, 2)
+  })
+
   it('fails closed on upstream errors without returning partial questions', async () => {
     const generator = createInterviewQuestionGenerator(
       { baseUrl: 'https://llm.example/v1', apiKey: 'secret', model: 'model', timeoutMs: 2_000 },

@@ -95,39 +95,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
-  const actual = Object.keys(value).sort()
-  return actual.length === expected.length && actual.every((key, index) => key === [...expected].sort()[index])
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter(isNonEmptyString)
+  return isNonEmptyString(value) ? [value] : []
+}
+
+/**
+ * 模型输出常与约定略有出入：groundedIn 可能写成单个字符串、rationale 可能缺失、也可能多带几个键。
+ * 这里只校验真正影响展示与评分的字段，避免整批问题被判无效后退回本地规则。
+ */
 function parseQuestion(value: unknown): GeneratedInterviewQuestion | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, [
-    'category', 'difficulty', 'question', 'rationale', 'groundedIn', 'scoringRubric',
-  ])) return undefined
+  if (!isRecord(value)) return undefined
   if (!isNonEmptyString(value.category) || !CATEGORIES.has(value.category as InterviewQuestionCategory)) return undefined
   if (!isNonEmptyString(value.difficulty) || !DIFFICULTIES.has(value.difficulty as InterviewQuestionDifficulty)) return undefined
-  if (!isNonEmptyString(value.question) || !isNonEmptyString(value.rationale)) return undefined
-  if (!Array.isArray(value.groundedIn) || value.groundedIn.length === 0 || !value.groundedIn.every(isNonEmptyString)) return undefined
+  if (!isNonEmptyString(value.question)) return undefined
+
+  const groundedIn = stringList(value.groundedIn)
+  if (groundedIn.length === 0) return undefined
+  const rationale = isNonEmptyString(value.rationale) ? value.rationale : '由模型依据岗位要求与简历证据生成。'
+
   if (!Array.isArray(value.scoringRubric) || value.scoringRubric.length === 0) return undefined
 
   const rubric: InterviewScoringCriterion[] = []
   for (const entry of value.scoringRubric) {
-    if (!isRecord(entry) || !hasExactKeys(entry, ['criterion', 'points'])) return undefined
-    if (!isNonEmptyString(entry.criterion) || !Number.isInteger(entry.points) || Number(entry.points) <= 0) return undefined
-    rubric.push({ criterion: entry.criterion, points: Number(entry.points) })
+    if (!isRecord(entry) || !isNonEmptyString(entry.criterion)) return undefined
+    const points = Number(entry.points)
+    if (!Number.isInteger(points) || points <= 0) return undefined
+    rubric.push({ criterion: entry.criterion, points })
   }
-  if (rubric.reduce((sum, entry) => sum + entry.points, 0) !== 10) return undefined
 
   return {
     category: value.category as InterviewQuestionCategory,
     difficulty: value.difficulty as InterviewQuestionDifficulty,
     question: value.question,
-    rationale: value.rationale,
-    groundedIn: value.groundedIn,
+    rationale,
+    groundedIn,
     scoringRubric: rubric,
   }
 }
@@ -140,7 +146,7 @@ function parseModelContent(content: unknown, expectedCount: number): GeneratedIn
   } catch (error) {
     throw new InterviewQuestionGenerationError('MODEL_RESPONSE_INVALID', 'Model response content is not valid JSON.', error)
   }
-  if (!isRecord(parsed) || !hasExactKeys(parsed, ['questions']) || !Array.isArray(parsed.questions)) {
+  if (!isRecord(parsed) || !Array.isArray(parsed.questions)) {
     throw new InterviewQuestionGenerationError('MODEL_RESPONSE_INVALID', 'Model response does not match the question schema.')
   }
   const questions = parsed.questions.map(parseQuestion)
@@ -166,51 +172,70 @@ function validateInput(input: InterviewQuestionGenerationInput): void {
 }
 
 export function createInterviewQuestionGenerator(config: InterviewQuestionGeneratorConfig, fetchImpl: FetchLike = fetch) {
+  const systemPrompt = [
+    'Generate evidence-grounded interview questions for human interviewers.',
+    'Return ONLY a JSON object shaped as {"questions":[{"category":"technical|behavioral|experience|job_specific","difficulty":"easy|medium|hard","question":"...","rationale":"...","groundedIn":["..."],"scoringRubric":[{"criterion":"...","points":3}]}]}.',
+    'groundedIn MUST be a non-empty array of strings; rationale MUST be a non-empty string; each scoringRubric MUST be a non-empty array whose points are positive integers.',
+    'Return exactly the requested number of questions.',
+    'Never recommend, reject, hire, offer, or change application status.',
+  ].join(' ')
+
+  const requestOnce = async (input: InterviewQuestionGenerationInput): Promise<InterviewQuestionSet> => {
+    let response: Response
+    try {
+      response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: config.model,
+          temperature: 0.2,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: JSON.stringify(input) },
+          ],
+        }),
+        signal: AbortSignal.timeout(config.timeoutMs),
+      })
+    } catch (error) {
+      throw new InterviewQuestionGenerationError('MODEL_REQUEST_FAILED', 'Interview question model request failed.', error)
+    }
+    if (!response.ok) {
+      throw new InterviewQuestionGenerationError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Interview question model'))
+    }
+    let envelope: unknown
+    try {
+      envelope = await response.json()
+    } catch (error) {
+      throw new InterviewQuestionGenerationError('MODEL_RESPONSE_INVALID', 'Model response envelope is not valid JSON.', error)
+    }
+    const content = isRecord(envelope)
+      && Array.isArray(envelope.choices)
+      && isRecord(envelope.choices[0])
+      && isRecord(envelope.choices[0].message)
+      ? envelope.choices[0].message.content
+      : undefined
+    return {
+      questions: parseModelContent(content, input.questionCount),
+      advisoryOnly: true,
+      applicationStatusMutation: 'none',
+    }
+  }
+
   return {
     async generate(input: InterviewQuestionGenerationInput): Promise<InterviewQuestionSet> {
       validateInput(input)
-      let response: Response
-      try {
-        response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: config.model,
-            temperature: 0.2,
-            response_format: { type: 'json_object' },
-            messages: [
-              {
-                role: 'system',
-                content: 'Generate evidence-grounded interview questions for human interviewers. Return only JSON. Never recommend, reject, hire, offer, or change application status. Each question must use category technical|behavioral|experience|job_specific, difficulty easy|medium|hard, groundedIn evidence, and a scoringRubric totaling exactly 10 points.',
-              },
-              { role: 'user', content: JSON.stringify(input) },
-            ],
-          }),
-          signal: AbortSignal.timeout(config.timeoutMs),
-        })
-      } catch (error) {
-        throw new InterviewQuestionGenerationError('MODEL_REQUEST_FAILED', 'Interview question model request failed.', error)
+      // 模型偶发输出结构不合规时重试一次，降低单次抖动导致的整体退回。
+      let lastError: unknown
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return await requestOnce(input)
+        } catch (error) {
+          lastError = error
+          if (!(error instanceof InterviewQuestionGenerationError) || error.code !== 'MODEL_RESPONSE_INVALID') throw error
+        }
       }
-      if (!response.ok) {
-        throw new InterviewQuestionGenerationError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Interview question model'))
-      }
-      let envelope: unknown
-      try {
-        envelope = await response.json()
-      } catch (error) {
-        throw new InterviewQuestionGenerationError('MODEL_RESPONSE_INVALID', 'Model response envelope is not valid JSON.', error)
-      }
-      const content = isRecord(envelope)
-        && Array.isArray(envelope.choices)
-        && isRecord(envelope.choices[0])
-        && isRecord(envelope.choices[0].message)
-        ? envelope.choices[0].message.content
-        : undefined
-      return {
-        questions: parseModelContent(content, input.questionCount),
-        advisoryOnly: true,
-        applicationStatusMutation: 'none',
-      }
+      throw lastError
     },
   }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   createApplication,
@@ -37,24 +37,37 @@ const feedback = ref('')
 
 const showCreateCandidate = ref(false)
 const candidateResumeFile = ref<File | undefined>()
+const candidateJobId = ref('')
 const creatingCandidate = ref(false)
 
 const showCreateApplication = ref(false)
 const applicationForm = ref({ candidateId: '', jobId: '', source: '' })
 const creatingApplication = ref(false)
+let progressTimer: ReturnType<typeof setInterval> | undefined
 
-async function refresh() {
-  loading.value = true
+async function refresh(silent = false) {
+  if (!silent) loading.value = true
   error.value = ''
   try {
     const [candidateRows, jobRows, tagRows] = await Promise.all([loadCandidates(), loadJobs(), loadCandidateTags()])
     rows.value = candidateRows
     jobs.value = jobRows
     allTags.value = tagRows
+    ensureProgressPolling()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '读取候选人失败'
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
+  }
+}
+
+function ensureProgressPolling() {
+  const active = rows.value.some((row) => row.analysisStatus === 'queued' || row.analysisStatus === 'processing')
+  if (active && !progressTimer) {
+    progressTimer = setInterval(() => void refresh(true), 5000)
+  } else if (!active && progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = undefined
   }
 }
 
@@ -63,6 +76,10 @@ async function submitCreateCandidate() {
   const file = candidateResumeFile.value
   if (!file) {
     error.value = '请选择简历文件'
+    return
+  }
+  if (!candidateJobId.value) {
+    error.value = '请选择简历对应岗位'
     return
   }
   creatingCandidate.value = true
@@ -74,10 +91,13 @@ async function submitCreateCandidate() {
       fullName: '待解析候选人',
       source: '简历导入',
     })
-    const task = await queueResumeAnalysis(candidate.id, file)
-    feedback.value = `简历“${file.name}”已上传，AI 正在后台根据简历和岗位进行评分。`
+    const application = await createApplication({ candidateId: candidate.id, jobId: candidateJobId.value })
+    const task = await queueResumeAnalysis(candidate.id, application.id, file)
+    const jobTitle = jobs.value.find((job) => (job.entityId || job.id) === candidateJobId.value)?.title || '所选岗位'
+    feedback.value = `简历“${file.name}”已上传并关联“${jobTitle}”，AI 正在后台根据简历和岗位进行评分。`
     showCreateCandidate.value = false
     candidateResumeFile.value = undefined
+    candidateJobId.value = ''
     await refresh()
     void pollAnalysisInBackground(task.id)
   } catch (cause) {
@@ -86,6 +106,7 @@ async function submitCreateCandidate() {
       error.value = `候选人已创建，但简历上传或分析失败：${message}。请进入候选人详情重新上传简历。`
       showCreateCandidate.value = false
       candidateResumeFile.value = undefined
+      candidateJobId.value = ''
       await refresh()
     } else {
       error.value = message || '创建候选人失败'
@@ -137,9 +158,10 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
-async function queueResumeAnalysis(candidateId: string, file: File): Promise<{ id: string }> {
+async function queueResumeAnalysis(candidateId: string, applicationId: string, file: File): Promise<{ id: string }> {
   const created = await uploadResume({
     candidateId,
+    applicationId,
     originalFilename: file.name,
     mimeType: file.type || 'application/octet-stream',
     content: await fileToBase64(file),
@@ -171,12 +193,13 @@ async function pollAnalysisInBackground(taskId: string): Promise<void> {
 }
 
 onMounted(refresh)
+onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
 </script>
 
 <template>
   <PageHeader title="简历库 · AI 评分" description="跟踪候选人评估、面试和申请状态">
     <div class="inline-actions">
-      <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
+      <button class="btn btn-ghost" type="button" @click="refresh()">刷新</button>
       <button class="btn btn-primary" type="button" @click="showCreateCandidate = !showCreateCandidate">新建候选人</button>
       <button class="btn btn-primary" type="button" @click="showCreateApplication = !showCreateApplication">新建申请</button>
     </div>
@@ -189,6 +212,14 @@ onMounted(refresh)
         <label for="candidate-resume-file">简历文件</label>
         <input id="candidate-resume-file" type="file" accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" @change="selectResumeFile">
         <small class="muted">系统会从简历中解析姓名、邮箱和电话，并自动写入候选人档案。</small>
+      </div>
+      <div class="form-field" style="grid-column: 1 / -1">
+        <label for="candidate-resume-job">对应岗位 <span class="required">*</span></label>
+        <select id="candidate-resume-job" v-model="candidateJobId" aria-label="上传简历岗位">
+          <option value="" disabled>请选择这份简历对应的岗位</option>
+          <option v-for="job in jobs" :key="job.entityId || job.id" :value="job.entityId || job.id">{{ job.title }}</option>
+        </select>
+        <small class="muted">用于后续 AI 岗位匹配评分和面试安排。</small>
       </div>
     </div>
     <div class="inline-actions" style="margin-top: 14px">
