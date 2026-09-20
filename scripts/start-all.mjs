@@ -187,13 +187,12 @@ async function ensurePostgres(env) {
 }
 
 function openCommandWindow(component) {
-  const command = `cd /d "${component.cwd}" && ${component.command}`
   if (dryRun) {
-    log(`Would start ${component.name}: ${command}`)
+    log(`Would start ${component.name}: cd /d "${component.cwd}" && ${component.command}`)
     return
   }
   log(`Starting ${component.name}`)
-  const child = spawn('cmd.exe', ['/c', 'start', component.title, 'cmd.exe', '/k', command], {
+  const child = spawn('cmd.exe', ['/c', 'start', component.title, '/D', component.cwd, 'cmd.exe', '/k', component.command], {
     cwd: root,
     detached: true,
     stdio: 'ignore',
