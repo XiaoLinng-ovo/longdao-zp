@@ -50,12 +50,16 @@ function check(label, condition, detail = '') {
 }
 function step(title) { console.log(`\n[${title}]`) }
 
+let csrfToken = ''
+let csrfCookie = ''
+
 async function api(method, path, { body, token, headers = {} } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(csrfToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) ? { 'x-csrf-token': csrfToken, cookie: csrfCookie } : {}),
       ...headers,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -86,6 +90,11 @@ async function login(email) {
   const session = cookies.map((value) => value.split(';')[0]).find((value) => value.includes('smartrecruit_session='))
   if (!session) throw new Error(`登录未返回会话 Cookie：${JSON.stringify(cookies)}`)
   const token = decodeURIComponent(session.slice(session.indexOf('smartrecruit_session=') + 'smartrecruit_session='.length))
+  const csrf = cookies.map((value) => value.split(';')[0]).find((value) => value.includes('smartrecruit_csrf='))
+  if (csrf) {
+    csrfToken = decodeURIComponent(csrf.slice(csrf.indexOf('smartrecruit_csrf=') + 'smartrecruit_csrf='.length))
+    csrfCookie = csrf
+  }
   return { token, user: response.body.data.user }
 }
 
