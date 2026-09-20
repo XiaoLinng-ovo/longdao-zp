@@ -63,9 +63,15 @@ after(async () => {
 describe('admin API role matrix', { concurrency: false }, () => {
   it('allows admin and hr_admin to read all administration resources', async (context) => {
     if (!process.env.DATABASE_URL && !process.env.PGPASSWORD) { context.skip('requires PostgreSQL credentials for AdminService'); return }
+    // hr_admin 账号在两个用户来源里的邮箱不同：
+    // - PostgreSQL 种子（scripts/seed-dev-postgres.mjs）使用 hr-admin@smartrecruit.local
+    // - 本地会话存储的内置演示账号（src/auth/session-store.ts）使用 hr@smartrecruit.local
+    const hrAdmin = process.env.DATABASE_URL || process.env.PGPASSWORD
+      ? { email: 'hr-admin@smartrecruit.local', password: 'hr123' }
+      : { email: 'hr@smartrecruit.local', password: 'hr123' }
     for (const credentials of [
       { email: 'admin@smartrecruit.local', password: 'admin123' },
-      { email: 'hr@smartrecruit.local', password: 'hr123' },
+      hrAdmin,
     ]) {
       const loginResponse = await jsonRequest('POST', '/api/v1/auth/login', credentials)
       assert.equal(loginResponse.status, 200)
