@@ -3,10 +3,39 @@
  * 钉钉集成配置与 AI 模型配置共用这套原语，保证写入方式与权限一致。
  */
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
+function findApiRoot(start: string): string {
+  let dir = start
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (existsSync(resolve(dir, 'package.json'))) return dir
+    dir = resolve(dir, '..')
+  }
+  return process.cwd()
+}
+
+/**
+ * .env 候选文件，顺序即优先级：ENV_FILE_PATH → apps/api/.env → 仓库根 .env。
+ * 与启动时 loadEnvironment 的读取顺序保持一致，避免「设置页写一个文件、进程读另一个文件」。
+ */
+export function envFileCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  const apiRoot = findApiRoot(dirname(fileURLToPath(import.meta.url)))
+  const configured = env.ENV_FILE_PATH?.trim()
+  return [
+    configured ? resolve(configured) : undefined,
+    resolve(apiRoot, '.env'),
+    resolve(apiRoot, '..', '.env'),
+    resolve(apiRoot, '..', '..', '.env'),
+  ].filter((candidate): candidate is string => Boolean(candidate))
+}
+
+/** 写入目标：显式配置优先，否则选第一个已存在的候选，都不存在时新建 apps/api/.env。 */
 export function resolveEnvFilePath(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.ENV_FILE_PATH?.trim() || resolve(process.cwd(), '.env'))
+  if (env.ENV_FILE_PATH?.trim()) return envFileCandidates(env)[0]!
+  const candidates = envFileCandidates(env)
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[1]!
 }
 
 export function parseEnv(content: string): Map<string, string> {

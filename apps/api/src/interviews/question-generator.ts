@@ -1,3 +1,5 @@
+import { describeModelHttpFailure } from '../ai/model-http-error.js'
+
 export type InterviewQuestionCategory = 'technical' | 'behavioral' | 'experience' | 'job_specific'
 export type InterviewQuestionDifficulty = 'easy' | 'medium' | 'hard'
 
@@ -76,7 +78,8 @@ export function loadInterviewQuestionGeneratorConfig(
       'Interview question generation requires OPENAI_BASE_URL, OPENAI_API_KEY, and OPENAI_MODEL.',
     )
   }
-  const parsedTimeout = Number(env.OPENAI_TIMEOUT_MS ?? '30000')
+  // 空值必须回落到默认值，否则会被当成 0 判为非法配置。
+  const parsedTimeout = Number(env.OPENAI_TIMEOUT_MS?.trim() || '120000')
   if (!Number.isInteger(parsedTimeout) || parsedTimeout <= 0) {
     throw new InterviewQuestionGenerationError('AI_NOT_CONFIGURED', 'OPENAI_TIMEOUT_MS must be a positive integer.')
   }
@@ -189,7 +192,7 @@ export function createInterviewQuestionGenerator(config: InterviewQuestionGenera
         throw new InterviewQuestionGenerationError('MODEL_REQUEST_FAILED', 'Interview question model request failed.', error)
       }
       if (!response.ok) {
-        throw new InterviewQuestionGenerationError('MODEL_HTTP_ERROR', `Interview question model returned HTTP ${response.status}.`)
+        throw new InterviewQuestionGenerationError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Interview question model'))
       }
       let envelope: unknown
       try {

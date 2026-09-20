@@ -43,6 +43,7 @@ const savingAiSettings = ref(false)
 const aiDraft = ref({ baseUrl: '', apiKey: '', model: '', timeoutMs: '' })
 const confirmingAiKeyClear = ref(false)
 const aiModels = ref<string[]>([])
+const aiSettingsUnavailable = ref(false)
 /** 下拉候选：测试连接拉到的全部模型，外加已保存的模型（可能不在返回列表里）。 */
 const aiModelOptions = computed(() => {
   const configured = aiSettings.value?.env.OPENAI_MODEL.value.trim()
@@ -88,11 +89,12 @@ async function refresh() {
   loading.value = true
   error.value = ''
   departmentError.value = ''
+  aiSettingsUnavailable.value = false
   try {
     const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, aiConfig, tasks, logs] = await Promise.all([
       listAdminChecks(),
       loadWorkflowEvents(subjectType.value || undefined, 80),
-      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), getAiSettings().catch(() => null), listFailedAnalysisTasks(), listAdminAuditLogs(80),
+      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), getAiSettings().catch(() => { aiSettingsUnavailable.value = true; return null }), listFailedAnalysisTasks(), listAdminAuditLogs(80),
     ])
     rows.value = checks
     events.value = audit
@@ -376,6 +378,7 @@ onMounted(refresh)
         </div>
         <p v-if="aiTestResult" :class="aiTestResult.ok ? 'muted' : 'error-note'">{{ aiTestResult.message }}（{{ aiTestResult.latencyMs }} 毫秒）</p>
       </div>
+      <div v-else-if="aiSettingsUnavailable" class="error-note">无法读取模型配置：后端未提供该接口，通常是 API 还在运行旧构建。请在服务器上重新构建并重启 API。</div>
       <div v-else class="table-empty">正在读取模型配置...</div>
     </section>
 

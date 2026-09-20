@@ -1,3 +1,5 @@
+import { describeModelHttpFailure } from '../ai/model-http-error.js'
+
 export interface InterviewAnswerAnalyzerConfig { baseUrl: string; apiKey: string; model: string; timeoutMs: number }
 export interface InterviewAnswerAnalysisInput { question: string; candidateAnswer: string; jobTitle: string; jobRequirements: string[]; priorContext: string[]; resumeContext?: string[] }
 export interface InterviewDimensionScore { dimension: string; score: number; rationale: string }
@@ -15,7 +17,8 @@ const isText = (value: unknown): value is string => typeof value === 'string' &&
 
 export function loadInterviewAnswerAnalyzerConfig(env: NodeJS.ProcessEnv = process.env): InterviewAnswerAnalyzerConfig {
   const baseUrl = required(env.OPENAI_BASE_URL); const apiKey = required(env.OPENAI_API_KEY); const model = required(env.OPENAI_MODEL)
-  const timeoutMs = Number(env.OPENAI_TIMEOUT_MS ?? '30000')
+  // 空值必须回落到默认值，否则会被当成 0 判为非法配置。
+  const timeoutMs = Number(env.OPENAI_TIMEOUT_MS?.trim() || '120000')
   if (!baseUrl || !apiKey || !model || !Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new InterviewAnswerAnalysisError('AI_NOT_CONFIGURED', 'Interview answer analysis requires valid OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, and OPENAI_TIMEOUT_MS.')
   try { new URL(baseUrl) } catch (error) { throw new InterviewAnswerAnalysisError('AI_NOT_CONFIGURED', 'OPENAI_BASE_URL must be a valid URL.', error) }
   return { baseUrl, apiKey, model, timeoutMs }
@@ -61,7 +64,7 @@ export function createInterviewAnswerAnalyzer(config: InterviewAnswerAnalyzerCon
     try {
       response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: config.model, temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Analyze only the candidate answer using quoted evidence. Use resumeContext and priorContext when provided to check consistency and choose a useful follow-up question. Return strict JSON with summary, evidence, scores[{dimension,score 0-10,rationale}], concerns, confidence 0-1, nextQuestion. Never return a hiring, rejection, offer, or application-status decision.' }, { role: 'user', content: JSON.stringify(input) }] }), signal: AbortSignal.timeout(config.timeoutMs) })
     } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_REQUEST_FAILED', 'Interview answer model request failed.', error) }
-    if (!response.ok) throw new InterviewAnswerAnalysisError('MODEL_HTTP_ERROR', `Interview answer model returned HTTP ${response.status}.`)
+    if (!response.ok) throw new InterviewAnswerAnalysisError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Interview answer model'))
     let envelope: unknown
     try { envelope = await response.json() } catch (error) { throw new InterviewAnswerAnalysisError('MODEL_RESPONSE_INVALID', 'Model response envelope is not valid JSON.', error) }
     const content = isRecord(envelope) && Array.isArray(envelope.choices) && isRecord(envelope.choices[0]) && isRecord(envelope.choices[0].message) ? envelope.choices[0].message.content : undefined

@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { envFileCandidates } from './admin/env-file.js'
 
 function parseEnvFile(content: string): void {
   for (const rawLine of content.split(/\r?\n/)) {
@@ -22,28 +21,16 @@ function parseEnvFile(content: string): void {
   }
 }
 
-function findApiRoot(start: string): string {
-  let dir = start
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (existsSync(resolve(dir, 'package.json'))) return dir
-    dir = resolve(dir, '..')
-  }
-  return process.cwd()
-}
-
 /**
- * Loads local development configuration from the repository root `.env` file.
- * The root `.env` is intentionally outside `apps/api` so that the same
- * PostgreSQL settings are shared by migration and API processes.
+ * 依次加载候选 .env（ENV_FILE_PATH → apps/api/.env → 仓库根 .env），先出现的文件优先。
+ * 逐个文件合并而不是只用第一个存在的文件，避免后台写入的那份配置被另一份文件整体顶掉。
+ * 已存在于 process.env 的值不会被覆盖。
  */
 export function loadEnvironment(): void {
-  const moduleDir = dirname(fileURLToPath(import.meta.url))
-  const apiRoot = findApiRoot(moduleDir)
-  const configured = process.env.ENV_FILE_PATH?.trim()
-  const candidates = [configured ? resolve(configured) : undefined, resolve(apiRoot, '.env'), resolve(apiRoot, '..', '.env')].filter((value): value is string => Boolean(value))
-  const file = candidates.find((candidate) => existsSync(candidate))
-  if (!file) return
-  parseEnvFile(readFileSync(file, 'utf8'))
+  for (const file of envFileCandidates()) {
+    if (!existsSync(file)) continue
+    parseEnvFile(readFileSync(file, 'utf8'))
+  }
 }
 
 loadEnvironment()

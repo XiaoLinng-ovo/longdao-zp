@@ -55,6 +55,19 @@ describe('管理后台页面', () => {
     expect(root.textContent).toContain('过期')
   })
 
+  it('AI 配置接口不可用时给出明确提示，而不是一直停在加载态', async () => {
+    mockedChecks.mockResolvedValue([]); mockedEvents.mockResolvedValue([])
+    mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([]); mockedDepartments.mockResolvedValue([])
+    mockedSettings.mockResolvedValue({}); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false })
+    mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
+    mockedAiSettings.mockRejectedValue(new Error('未找到接口：GET /api/v1/admin/ai-settings'))
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp(AdministrationPage); app.mount(root)
+    await flush()
+    expect(root.textContent).toContain('无法读取模型配置')
+    expect(root.textContent).not.toContain('正在读取模型配置')
+  })
+
   it('加载并展示用户、角色、系统设置、失败任务和管理审计', async () => {
     mockedChecks.mockResolvedValue([]); mockedEvents.mockResolvedValue([])
     mockedUsers.mockResolvedValue([{ id: 'u1', email: 'admin@example.com', displayName: '管理员', role: 'admin', departmentCode: 'HQ', isActive: true, lastLoginAt: null, createdAt: '2026-09-01T00:00:00Z' }])

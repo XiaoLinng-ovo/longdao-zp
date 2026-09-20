@@ -1,3 +1,5 @@
+import { describeModelHttpFailure } from '../ai/model-http-error.js'
+
 export interface GeneratedJobDescription {
   language: string
   content: string
@@ -70,7 +72,8 @@ export function loadJobDescriptionGeneratorConfig(env: NodeJS.ProcessEnv = proce
       'Job description generation requires OPENAI_BASE_URL, OPENAI_API_KEY, and OPENAI_MODEL.',
     )
   }
-  const timeoutMs = Number(env.OPENAI_TIMEOUT_MS ?? '30000')
+  // 空值（例如 .env 里被写成 OPENAI_TIMEOUT_MS=）必须回落到默认值，否则会被当成 0 判为非法。
+  const timeoutMs = Number(optionalText(env.OPENAI_TIMEOUT_MS) ?? '120000')
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new JobDescriptionGenerationError('AI_NOT_CONFIGURED', 'OPENAI_TIMEOUT_MS must be a positive integer.')
   }
@@ -167,7 +170,7 @@ export function createJobDescriptionGenerator(config: JobDescriptionGeneratorCon
         throw new JobDescriptionGenerationError('MODEL_REQUEST_FAILED', 'Job description model request failed.', error)
       }
       if (!response.ok) {
-        throw new JobDescriptionGenerationError('MODEL_HTTP_ERROR', `Job description model returned HTTP ${response.status}.`)
+        throw new JobDescriptionGenerationError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Job description model'))
       }
       let envelope: unknown
       try {
