@@ -46,7 +46,9 @@ function upsertEnv(content, key, value) {
 function applySourceModeDefaults(envFile) {
   const before = parseEnvFile(envFile)
   let content = readFileSync(envFile, 'utf8')
-  const dockerMinioDefault = before.get('S3_ENDPOINT')?.trim() === 'http://minio:9000'
+  const s3Endpoint = before.get('S3_ENDPOINT')?.trim()
+  const dockerMinioDefault = s3Endpoint === 'http://minio:9000' || s3Endpoint === 'http://127.0.0.1:19000'
+  const dockerPostgresPort = before.get('PGPORT')?.trim() === '15432'
   const missingQuarantineRoot = !before.get('RECRUITING_QUARANTINE_ROOT')?.trim()
   const workerPollDisabled = before.get('WORKER_DB_POLL')?.trim() !== 'true'
 
@@ -55,6 +57,7 @@ function applySourceModeDefaults(envFile) {
     content = upsertEnv(content, 'S3_ACCESS_KEY_ID', '')
     content = upsertEnv(content, 'S3_SECRET_ACCESS_KEY', '')
   }
+  if (dockerPostgresPort) content = upsertEnv(content, 'PGPORT', '5432')
   if (missingQuarantineRoot) {
     content = upsertEnv(content, 'RECRUITING_QUARANTINE_ROOT', resolve(root, 'data', 'resumes', 'quarantine'))
   }
@@ -63,6 +66,7 @@ function applySourceModeDefaults(envFile) {
   if (content !== readFileSync(envFile, 'utf8')) {
     writeFileSync(envFile, content)
     if (dockerMinioDefault) log('Switched S3 storage to the local source-mode directory')
+    if (dockerPostgresPort) log('Switched PostgreSQL port from Docker mode 15432 to local 5432')
     if (workerPollDisabled) log('Enabled WORKER_DB_POLL for background resume analysis')
   }
 }
