@@ -15,6 +15,9 @@ pipeline = PPStructureV3(
     use_doc_orientation_classify=True,
     use_doc_unwarping=True,
     use_textline_orientation=True,
+    # paddlepaddle 3.3.1 在 CPU + oneDNN 下有 PIR 执行器 bug（ConvertPirAttribute2RuntimeAttribute），
+    # 默认禁用 mkldnn 绕过；设 PADDLE_ENABLE_MKLDNN=1 可在 paddle 修复后重新启用加速。
+    enable_mkldnn=os.getenv("PADDLE_ENABLE_MKLDNN", "0") != "0",
 )
 
 
@@ -23,13 +26,23 @@ def ocr_image(path: str) -> str:
     chunks: list[str] = []
     for page in result:
         data = page.json if hasattr(page, "json") else page
-        if isinstance(data, dict):
-            for item in data.get("rec_texts", []):
-                if isinstance(item, str) and item.strip():
-                    chunks.append(item.strip())
-            if not chunks and isinstance(data.get("text"), str):
-                chunks.append(data["text"].strip())
-    return "\n".join(chunks).strip()
+        if not isinstance(data, dict):
+            continue
+        # PP-StructureV3 返回 {"res": {"parsing_res_list": [{"block_label": ..., "block_content": ...}, ...]}}
+        res = data.get("res", data)
+        if isinstance(res, dict):
+            for block in res.get("parsing_res_list", []):
+                if isinstance(block, dict):
+                    content = block.get("block_content")
+                    if isinstance(content, str) and content.strip():
+                        chunks.append(content.strip())
+            if not chunks:
+                ocr_res = res.get("overall_ocr_res")
+                if isinstance(ocr_res, dict):
+                    for item in ocr_res.get("rec_texts", []):
+                        if isinstance(item, str) and item.strip():
+                            chunks.append(item.strip())
+    return "\n\n".join(chunks).strip()
 
 
 def ocr_pdf(payload: bytes) -> str:
