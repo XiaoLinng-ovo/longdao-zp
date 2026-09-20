@@ -24,6 +24,7 @@ export interface AdminUser {
 
 export interface AdminRole { id: string; code: string; name: string }
 export interface AdminDepartment { id: string; code: string; name: string; isActive: boolean; createdAt: string; updatedAt: string }
+export interface AdminDepartmentDeleteResult { id: string; code: string; name: string; removedApprovalPolicies: number }
 export type AdminSettings = Record<string, unknown>
 export interface DingTalkEnvSetting { value: string; configured: boolean; masked: boolean }
 export type DingTalkEnvSettings = Record<string, DingTalkEnvSetting>
@@ -91,6 +92,11 @@ export async function createAdminDepartment(input: { code: string; name: string 
 
 export async function updateAdminDepartment(id: string, patch: { name?: string; isActive?: boolean }): Promise<AdminDepartment> {
   return (await apiClient.patchJson<AdminDepartment>(`/admin/departments/${encodeURIComponent(id)}`, patch)).data
+}
+
+/** 物理删除部门。仍有用户/需求/岗位/子部门引用时服务端返回 400 并说明原因。 */
+export async function deleteAdminDepartment(id: string): Promise<AdminDepartmentDeleteResult> {
+  return (await apiClient.deleteJson<AdminDepartmentDeleteResult>(`/admin/departments/${encodeURIComponent(id)}`)).data
 }
 
 export async function updateAdminRole(id: string, patch: { name?: string }): Promise<AdminRole> {

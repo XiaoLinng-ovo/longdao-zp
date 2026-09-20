@@ -31,6 +31,14 @@ export interface AdminDepartmentRecord {
 export interface AdminDepartmentCreate { code?: string; name?: string }
 export interface AdminDepartmentUpdate { name?: string; isActive?: boolean }
 
+export interface AdminDepartmentDeleteResult {
+  id: string;
+  code: string;
+  name: string;
+  /** 随部门级联删除的审批策略行数（department_approval_policies.department_id → ON DELETE CASCADE）。 */
+  removedApprovalPolicies: number;
+}
+
 export interface AdminAuditRecord {
   id: string;
   actorId: string | null;
@@ -203,6 +211,54 @@ export class AdminService {
     const department = toDepartment(result.rows[0])
     await this.appendAudit(actorId, 'admin.department.update', 'department', department.id, requestId, { changed: Object.keys(patch), code: department.code })
     return department
+  }
+
+  /**
+   * 物理删除部门。
+   *
+   * 关联外键的删除动作（见 information_schema.referential_constraints）：
+   * - users.department_id / departments.parent_id → SET NULL
+   * - department_approval_policies.department_id → CASCADE
+   * - jobs.department_id / recruitment_requests.department_id → RESTRICT
+   *
+   * SET NULL 会静默改写历史归属（用户被解除部门后，hiring_manager 的部门可见范围会退化成全量），
+   * RESTRICT 会直接抛 23503。因此这里先把所有会「丢数据」的引用挡在前面，给出可执行的提示，
+   * 只有真正没有引用的部门才允许物理删除。审批策略属于部门自身配置，随删除一并清除。
+   */
+  async deleteDepartment(id: string, actorId: string, requestId?: string): Promise<AdminDepartmentDeleteResult> {
+    const current = await this.pool.query('SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1', [id])
+    if (!current.rows[0]) throw new AdminNotFoundError(`未找到部门：${id}`)
+    const department = toDepartment(current.rows[0])
+
+    const blockers = await this.pool.query(
+      `SELECT
+         (SELECT count(*) FROM users WHERE department_id = $1)::int AS users,
+         (SELECT count(*) FROM recruitment_requests WHERE department_id = $1)::int AS requests,
+         (SELECT count(*) FROM jobs WHERE department_id = $1)::int AS jobs,
+         (SELECT count(*) FROM departments WHERE parent_id = $1)::int AS children`,
+      [id]
+    )
+    const counts = blockers.rows[0] as { users: number; requests: number; jobs: number; children: number }
+    const parts: string[] = []
+    if (counts.users) parts.push(`${counts.users} 个用户`)
+    if (counts.requests) parts.push(`${counts.requests} 个招聘需求`)
+    if (counts.jobs) parts.push(`${counts.jobs} 个岗位`)
+    if (counts.children) parts.push(`${counts.children} 个子部门`)
+    if (parts.length) {
+      throw new AdminValidationError(
+        `无法删除部门「${department.name}」：仍有 ${parts.join('、')}引用该部门。请先转移这些记录，或改用「停用」。`
+      )
+    }
+
+    const policies = await this.pool.query('SELECT count(*)::int AS count FROM department_approval_policies WHERE department_id = $1', [id])
+    await this.pool.query('DELETE FROM departments WHERE id = $1', [id])
+    const removedApprovalPolicies = Number((policies.rows[0] as { count?: number } | undefined)?.count ?? 0)
+    await this.appendAudit(actorId, 'admin.department.delete', 'department', department.id, requestId, {
+      code: department.code,
+      name: department.name,
+      removedApprovalPolicies,
+    })
+    return { id: department.id, code: department.code, name: department.name, removedApprovalPolicies }
   }
 
   async updateRole(id: string, patch: AdminRoleUpdate, actorId: string, requestId?: string): Promise<AdminRoleRecord> {

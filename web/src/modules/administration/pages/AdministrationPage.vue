@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, updateAdminRole, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
@@ -16,6 +16,13 @@ const departments = ref<AdminDepartment[]>([])
 const departmentDraft = ref({ code: '', name: '' })
 const savingDepartment = ref<string | null>(null)
 const creatingDepartment = ref(false)
+// 物理删除需要二次确认，避免误点（页面不使用 window.confirm，便于自动化验收）
+const confirmingDepartmentId = ref<string | null>(null)
+// 部门区块的行内反馈：行级操作失败（例如删除被引用阻断）只提示本区块，不替换整页内容
+const notice = ref('')
+const departmentError = ref('')
+// 与后端 admin/service.ts 的校验保持一致：3-64 位、小写字母开头、仅含小写字母/数字/短横线
+const departmentCodeValid = computed(() => /^[a-z][a-z0-9-]{2,63}$/.test(departmentDraft.value.code.trim()))
 const settings = ref<AdminSettings>({})
 const failedTasks = ref<AdminAnalysisTask[]>([])
 const auditLogs = ref<AdminAuditLog[]>([])
@@ -80,6 +87,7 @@ function statusText(status?: string) {
 async function refresh() {
   loading.value = true
   error.value = ''
+  departmentError.value = ''
   try {
     const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, tasks, logs] = await Promise.all([
       listAdminChecks(),
@@ -120,17 +128,49 @@ async function saveRole(role: AdminRole) {
 }
 
 async function saveDepartment(department: AdminDepartment) {
-  savingDepartment.value = department.id; error.value = ''
-  try { const saved = await updateAdminDepartment(department.id, { name: department.name, isActive: department.isActive }); departments.value = departments.value.map((item) => item.id === department.id ? saved : item) }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '保存部门失败' }
+  savingDepartment.value = department.id; departmentError.value = ''
+  try { const saved = await updateAdminDepartment(department.id, { name: department.name }); departments.value = departments.value.map((item) => item.id === department.id ? saved : item) }
+  catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '保存部门名称失败' }
+  finally { savingDepartment.value = null }
+}
+
+// 停用/启用：软停用，保留历史记录（见 docs/superpowers/specs/2026-09-18-department-management-design.md）
+async function toggleDepartment(department: AdminDepartment) {
+  savingDepartment.value = department.id; departmentError.value = ''
+  try { const saved = await updateAdminDepartment(department.id, { isActive: !department.isActive }); departments.value = departments.value.map((item) => item.id === department.id ? saved : item) }
+  catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '更新部门状态失败' }
   finally { savingDepartment.value = null }
 }
 
 async function addDepartment() {
-  creatingDepartment.value = true; error.value = ''
+  creatingDepartment.value = true; departmentError.value = ''
   try { departments.value = [await createAdminDepartment(departmentDraft.value), ...departments.value]; departmentDraft.value = { code: '', name: '' } }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '新增部门失败' }
+  catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '新增部门失败' }
   finally { creatingDepartment.value = false }
+}
+
+// 物理删除：仍有用户/招聘需求/岗位/子部门引用时，后端返回 400 并给出具体原因
+// （见 apps/api/src/admin/service.ts 的 deleteDepartment）
+function askRemoveDepartment(department: AdminDepartment) {
+  confirmingDepartmentId.value = department.id
+  notice.value = ''; departmentError.value = ''
+}
+
+function cancelRemoveDepartment() {
+  confirmingDepartmentId.value = null
+}
+
+async function removeDepartment(department: AdminDepartment) {
+  savingDepartment.value = department.id; departmentError.value = ''; notice.value = ''
+  try {
+    const removed = await deleteAdminDepartment(department.id)
+    departments.value = departments.value.filter((item) => item.id !== department.id)
+    confirmingDepartmentId.value = null
+    notice.value = removed.removedApprovalPolicies
+      ? `已删除部门「${removed.name}」，同时清除 ${removed.removedApprovalPolicies} 条部门审批策略。`
+      : `已删除部门「${removed.name}」。`
+  } catch (cause) { departmentError.value = cause instanceof Error ? cause.message : '删除部门失败' }
+  finally { savingDepartment.value = null }
 }
 
 async function saveSettings() {
@@ -182,10 +222,13 @@ onMounted(refresh)
     </section>
 
     <section class="section">
-      <div class="section-heading"><h3 class="section-title">部门管理</h3></div>
-      <div class="inline-actions" style="margin-bottom:12px"><input v-model="departmentDraft.code" placeholder="部门编码，如 dept-ops" /><input v-model="departmentDraft.name" placeholder="部门名称" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
+      <div class="section-heading"><div><h3 class="section-title">部门管理</h3><p class="muted">停用后部门不再出现在新建需求的下拉选项中，历史记录仍保留；已无关联记录的部门可以直接删除。</p></div></div>
+      <div class="inline-actions" style="margin-bottom:8px"><input v-model="departmentDraft.code" placeholder="部门编码，如 dept-ops" aria-label="部门编码" :aria-invalid="departmentDraft.code.trim() !== '' && !departmentCodeValid" /><input v-model="departmentDraft.name" placeholder="部门名称" aria-label="部门名称" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
+      <p class="muted dept-code-hint" :class="{ 'is-invalid': departmentDraft.code.trim() !== '' && !departmentCodeValid }">编码规则：3-64 位，以小写字母开头，只能包含小写字母、数字或短横线（如 dept-ops）；创建后不可修改。部门名称可随时修改。</p>
+      <p v-if="notice" class="muted dept-code-hint" role="status">{{ notice }}</p>
+      <p v-if="departmentError" class="error-note" role="alert">{{ departmentError }}</p>
       <div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="department in departments" :key="department.id"><td><code>{{ department.code }}</code></td><td><input v-model="department.name" aria-label="部门名称" /></td><td><label><input v-model="department.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingDepartment === department.id" @click="saveDepartment(department)">{{ savingDepartment === department.id ? '保存中...' : '保存' }}</button></td></tr>
+        <tr v-for="department in departments" :key="department.id"><td><code>{{ department.code }}</code></td><td><input v-model="department.name" aria-label="部门名称" /></td><td>{{ department.isActive ? '启用' : '已停用' }}</td><td class="row-actions"><button class="btn btn-primary" type="button" :disabled="savingDepartment === department.id" @click="saveDepartment(department)">{{ savingDepartment === department.id ? '保存中...' : '保存名称' }}</button><button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="toggleDepartment(department)">{{ department.isActive ? '停用' : '启用' }}</button><template v-if="confirmingDepartmentId === department.id"><button class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="removeDepartment(department)">{{ savingDepartment === department.id ? '删除中...' : '确认删除' }}</button><button class="btn btn-ghost" type="button" :disabled="savingDepartment === department.id" @click="cancelRemoveDepartment">取消</button></template><button v-else class="btn btn-danger" type="button" :disabled="savingDepartment === department.id" @click="askRemoveDepartment(department)">删除</button></td></tr>
         <tr v-if="!departments.length"><td colspan="4" class="table-empty">暂无部门</td></tr>
       </tbody></table></div>
     </section>
@@ -282,4 +325,7 @@ onMounted(refresh)
 .filter { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-muted, #64748b); }
 .audit-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .audit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 13px; font-weight: 500; }
+.row-actions { display: flex; gap: 8px; }
+.dept-code-hint { margin: 0 0 12px; font-size: 12.5px; color: var(--muted, #64748b); }
+.dept-code-hint.is-invalid { color: #b91c1c; }
 </style>

@@ -394,6 +394,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/admin/departments' && method === 'POST') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return; }
     const adminDepartmentMatch = path.match(/^\/api\/v1\/admin\/departments\/([^/]+)$/);
     if (adminDepartmentMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateDepartment(adminDepartmentMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (adminDepartmentMatch && method === 'DELETE') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.deleteDepartment(adminDepartmentMatch[1]!, auth.user.id, context.requestId)); return; }
     const adminUserMatch = path.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
     if (adminUserMatch && method === 'PATCH') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.updateUser(adminUserMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
     if (path === '/api/v1/admin/roles' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listRoles()); return; }

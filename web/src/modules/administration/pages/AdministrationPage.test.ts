@@ -2,10 +2,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AdministrationPage from './AdministrationPage.vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, listFailedAnalysisTasks, listAdminAuditLogs } from '../api'
 
-vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn() }))
+vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn() }))
 const mockedChecks = vi.mocked(listAdminChecks)
+const mockedCreateDepartment = vi.mocked(createAdminDepartment)
+const mockedUpdateDepartment = vi.mocked(updateAdminDepartment)
+const mockedDeleteDepartment = vi.mocked(deleteAdminDepartment)
 const mockedEvents = vi.mocked(loadWorkflowEvents)
 const mockedUsers = vi.mocked(listAdminUsers)
 const mockedRoles = vi.mocked(listAdminRoles)
@@ -53,5 +56,105 @@ describe('管理后台页面', () => {
     expect(root.textContent).toContain('Asia/Shanghai')
     expect(root.textContent).toContain('解析失败')
     expect(root.textContent).toContain('admin.settings.update')
+  })
+
+  const departmentsFixture = [
+    { id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z' },
+    { id: 'd2', code: 'dept-old', name: '历史部门', isActive: false, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z' },
+  ]
+
+  async function mountWithDepartments(departments = departmentsFixture) {
+    mockedChecks.mockResolvedValue([]); mockedEvents.mockResolvedValue([])
+    mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([])
+    mockedDepartments.mockResolvedValue(departments)
+    mockedSettings.mockResolvedValue({}); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false })
+    mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp(AdministrationPage); app.mount(root); await flush()
+  }
+
+  function departmentRows() {
+    const table = Array.from(root!.querySelectorAll('table')).find((item) => (item.textContent ?? '').includes('dept-tech'))!
+    return Array.from(table.querySelectorAll('tbody tr'))
+  }
+  function rowButtons(index: number) {
+    return Array.from(departmentRows()[index]!.querySelectorAll('button')).map((button) => button.textContent)
+  }
+  function clickRowButton(index: number, label: string) {
+    Array.from(departmentRows()[index]!.querySelectorAll('button')).find((button) => button.textContent === label)!.click()
+  }
+
+  it('部门区块：状态与停用/启用可操作、编码规则有行内提示、删除需二次确认', async () => {
+    mockedUpdateDepartment.mockResolvedValue({ id: 'd1', code: 'dept-tech', name: '技术部', isActive: false, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-02T00:00:00Z' })
+    await mountWithDepartments()
+
+    // 停用是软停用；没有关联记录的部门可以直接删除
+    expect(root!.textContent).toContain('已无关联记录的部门可以直接删除')
+    expect(root!.textContent).toContain('编码规则：3-64 位')
+
+    const rows = departmentRows()
+    expect(rows).toHaveLength(2)
+    // 状态是文字而不是裸复选框
+    expect(rows[0]!.querySelectorAll('td')[2]!.textContent?.trim()).toBe('启用')
+    expect(rows[1]!.querySelectorAll('td')[2]!.textContent?.trim()).toBe('已停用')
+    expect(root!.querySelector('table')!.parentElement!.querySelectorAll('input[type="checkbox"]')).toHaveLength(0)
+    expect(rowButtons(0)).toEqual(['保存名称', '停用', '删除'])
+    expect(rowButtons(1)).toEqual(['保存名称', '启用', '删除'])
+
+    // 停用走 PATCH isActive=false（软停用），不是删除接口
+    clickRowButton(0, '停用'); await flush()
+    expect(mockedUpdateDepartment).toHaveBeenCalledWith('d1', { isActive: false })
+    expect(mockedDeleteDepartment).not.toHaveBeenCalled()
+
+    // 编码非法标红，合法恢复
+    const codeInput = root!.querySelector<HTMLInputElement>('input[aria-label="部门编码"]')!
+    codeInput.value = '研发部'; codeInput.dispatchEvent(new Event('input')); await flush()
+    expect(root!.querySelector('.dept-code-hint')!.classList.contains('is-invalid')).toBe(true)
+    codeInput.value = 'dept-ops'; codeInput.dispatchEvent(new Event('input')); await flush()
+    expect(root!.querySelector('.dept-code-hint')!.classList.contains('is-invalid')).toBe(false)
+
+    // 合法编码可以新增
+    const nameInput = root!.querySelector<HTMLInputElement>('input[aria-label="部门名称"]')!
+    nameInput.value = '运维部'; nameInput.dispatchEvent(new Event('input')); await flush()
+    mockedCreateDepartment.mockResolvedValue({ id: 'd3', code: 'dept-ops', name: '运维部', isActive: true, createdAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z' })
+    Array.from(root!.querySelectorAll('button')).find((button) => button.textContent === '新增部门')!.click()
+    await flush()
+    expect(mockedCreateDepartment).toHaveBeenCalledWith({ code: 'dept-ops', name: '运维部' })
+  })
+
+  it('部门删除：点「删除」先进入二次确认，确认后调用删除接口并移除该行', async () => {
+    mockedDeleteDepartment.mockResolvedValue({ id: 'd2', code: 'dept-old', name: '历史部门', removedApprovalPolicies: 0 })
+    await mountWithDepartments()
+
+    // 第一次点击只进入确认态，不发请求
+    clickRowButton(1, '删除'); await flush()
+    expect(rowButtons(1)).toEqual(['保存名称', '启用', '确认删除', '取消'])
+    expect(mockedDeleteDepartment).not.toHaveBeenCalled()
+
+    // 「取消」回到初始态
+    clickRowButton(1, '取消'); await flush()
+    expect(rowButtons(1)).toEqual(['保存名称', '启用', '删除'])
+    expect(mockedDeleteDepartment).not.toHaveBeenCalled()
+
+    // 再次进入确认态并确认删除
+    clickRowButton(1, '删除'); await flush()
+    clickRowButton(1, '确认删除'); await flush()
+    expect(mockedDeleteDepartment).toHaveBeenCalledWith('d2')
+    expect(departmentRows()).toHaveLength(1)
+    expect(root!.textContent).toContain('已删除部门「历史部门」')
+  })
+
+  it('部门删除：被引用时展示后端返回的原因且保留该行', async () => {
+    mockedDeleteDepartment.mockRejectedValue(new Error('无法删除部门「历史部门」：仍有 2 个岗位引用该部门。请先转移这些记录，或改用「停用」。'))
+    await mountWithDepartments()
+
+    clickRowButton(1, '删除'); await flush()
+    clickRowButton(1, '确认删除'); await flush()
+
+    expect(mockedDeleteDepartment).toHaveBeenCalledWith('d2')
+    // 行级错误只出现在部门区块内：整页内容（表格等）保持可用，不会被错误横幅替换
+    expect(root!.querySelector('.error-note')!.textContent).toContain('仍有 2 个岗位引用该部门')
+    expect(root!.textContent).toContain('用户与角色')
+    expect(departmentRows()).toHaveLength(2)
   })
 })
