@@ -27,8 +27,7 @@ generate-test-resume.mjs
 *_view.txt
 *梳理*.md
 
-# 测试简历样例
-测试简历*.docx
+# 测试简历样例（是 apps/api 简历解析的 DOCX 测试夹具，必须跟踪，勿忽略）
 
 # 本地 agent 计划工作流草稿（正式文档在 docs/superpowers/，不受影响）
 .superpowers/
