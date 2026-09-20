@@ -205,53 +205,57 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
     </div>
   </PageHeader>
 
-  <section v-if="showCreateCandidate" class="form-panel">
-    <div class="section-title">上传简历自动建库</div>
-    <div class="form-grid">
-      <div class="form-field" style="grid-column: 1 / -1">
-        <label for="candidate-resume-file">简历文件</label>
-        <input id="candidate-resume-file" type="file" accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" @change="selectResumeFile">
-        <small class="muted">系统会从简历中解析姓名、邮箱和电话，并自动写入候选人档案。</small>
+  <div v-if="showCreateCandidate" class="overlay" role="presentation" @click.self="showCreateCandidate = false">
+    <div class="dialog candidate-dialog" role="dialog" aria-modal="true">
+      <h3>上传简历自动建库</h3>
+      <div class="form-grid">
+        <div class="form-field" style="grid-column: 1 / -1">
+          <label for="candidate-resume-file">简历文件</label>
+          <input id="candidate-resume-file" type="file" accept=".pdf,.doc,.docx,.txt,.md,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" @change="selectResumeFile">
+          <small class="muted">系统会从简历中解析姓名、邮箱和电话，并自动写入候选人档案。</small>
+        </div>
+        <div class="form-field" style="grid-column: 1 / -1">
+          <label for="candidate-resume-job">对应岗位 <span class="required">*</span></label>
+          <select id="candidate-resume-job" v-model="candidateJobId" aria-label="上传简历岗位">
+            <option value="" disabled>请选择这份简历对应的岗位</option>
+            <option v-for="job in jobs" :key="job.entityId || job.id" :value="job.entityId || job.id">{{ job.title }}</option>
+          </select>
+          <small class="muted">用于后续 AI 岗位匹配评分和面试安排。</small>
+        </div>
       </div>
-      <div class="form-field" style="grid-column: 1 / -1">
-        <label for="candidate-resume-job">对应岗位 <span class="required">*</span></label>
-        <select id="candidate-resume-job" v-model="candidateJobId" aria-label="上传简历岗位">
-          <option value="" disabled>请选择这份简历对应的岗位</option>
-          <option v-for="job in jobs" :key="job.entityId || job.id" :value="job.entityId || job.id">{{ job.title }}</option>
-        </select>
-        <small class="muted">用于后续 AI 岗位匹配评分和面试安排。</small>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="creatingCandidate" @click="showCreateCandidate = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="creatingCandidate" @click="submitCreateCandidate">{{ creatingCandidate ? '解析中...' : '上传并解析' }}</button>
       </div>
     </div>
-    <div class="inline-actions" style="margin-top: 14px">
-      <button class="btn btn-primary" type="button" :disabled="creatingCandidate" @click="submitCreateCandidate">{{ creatingCandidate ? '解析中...' : '上传并解析' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="creatingCandidate" @click="showCreateCandidate = false">取消</button>
-    </div>
-  </section>
+  </div>
 
-  <section v-if="showCreateApplication" class="form-panel">
-    <div class="section-title">新建申请</div>
-    <div class="form-grid">
-      <div class="form-field">
-        <label>候选人</label>
-        <select v-model="applicationForm.candidateId">
-          <option value="">请选择候选人</option>
-          <option v-for="row in rows" :key="row.entityId || row.id" :value="row.entityId || row.id">{{ row.name }}</option>
-        </select>
+  <div v-if="showCreateApplication" class="overlay" role="presentation" @click.self="showCreateApplication = false">
+    <div class="dialog candidate-dialog" role="dialog" aria-modal="true">
+      <h3>新建申请</h3>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>候选人</label>
+          <select v-model="applicationForm.candidateId">
+            <option value="">请选择候选人</option>
+            <option v-for="row in rows" :key="row.entityId || row.id" :value="row.entityId || row.id">{{ row.name }}</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>岗位</label>
+          <select v-model="applicationForm.jobId">
+            <option value="">请选择岗位</option>
+            <option v-for="job in jobs" :key="job.entityId || job.id" :value="job.entityId || job.id">{{ job.title }}</option>
+          </select>
+        </div>
+        <div class="form-field"><label>来源</label><input v-model="applicationForm.source" placeholder="可选" /></div>
       </div>
-      <div class="form-field">
-        <label>岗位</label>
-        <select v-model="applicationForm.jobId">
-          <option value="">请选择岗位</option>
-          <option v-for="job in jobs" :key="job.entityId || job.id" :value="job.entityId || job.id">{{ job.title }}</option>
-        </select>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="creatingApplication" @click="showCreateApplication = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="creatingApplication" @click="submitCreateApplication">{{ creatingApplication ? '保存中...' : '保存申请' }}</button>
       </div>
-      <div class="form-field"><label>来源</label><input v-model="applicationForm.source" placeholder="可选" /></div>
     </div>
-    <div class="inline-actions" style="margin-top: 14px">
-      <button class="btn btn-primary" type="button" :disabled="creatingApplication" @click="submitCreateApplication">{{ creatingApplication ? '保存中...' : '保存申请' }}</button>
-      <button class="btn btn-ghost" type="button" :disabled="creatingApplication" @click="showCreateApplication = false">取消</button>
-    </div>
-  </section>
+  </div>
 
   <div v-if="feedback" class="success-note">{{ feedback }}</div>
   <div v-if="error" class="error-note">{{ error }}</div>
@@ -272,4 +276,5 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
 .muted { display: block; margin-top: 5px; font-size: 11px; }
 .btn:disabled { opacity: 0.6; cursor: wait; }
 .success-note { margin: 10px 0; padding: 10px 12px; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; border-radius: 7px; font-size: 12px; }
+.candidate-dialog { max-width: 720px; max-height: min(86vh, 720px); overflow-y: auto; }
 </style>

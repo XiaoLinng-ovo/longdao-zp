@@ -102,6 +102,41 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     assert.deepEqual(JSON.parse(String(insert?.values[12])), [{ userId, name: '林晓', role: 'interviewer', required: true }])
   })
 
+  it('keeps a free-text interviewer name when no system user matches', async () => {
+    const interviewId = '88888888-8888-4888-8888-888888888888'
+    const applicationId = applicationRow.id
+    const interviewRow = {
+      id: interviewId,
+      interview_no: 'INT-1002',
+      application_id: applicationId,
+      round: 1,
+      type: 'technical',
+      title: '技术面',
+      status: 'scheduled',
+      scheduled_start_at: null,
+      scheduled_end_at: null,
+      timezone: null,
+      location: null,
+      meeting_url: null,
+      participants: [{ userId: '张三', name: '张三', role: 'interviewer', required: true }],
+      created_at: '2026-09-20T00:00:00.000Z',
+      updated_at: '2026-09-20T00:00:00.000Z',
+    }
+    const pool = new FakePool([], [[], [{ id: applicationId }], [], [interviewRow]])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const result = await repository.createInterview({
+      applicationId,
+      round: 1,
+      title: '技术面',
+      participants: [{ userId: '张三', name: '张三', role: 'interviewer', required: true }],
+    })
+
+    assert.equal(result.participants[0]?.userId, '张三')
+    const insert = pool.client.calls.find((call) => call.sql.includes('INSERT INTO interviews'))
+    assert.deepEqual(JSON.parse(String(insert?.values[12])), [{ userId: '张三', name: '张三', role: 'interviewer', required: true }])
+  })
+
   it('lists and loads normalized analysis tasks and results', async () => {
     const taskRow = { id: '44444444-4444-4444-8444-444444444444', resume_id: '55555555-5555-4555-8555-555555555555', application_id: null, status: 'queued', attempts: 0, idempotency_key: 'resume-analysis:x:y', last_error: null, available_at: '2026-09-10T00:00:00.000Z', started_at: null, completed_at: null, created_at: '2026-09-10T00:00:00.000Z' }
     const resultRow = { id: '66666666-6666-4666-8666-666666666666', analysis_task_id: taskRow.id, resume_id: taskRow.resume_id, application_id: null, result: { assessment: { score: 88 } }, analyzer_version: 'rule-1', input_hash: 'hash', human_review_status: 'pending', created_at: '2026-09-10T00:00:00.000Z' }

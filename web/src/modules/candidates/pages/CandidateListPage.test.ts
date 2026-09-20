@@ -81,6 +81,9 @@ describe('CandidateListPage resume upload', () => {
     openButton!.click()
     await flush()
 
+    expect(root.querySelector('.overlay')).not.toBeNull()
+    expect(root.querySelector('.dialog h3')?.textContent).toBe('上传简历自动建库')
+
     const fileInput = root.querySelector('input[type="file"]') as HTMLInputElement
     const file = new File(['resume'], 'resume.txt', { type: 'text/plain' })
     Object.defineProperty(fileInput, 'files', { value: [file] })
@@ -98,5 +101,25 @@ describe('CandidateListPage resume upload', () => {
       candidateId: 'candidate-1',
       applicationId: 'app-1',
     })))
+  })
+
+  it('opens the new application form in a modal', async () => {
+    mockedLoadCandidates.mockResolvedValue([])
+    mockedLoadJobs.mockResolvedValue([])
+    mockedLoadCandidateTags.mockResolvedValue([])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(CandidateListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    const openButton = [...root.querySelectorAll('button')].find((button) => button.textContent === '新建申请')
+    openButton!.click()
+    await flush()
+
+    expect(root.querySelector('.overlay')).not.toBeNull()
+    expect(root.querySelector('.dialog h3')?.textContent).toBe('新建申请')
   })
 })

@@ -642,7 +642,7 @@ export class NormalizedRecruitingRepository {
       const applicationId = await resolveRequiredForeignKey(client, 'applications', 'id', 'application_no', input.applicationId, 'applicationId')
       const participants = await Promise.all((input.participants ?? []).map(async (participant) => ({
         ...participant,
-        userId: await resolveActorId(client, participant.userId, { required: true, allowDisplayName: true }) as string,
+        userId: await resolveInterviewParticipantReference(client, participant.userId),
       })))
       const interviewNo = businessNumber('INT', 'int', input.businessId ?? input.id, this.generateBusinessId)
       const round = input.round ?? await this.nextInterviewRound(client, applicationId)
@@ -1023,6 +1023,19 @@ async function resolveActorId(executor: Pick<RepositoryClient, 'query'>, value: 
       : `actor must reference an existing user: ${reference}`)
   }
   return null
+}
+
+/**
+ * 面试官允许自由填写：能匹配系统用户时绑定用户 ID，匹配不到时保留原始文本。
+ */
+async function resolveInterviewParticipantReference(executor: Pick<RepositoryClient, 'query'>, value: string): Promise<string> {
+  const reference = required(value, '面试官')
+  try {
+    return await resolveActorId(executor, reference, { required: true, allowDisplayName: true }) as string
+  } catch (error) {
+    if (error instanceof RepositoryValidationError) return reference
+    throw error
+  }
 }
 
 function dateText(value: unknown): string | null {
