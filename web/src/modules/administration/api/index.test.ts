@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting } from './index'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection } from './index'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
@@ -40,6 +40,21 @@ describe('管理后台 API', () => {
     ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
     expect((await updateResumeVirusScanSetting(true)).enabled).toBe(true)
     expect(patchJson).toHaveBeenCalledWith('/admin/resume-virus-scan', { enabled: true })
+  })
+  it('读取并更新招聘渠道配置，并单独测试连接', async () => {
+    getJson.mockResolvedValue({ ok: true, data: { boss: { id: 'boss' } }, requestId: 'test' } as never)
+    await getChannelSettings()
+    expect(getJson).toHaveBeenCalledWith('/admin/channel-settings')
+
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { boss: { id: 'boss' } }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    await updateChannelSettings({ CHANNEL_BOSS_ENABLED: 'true' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/channel-settings', { CHANNEL_BOSS_ENABLED: 'true' })
+
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: { status: 'not_configured', message: '缺少配置' }, requestId: 'test' })
+    ;(apiClient as unknown as { postJson: typeof postJson }).postJson = postJson
+    expect((await testChannelConnection('boss')).status).toBe('not_configured')
+    expect(postJson).toHaveBeenCalledWith('/admin/channel-connections/boss/test', {})
   })
   it('汇总 ready 与 health 为配置检查项', async () => {
     getJson.mockImplementation(async (path) => {

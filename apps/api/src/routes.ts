@@ -6,6 +6,8 @@ import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/service.js';
 import { AiSettingsValidationError } from './admin/ai-settings.js';
+import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
+import type { ChannelProvider } from './integrations/channels/types.js';
 import { createDatabasePool } from './db/connection.js';
 import { authService } from './auth/middleware.js';
 import type { Role } from './auth/types.js';
@@ -435,6 +437,24 @@ const routeMiddleware: Middleware = async (context, next) => {
         ...(typeof body.baseUrl === 'string' ? { baseUrl: body.baseUrl } : {}),
         ...(typeof body.apiKey === 'string' ? { apiKey: body.apiKey } : {}),
       }));
+      return;
+    }
+    if (path === '/api/v1/admin/channel-settings' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.getChannelSettings()); return; }
+    if (path === '/api/v1/admin/channel-settings' && method === 'PATCH') {
+      requireRole(auth, ADMIN_ROLES);
+      try {
+        sendSuccess(context, await adminService.updateChannelSettings(await readJson(context) as Record<string, string>, auth.user.id, context.requestId));
+      } catch (error) {
+        if (error instanceof ChannelSettingsValidationError) throw new HttpError(400, error.code, error.message);
+        throw error;
+      }
+      return;
+    }
+    const channelConnectionTestMatch = path.match(/^\/api\/v1\/admin\/channel-connections\/([^/]+)\/test$/);
+    if (channelConnectionTestMatch && method === 'POST') {
+      requireRole(auth, ADMIN_ROLES);
+      const provider = channelConnectionTestMatch[1] as ChannelProvider;
+      sendSuccess(context, await adminService.testChannelConnection(provider));
       return;
     }
     if (path === '/api/v1/admin/analysis-tasks' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await recruiting.listAnalysisTasks(context.url.searchParams.get('status') ?? undefined)); return; }

@@ -96,6 +96,14 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - `WORKER_DB_POLL`：Worker 是否轮询数据库任务，默认关闭
 - `RESUME_VIRUS_SCAN_ENABLED`：是否启用 ClamAV 隔离门禁，默认 `false`
 
+### 招聘渠道接入
+
+管理后台的「招聘渠道接入」支持分别配置 BOSS直聘、猎聘、前程无忧和公司官网。配置写入服务端 `.env`，密钥只保存原文，读取接口只返回掩码。
+
+当前一期已经提供渠道定义、配置校验、连接测试、公司官网 Webhook HMAC 验签，以及数据库中的渠道连接、岗位发布、简历回流和同步运行预留表。BOSS直聘、猎聘和前程无忧在取得企业开放平台接口文档前，测试会返回「适配器尚未接入」，不会伪造连接成功。拿到官方文档后，只需在对应适配器内补签名算法、请求路径、响应映射和状态回传。
+
+环境变量统一使用 `CHANNEL_<PROVIDER>_<FIELD>` 命名，完整键名见 `.env.example`。
+
 ## API
 
 新版 API 使用 `/api/v1`，业务数据要求 PostgreSQL；不再提供整体状态 JSON 的读写接口。

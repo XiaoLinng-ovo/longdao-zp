@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AdministrationPage from './AdministrationPage.vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings } from '../api'
 
-vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn() }))
+vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn() }))
 const mockedChecks = vi.mocked(listAdminChecks)
 const mockedCreateDepartment = vi.mocked(createAdminDepartment)
 const mockedUpdateDepartment = vi.mocked(updateAdminDepartment)
@@ -20,6 +20,7 @@ const mockedAiSettings = vi.mocked(getAiSettings)
 const mockedAiConnectionTest = vi.mocked(testAiConnection)
 const mockedFailedTasks = vi.mocked(listFailedAnalysisTasks)
 const mockedAuditLogs = vi.mocked(listAdminAuditLogs)
+const mockedChannelSettings = vi.mocked(getChannelSettings)
 
 const checks = [{ category: '服务健康', owner: '系统管理员', status: 'active' as const, detail: 'smartrecruit-api' }]
 const event = { id: 'event-1', subjectType: 'offer' as const, subjectId: 'OFF-1', subjectLabel: 'OFF-1', action: 'expire', fromStatus: 'sent', toStatus: 'expired', actorId: 'user-demo', createdAt: '2026-09-11T00:00:00Z' }
@@ -38,6 +39,12 @@ beforeEach(() => {
     },
   })
   mockedAiConnectionTest.mockResolvedValue({ ok: true, message: 'ok', latencyMs: 12, models: ['gpt-4o-mini'] })
+  mockedChannelSettings.mockResolvedValue({
+    boss: { id: 'boss', name: 'BOSS直聘', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
+    liepin: { id: 'liepin', name: '猎聘', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
+    '51job': { id: '51job', name: '前程无忧', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
+    official_site: { id: 'official_site', name: '公司官网', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
+  })
 })
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); vi.resetAllMocks() })
 

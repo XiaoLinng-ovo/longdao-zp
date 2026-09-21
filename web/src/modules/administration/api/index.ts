@@ -163,6 +163,47 @@ export async function saveAiSettings(patch: Partial<Record<keyof AiEnvSettings, 
   return (await apiClient.patchJson<AiSettings>('/admin/ai-settings', patch)).data
 }
 
+export type ChannelProvider = 'boss' | 'liepin' | '51job' | 'official_site'
+export type ChannelEnvKey = string
+export interface ChannelFieldDefinition {
+  key: ChannelEnvKey
+  connectionKey: 'enabled' | 'baseUrl' | 'appKey' | 'appSecret' | 'webhookToken' | 'signingSecret'
+  label: string
+  secret: boolean
+  required: boolean
+  placeholder?: string
+  help: string
+}
+export interface ChannelEnvSetting { value: string; configured: boolean; masked: boolean }
+export interface ChannelSettingsView {
+  id: ChannelProvider
+  name: string
+  description: string
+  enabled: boolean
+  configured: boolean
+  missing: ChannelEnvKey[]
+  values: Record<string, ChannelEnvSetting>
+  fields: ChannelFieldDefinition[]
+  capabilities: string[]
+}
+export type ChannelSettings = Record<ChannelProvider, ChannelSettingsView>
+export interface ChannelOperationResult {
+  status: 'ok' | 'not_configured' | 'not_implemented' | 'error'
+  message: string
+}
+
+export async function getChannelSettings(): Promise<ChannelSettings> {
+  return (await apiClient.getJson<ChannelSettings>('/admin/channel-settings')).data
+}
+
+export async function updateChannelSettings(patch: Record<string, string>): Promise<ChannelSettings> {
+  return (await apiClient.patchJson<ChannelSettings>('/admin/channel-settings', patch)).data
+}
+
+export async function testChannelConnection(provider: ChannelProvider): Promise<ChannelOperationResult> {
+  return (await apiClient.postJson<ChannelOperationResult>(`/admin/channel-connections/${provider}/test`, {})).data
+}
+
 export async function listFailedAnalysisTasks(): Promise<AdminAnalysisTask[]> {
   return (await apiClient.getJson<AdminAnalysisTask[]>('/admin/analysis-tasks?status=failed')).data
 }

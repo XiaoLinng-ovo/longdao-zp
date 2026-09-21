@@ -4,6 +4,9 @@ import { hashPassword } from '../auth/password.js';
 import { readDingTalkEnvSettings, readResumeVirusScanSetting, updateDingTalkEnvSettings, updateResumeVirusScanSetting, type DingTalkEnvPatch } from './dingtalk-env-settings.js';
 import { readAiEnvSettings, readAiSettings, testAiConnection, updateAiEnvSettings, type AiConnectionTestInput, type AiConnectionTestResult, type AiEnvPatch, type AiSettingsResponse } from './ai-settings.js';
 import { resolveEnvFilePath } from './env-file.js';
+import { readChannelConnectionInput, readChannelSettings, updateChannelSettings, type ChannelSettings } from '../integrations/channels/settings.js';
+import { createChannelConnector } from '../integrations/channels/registry.js';
+import type { ChannelProvider } from '../integrations/channels/types.js';
 
 export interface AdminUserRecord {
   id: string;
@@ -118,7 +121,7 @@ function toDepartment(row: Record<string, unknown>): AdminDepartmentRecord {
  * 与业务链路的 workflow_events（领域事件）区分开。
  */
 export class AdminService {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly envFilePath?: string) {}
 
   async listUsers(): Promise<AdminUserRecord[]> {
     const result = await this.pool.query(`${USER_SELECT} ORDER BY u.created_at DESC, u.email`);
@@ -331,6 +334,23 @@ export class AdminService {
   /** 用给定（或当前生效）的连接拉取模型列表，供「先测试再保存模型」使用。 */
   testAiConnection(input: AiConnectionTestInput = {}): Promise<AiConnectionTestResult> {
     return testAiConnection(input)
+  }
+
+  async getChannelSettings(): Promise<ChannelSettings> {
+    return readChannelSettings(this.envFilePath)
+  }
+
+  async updateChannelSettings(patch: Record<string, string>, actorId: string, requestId?: string): Promise<ChannelSettings> {
+    const result = await updateChannelSettings(this.envFilePath, patch)
+    await this.appendAudit(actorId, 'admin.channel_settings.update', 'env_file', null, requestId, { keys: Object.keys(patch) })
+    return result
+  }
+
+  async testChannelConnection(provider: ChannelProvider) {
+    const settings = await this.getChannelSettings()
+    if (!settings[provider]) throw new AdminValidationError(`未知招聘渠道：${provider}`)
+    const input = await readChannelConnectionInput(this.envFilePath, provider)
+    return createChannelConnector(provider).test(input)
   }
 
   async listAuditLogs(limit = 50): Promise<AdminAuditRecord[]> {

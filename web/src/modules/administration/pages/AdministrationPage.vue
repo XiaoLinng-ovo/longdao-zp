@@ -4,6 +4,7 @@ import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, li
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
+import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings.vue'
 import { actionLabel, statusLabel } from '../../../shared/utils/labels'
 
 const rows = ref<AdminCheckRow[]>([])
@@ -408,6 +409,8 @@ onMounted(refresh)
         </div>
       </div>
     </section>
+
+    <ChannelIntegrationSettings />
 
     <section class="section">
       <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
