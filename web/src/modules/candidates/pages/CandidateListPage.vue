@@ -26,15 +26,22 @@ const jobs = ref<Job[]>([])
 const allTags = ref<string[]>([])
 const jobFilter = ref('')
 const tagFilter = ref('')
+const searchQuery = ref('')
 const scoreSort = ref<'none' | 'desc' | 'asc'>('none')
 const jobSort = ref<'none' | 'asc' | 'desc'>('none')
 
 const jobOptions = computed(() => [...new Set(rows.value.map((row) => row.job).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 
+function runSearch() {
+  searchQuery.value = searchQuery.value.trim()
+}
+
 const filteredRows = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
   const filtered = rows.value.filter((row) =>
     (!jobFilter.value || row.job === jobFilter.value)
-    && (!tagFilter.value || (row.tags ?? []).includes(tagFilter.value)))
+    && (!tagFilter.value || (row.tags ?? []).includes(tagFilter.value))
+    && (!query || [row.name, row.job, row.source, row.company, ...(row.tags ?? []), ...(row.skills ?? [])].join(' ').toLowerCase().includes(query)))
   if (scoreSort.value === 'none' && jobSort.value === 'none') return filtered
   return filtered.sort((left, right) => {
     if (jobSort.value !== 'none') {
@@ -279,6 +286,8 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
   <div v-if="error" class="error-note">{{ error }}</div>
   <div v-if="loading" class="loading-note">正在读取候选人...</div>
   <div v-else class="filter-bar">
+    <input v-model="searchQuery" class="candidate-search" type="search" aria-label="简历库搜索" placeholder="搜索姓名、公司、技能、岗位" @keyup.enter="runSearch" />
+    <button class="btn btn-ghost" type="button" @click="runSearch">搜索</button>
     <label for="candidate-job-filter">岗位筛选</label>
     <select id="candidate-job-filter" v-model="jobFilter" aria-label="岗位筛选">
       <option value="">全部岗位</option>
@@ -310,6 +319,7 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
 <style scoped>
 .filter-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .filter-bar select { min-width: 180px; }
+.candidate-search { flex: 1; min-width: 240px; }
 .muted { display: block; margin-top: 5px; font-size: 11px; }
 .btn:disabled { opacity: 0.6; cursor: wait; }
 .success-note { margin: 10px 0; padding: 10px 12px; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; border-radius: 7px; font-size: 12px; }

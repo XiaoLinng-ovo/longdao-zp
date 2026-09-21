@@ -333,6 +333,18 @@ function analysisReport(result: unknown): { assessment?: { score?: number }; ext
   }
 }
 
+function analysisSearchFields(result: unknown): { company?: string; skills?: string[] } {
+  const extraction = analysisReport(result).extraction
+  if (!extraction || typeof extraction !== 'object') return {}
+  const row = extraction as Record<string, unknown>
+  const experience = Array.isArray(row.experience) ? row.experience.find((item) => item && typeof item === 'object') as Record<string, unknown> | undefined : undefined
+  const company = typeof experience?.employer === 'string' ? experience.employer.trim() : ''
+  const skills = Array.isArray(row.skills)
+    ? row.skills.map((item) => item && typeof item === 'object' ? String((item as Record<string, unknown>).value ?? (item as Record<string, unknown>).canonical ?? '').trim() : '').filter(Boolean)
+    : []
+  return { ...(company ? { company } : {}), ...(skills.length ? { skills } : {}) }
+}
+
 function analysisTaskProgress(status: string | undefined): number {
   if (status === 'queued') return 15
   if (status === 'processing') return 65
@@ -921,8 +933,9 @@ export class RecruitingService {
         const latestResult = latestResultByCandidate.get(item.id)
         const latestTask = latestTaskByCandidate.get(item.id)
         const latestScore = analysisReport(latestResult?.result).assessment?.score
+        const searchFields = analysisSearchFields(latestResult?.result)
         const analysisStatus = latestTask?.status as 'queued' | 'processing' | 'completed' | 'failed' | undefined
-        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, aiStatus: (latestResult ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof latestScore === 'number' ? { score: latestScore } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: candidateApplications as ApplicationRecord[] }
+        return { id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), ...searchFields, status: (item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active') as CandidateRecord['status'], createdAt: item.createdAt, updatedAt: item.updatedAt, aiStatus: (latestResult ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof latestScore === 'number' ? { score: latestScore } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: candidateApplications as ApplicationRecord[] }
       })
       return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
     }
@@ -935,8 +948,9 @@ export class RecruitingService {
       const latest = scoped.analysisResults.filter((result) => resumeIds.has(result.resumeId) || (result.applicationId ? applicationIds.has(result.applicationId) : false)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
       const latestTask = scoped.analysisTasks.filter((task) => resumeIds.has(task.resumeId)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
       const score = analysisReport(latest?.result).assessment?.score
+      const searchFields = analysisSearchFields(latest?.result)
       const analysisStatus = latestTask?.status as 'queued' | 'processing' | 'completed' | 'failed' | undefined
-      return { ...candidate, aiStatus: (latest ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof score === 'number' ? { score } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }
+      return { ...candidate, ...searchFields, aiStatus: (latest ? 'completed' : 'pending') as 'completed' | 'pending', ...(typeof score === 'number' ? { score } : {}), ...(analysisStatus ? { analysisStatus, analysisProgress: analysisTaskProgress(analysisStatus), analysisAttempts: latestTask?.attempts ?? 0 } : {}), ...(latestTask?.lastError ? { analysisError: latestTask.lastError } : {}), applications: scoped.applications.filter((application) => application.candidateId === candidate.id) }
     })
     return jobIds ? rows.filter((row) => row.applications.some((application) => jobIds.has(application.jobId))) : rows
   }

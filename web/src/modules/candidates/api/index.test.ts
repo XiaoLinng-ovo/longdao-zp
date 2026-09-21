@@ -13,7 +13,7 @@ describe('候选人 API', () => {
       if (path === '/candidates') {
         return Promise.resolve({
           ok: true, requestId: 'test',
-          data: [{ id: 'uuid-candidate', code: 'CAN-1', fullName: '王思远', tags: ['后端'], status: 'active', updatedAt: '2026-09-10T00:00:00Z', applications: [{ id: 'app-1', candidateId: 'uuid-candidate', jobId: 'job-1', status: 'new', score: 80, aiStatus: 'completed', updatedAt: '2026-09-10T00:00:00Z' }] }],
+          data: [{ id: 'uuid-candidate', code: 'CAN-1', fullName: '王思远', source: '简历导入', company: '星河科技', skills: ['Java'], tags: ['后端'], status: 'active', updatedAt: '2026-09-10T00:00:00Z', applications: [{ id: 'app-1', candidateId: 'uuid-candidate', jobId: 'job-1', status: 'new', source: 'BOSS直聘', score: 80, aiStatus: 'completed', updatedAt: '2026-09-10T00:00:00Z' }] }],
         } as never)
       }
       if (path === '/jobs') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'job-1', title: '后端工程师' }] } as never)
@@ -22,6 +22,8 @@ describe('候选人 API', () => {
     const candidates = await loadCandidates()
     expect(candidates[0]).toMatchObject({ entityId: 'uuid-candidate', id: 'CAN-1', name: '王思远', tags: ['后端'] })
     expect(candidates[0].job).toBe('后端工程师')
+    expect(candidates[0].source).toBe('BOSS直聘')
+    expect(candidates[0]).toMatchObject({ company: '星河科技', skills: ['Java'] })
   })
 
   it('更新候选人与人工复核分析结果', async () => {

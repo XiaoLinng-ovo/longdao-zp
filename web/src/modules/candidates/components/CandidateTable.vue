@@ -6,13 +6,14 @@ const emit = defineEmits<{ open: [row: Candidate] }>()
 </script>
 
 <template>
-  <div class="table-wrap"><table><thead><tr><th>候选人</th><th>应聘岗位</th><th>标签</th><th>综合评分</th><th>AI 分析</th><th>申请状态</th><th>更新时间</th><th class="op-col">操作</th></tr></thead>
+  <div class="table-wrap"><table><thead><tr><th>候选人</th><th>应聘岗位</th><th>来源</th><th>标签</th><th>综合评分</th><th>AI 分析</th><th>申请状态</th><th>更新时间</th><th class="op-col">操作</th></tr></thead>
     <tbody>
       <tr v-for="row in rows" :key="row.id">
         <td>
           <button class="name-link" type="button" @click="emit('open', row)"><strong>{{ row.name }}</strong></button>
         </td>
         <td>{{ row.job }}</td>
+        <td>{{ row.source || '未标注' }}</td>
         <td><span class="tag-list">{{ (row.tags || []).join('、') || '—' }}</span></td>
         <td><strong>{{ row.score }}</strong>/100</td>
         <td>
@@ -35,7 +36,7 @@ const emit = defineEmits<{ open: [row: Candidate] }>()
         <td>{{ row.updatedAt }}</td>
         <td><button class="btn btn-ghost btn-sm" type="button" @click="emit('open', row)">详情</button></td>
       </tr>
-      <tr v-if="!rows.length"><td colspan="8" class="table-empty">暂无数据</td></tr>
+      <tr v-if="!rows.length"><td colspan="9" class="table-empty">暂无数据</td></tr>
     </tbody>
   </table></div>
 </template>

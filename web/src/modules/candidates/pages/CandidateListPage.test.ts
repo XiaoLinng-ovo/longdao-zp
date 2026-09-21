@@ -187,4 +187,29 @@ describe('CandidateListPage resume upload', () => {
     await flush()
     expect(renderedNames()).toEqual(['后端高分候选人', '后端候选人'])
   })
+
+  it('searches candidates by name, company, skill, job and source', async () => {
+    mockedLoadCandidates.mockResolvedValue([
+      { id: 'CAN-1', entityId: 'candidate-1', name: '林晓', job: '后端工程师', source: 'BOSS直聘', company: '星河科技', skills: ['Java', 'PostgreSQL'], score: 86, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+      { id: 'CAN-2', entityId: 'candidate-2', name: '周芳', job: '产品经理', source: '官网投递', company: '远山网络', skills: ['需求分析'], score: 78, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+    ])
+    mockedLoadJobs.mockResolvedValue([])
+    mockedLoadCandidateTags.mockResolvedValue([])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(CandidateListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    const renderedNames = () => [...root!.querySelectorAll('.name-link')].map((node) => node.textContent)
+    const search = root.querySelector('input[aria-label="简历库搜索"]') as HTMLInputElement
+    for (const [query, expected] of [['星河', ['林晓']], ['PostgreSQL', ['林晓']], ['产品经理', ['周芳']], ['官网', ['周芳']]] as const) {
+      search.value = query
+      search.dispatchEvent(new Event('input'))
+      await flush()
+      expect(renderedNames()).toEqual(expected)
+    }
+  })
 })

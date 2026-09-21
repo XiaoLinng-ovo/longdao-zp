@@ -4,8 +4,8 @@ import type { Candidate } from '../../../shared/types/recruiting'
 export { loadJobs } from '../../jobs/api'
 
 interface ApiJob { id: string; title: string }
-export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; score?: number; aiStatus: string; updatedAt: string; rejectionReason?: string }
-export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number; analysisStatus?: string; analysisProgress?: number; analysisAttempts?: number; analysisError?: string; applications: ApiApplication[] }
+export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; source?: string; score?: number; aiStatus: string; updatedAt: string; rejectionReason?: string }
+export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; company?: string; skills?: string[]; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number; analysisStatus?: string; analysisProgress?: number; analysisAttempts?: number; analysisError?: string; applications: ApiApplication[] }
 export interface ApiResume { id: string; candidateId: string; applicationId?: string; originalFilename: string; mimeType: string; sizeBytes: number; contentHash: string; scanStatus: string; createdAt: string }
 export interface ApiAnalysisTask { id: string; resumeId: string; applicationId?: string; status: string; attempts: number; completedAt?: string; lastError?: string }
 
@@ -108,6 +108,9 @@ function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
     name: row.fullName,
     job: application ? jobs.get(application.jobId) || application.jobId : '未关联岗位',
     score: application?.score ?? row.score ?? 0,
+    source: application?.source || row.source || '未标注',
+    company: row.company,
+    skills: row.skills,
     aiStatus: application?.aiStatus === 'completed' || row.aiStatus === 'completed' ? 'completed' : 'pending',
     analysisStatus: row.analysisStatus,
     analysisProgress: row.analysisProgress,

@@ -173,6 +173,7 @@ onMounted(load)
         <div class="profile-item"><span>姓名</span><strong>{{ candidateProfile.fullName }}</strong></div>
         <div class="profile-item"><span>邮箱</span><strong>{{ candidateProfile.email }}</strong></div>
         <div class="profile-item"><span>电话</span><strong>{{ candidateProfile.phone }}</strong></div>
+        <div class="profile-item"><span>简历来源</span><strong>{{ detail.source || '未标注' }}</strong></div>
         <div class="profile-item"><span>当前方向</span><strong>{{ candidateProfile.headline }}</strong></div>
         <div v-if="candidateProfile.experienceYears != null" class="profile-item">
           <span>相关经验</span><strong>{{ candidateProfile.experienceYears }} 年</strong>
