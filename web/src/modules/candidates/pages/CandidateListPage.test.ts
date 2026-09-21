@@ -153,4 +153,38 @@ describe('CandidateListPage resume upload', () => {
     await flush()
     expect(renderedNames()).toEqual(['低分候选人', '高分候选人', '待评分候选人'])
   })
+
+  it('filters and sorts candidates by job', async () => {
+    mockedLoadCandidates.mockResolvedValue([
+      { id: 'CAN-1', entityId: 'candidate-1', name: '后端候选人', job: '后端工程师', score: 72, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+      { id: 'CAN-2', entityId: 'candidate-2', name: '产品候选人', job: '产品经理', score: 88, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+      { id: 'CAN-3', entityId: 'candidate-3', name: '后端高分候选人', job: '后端工程师', score: 95, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+    ])
+    mockedLoadJobs.mockResolvedValue([])
+    mockedLoadCandidateTags.mockResolvedValue([])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(CandidateListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    const renderedNames = () => [...root!.querySelectorAll('.name-link')].map((node) => node.textContent)
+    const jobFilter = root.querySelector('select[aria-label="岗位筛选"]') as HTMLSelectElement
+    const jobSort = root.querySelector('select[aria-label="岗位排序"]') as HTMLSelectElement
+    const scoreSort = root.querySelector('select[aria-label="评分排序"]') as HTMLSelectElement
+
+    jobSort.value = 'asc'
+    jobSort.dispatchEvent(new Event('change'))
+    scoreSort.value = 'desc'
+    scoreSort.dispatchEvent(new Event('change'))
+    await flush()
+    expect(renderedNames()).toEqual(['产品候选人', '后端高分候选人', '后端候选人'])
+
+    jobFilter.value = '后端工程师'
+    jobFilter.dispatchEvent(new Event('change'))
+    await flush()
+    expect(renderedNames()).toEqual(['后端高分候选人', '后端候选人'])
+  })
 })

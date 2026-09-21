@@ -24,15 +24,24 @@ function openDetail(row: Awaited<ReturnType<typeof loadCandidates>>[number]) {
 const rows = ref<Awaited<ReturnType<typeof loadCandidates>>>([])
 const jobs = ref<Job[]>([])
 const allTags = ref<string[]>([])
+const jobFilter = ref('')
 const tagFilter = ref('')
 const scoreSort = ref<'none' | 'desc' | 'asc'>('none')
+const jobSort = ref<'none' | 'asc' | 'desc'>('none')
+
+const jobOptions = computed(() => [...new Set(rows.value.map((row) => row.job).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 
 const filteredRows = computed(() => {
-  const filtered = tagFilter.value
-    ? rows.value.filter((row) => (row.tags ?? []).includes(tagFilter.value))
-    : [...rows.value]
-  if (scoreSort.value === 'none') return filtered
+  const filtered = rows.value.filter((row) =>
+    (!jobFilter.value || row.job === jobFilter.value)
+    && (!tagFilter.value || (row.tags ?? []).includes(tagFilter.value)))
+  if (scoreSort.value === 'none' && jobSort.value === 'none') return filtered
   return filtered.sort((left, right) => {
+    if (jobSort.value !== 'none') {
+      const jobOrder = left.job.localeCompare(right.job, 'zh-CN')
+      if (jobOrder !== 0) return jobSort.value === 'asc' ? jobOrder : -jobOrder
+    }
+    if (scoreSort.value === 'none') return 0
     const leftScored = left.aiStatus === 'completed'
     const rightScored = right.aiStatus === 'completed'
     if (leftScored !== rightScored) return leftScored ? -1 : 1
@@ -270,6 +279,11 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
   <div v-if="error" class="error-note">{{ error }}</div>
   <div v-if="loading" class="loading-note">正在读取候选人...</div>
   <div v-else class="filter-bar">
+    <label for="candidate-job-filter">岗位筛选</label>
+    <select id="candidate-job-filter" v-model="jobFilter" aria-label="岗位筛选">
+      <option value="">全部岗位</option>
+      <option v-for="job in jobOptions" :key="job" :value="job">{{ job }}</option>
+    </select>
     <template v-if="allTags.length">
       <label for="candidate-tag-filter">标签筛选</label>
       <select id="candidate-tag-filter" v-model="tagFilter">
@@ -282,6 +296,12 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
       <option value="none">默认排序</option>
       <option value="desc">评分从高到低</option>
       <option value="asc">评分从低到高</option>
+    </select>
+    <label for="candidate-job-sort">岗位排序</label>
+    <select id="candidate-job-sort" v-model="jobSort" aria-label="岗位排序">
+      <option value="none">默认排序</option>
+      <option value="asc">岗位 A→Z</option>
+      <option value="desc">岗位 Z→A</option>
     </select>
   </div>
   <CandidateTable v-if="!loading" :rows="filteredRows" @open="openDetail" />
