@@ -67,6 +67,7 @@ export async function startWorker(config: WorkerConfig, options: StartWorkerOpti
       maxAttempts: config.maxAttempts,
       leaseDurationMs: config.leaseDurationMs,
       pollIntervalMs: config.pollIntervalMs,
+      concurrency: config.concurrency,
       now,
       storage,
       executor,

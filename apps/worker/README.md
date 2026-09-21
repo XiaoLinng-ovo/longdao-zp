@@ -43,6 +43,7 @@ Worker 不会因为分析结果自动淘汰、录用或发放 Offer。
 | `WORKER_ID` | `${hostname}-${pid}` | Worker 实例标识 |
 | `WORKER_QUEUE_NAME` | `smartrecruit.tasks` | 预留队列名称 |
 | `WORKER_MAX_ATTEMPTS` | `3` | 默认最大尝试次数 |
+| `WORKER_CONCURRENCY` | `3` | 同时处理的分析任务数，范围 1–20 |
 | `WORKER_POLL_INTERVAL_MS` | `1000` | 预留轮询间隔 |
 | `WORKER_LEASE_DURATION_MS` | `60000` | 预留任务租约时间 |
 | `WORKER_HEALTH_HOST` | `127.0.0.1` | 健康检查监听地址 |

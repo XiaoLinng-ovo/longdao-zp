@@ -7,6 +7,7 @@ export interface WorkerConfig {
   workerId: string
   queueName: string
   maxAttempts: number
+  concurrency: number
   pollIntervalMs: number
   leaseDurationMs: number
   healthHost: string
@@ -66,6 +67,7 @@ export function loadConfig(
     workerId: env.WORKER_ID?.trim() || `${hostname}-${process.pid}`,
     queueName: env.WORKER_QUEUE_NAME?.trim() || 'smartrecruit.tasks',
     maxAttempts: readInteger(env, 'WORKER_MAX_ATTEMPTS', 3, { minimum: 1 }),
+    concurrency: readInteger(env, 'WORKER_CONCURRENCY', 3, { minimum: 1, maximum: 20 }),
     pollIntervalMs: readInteger(env, 'WORKER_POLL_INTERVAL_MS', 1000, { minimum: 0 }),
     leaseDurationMs: readInteger(env, 'WORKER_LEASE_DURATION_MS', 60_000, { minimum: 1 }),
     healthHost: env.WORKER_HEALTH_HOST?.trim() || '127.0.0.1',

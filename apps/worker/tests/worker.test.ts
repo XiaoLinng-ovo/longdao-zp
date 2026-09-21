@@ -176,6 +176,13 @@ void describe('worker health', () => {
     })
   })
 
+  it('loads bounded worker concurrency from environment', () => {
+    assert.equal(loadConfig({}, 'test-host').concurrency, 3)
+    assert.equal(loadConfig({ WORKER_CONCURRENCY: '8' }, 'test-host').concurrency, 8)
+    assert.throws(() => loadConfig({ WORKER_CONCURRENCY: '0' }, 'test-host'), /WORKER_CONCURRENCY/)
+    assert.throws(() => loadConfig({ WORKER_CONCURRENCY: '21' }, 'test-host'), /WORKER_CONCURRENCY/)
+  })
+
   it('reports selected object storage readiness when the worker starts', async () => {
     const config = loadConfig({ WORKER_HEALTH_PORT: '0', WORKER_ID: 'storage-health-worker' }, 'test-host')
     const runtime = await startWorker(config, {
