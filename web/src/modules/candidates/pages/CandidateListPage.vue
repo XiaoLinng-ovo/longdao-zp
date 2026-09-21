@@ -25,10 +25,19 @@ const rows = ref<Awaited<ReturnType<typeof loadCandidates>>>([])
 const jobs = ref<Job[]>([])
 const allTags = ref<string[]>([])
 const tagFilter = ref('')
+const scoreSort = ref<'none' | 'desc' | 'asc'>('none')
 
 const filteredRows = computed(() => {
-  if (!tagFilter.value) return rows.value
-  return rows.value.filter((row) => (row.tags ?? []).includes(tagFilter.value))
+  const filtered = tagFilter.value
+    ? rows.value.filter((row) => (row.tags ?? []).includes(tagFilter.value))
+    : [...rows.value]
+  if (scoreSort.value === 'none') return filtered
+  return filtered.sort((left, right) => {
+    const leftScored = left.aiStatus === 'completed'
+    const rightScored = right.aiStatus === 'completed'
+    if (leftScored !== rightScored) return leftScored ? -1 : 1
+    return scoreSort.value === 'desc' ? right.score - left.score : left.score - right.score
+  })
 })
 
 const loading = ref(true)
@@ -260,11 +269,19 @@ onUnmounted(() => { if (progressTimer) clearInterval(progressTimer) })
   <div v-if="feedback" class="success-note">{{ feedback }}</div>
   <div v-if="error" class="error-note">{{ error }}</div>
   <div v-if="loading" class="loading-note">正在读取候选人...</div>
-  <div v-else-if="allTags.length" class="filter-bar">
-    <label for="candidate-tag-filter">标签筛选</label>
-    <select id="candidate-tag-filter" v-model="tagFilter">
-      <option value="">全部标签</option>
-      <option v-for="tag in allTags" :key="tag" :value="tag">{{ tag }}</option>
+  <div v-else class="filter-bar">
+    <template v-if="allTags.length">
+      <label for="candidate-tag-filter">标签筛选</label>
+      <select id="candidate-tag-filter" v-model="tagFilter">
+        <option value="">全部标签</option>
+        <option v-for="tag in allTags" :key="tag" :value="tag">{{ tag }}</option>
+      </select>
+    </template>
+    <label for="candidate-score-sort">评分排序</label>
+    <select id="candidate-score-sort" v-model="scoreSort" aria-label="评分排序">
+      <option value="none">默认排序</option>
+      <option value="desc">评分从高到低</option>
+      <option value="asc">评分从低到高</option>
     </select>
   </div>
   <CandidateTable v-if="!loading" :rows="filteredRows" @open="openDetail" />

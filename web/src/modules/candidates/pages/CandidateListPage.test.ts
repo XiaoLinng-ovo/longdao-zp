@@ -122,4 +122,35 @@ describe('CandidateListPage resume upload', () => {
     expect(root.querySelector('.overlay')).not.toBeNull()
     expect(root.querySelector('.dialog h3')?.textContent).toBe('新建申请')
   })
+
+  it('sorts candidates by AI score in both directions', async () => {
+    mockedLoadCandidates.mockResolvedValue([
+      { id: 'CAN-1', entityId: 'candidate-1', name: '低分候选人', job: '后端工程师', score: 62, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+      { id: 'CAN-2', entityId: 'candidate-2', name: '高分候选人', job: '后端工程师', score: 96, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+      { id: 'CAN-3', entityId: 'candidate-3', name: '待评分候选人', job: '后端工程师', score: 0, aiStatus: 'pending', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
+    ])
+    mockedLoadJobs.mockResolvedValue([])
+    mockedLoadCandidateTags.mockResolvedValue([])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(CandidateListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    const renderedNames = () => [...root!.querySelectorAll('.name-link')].map((node) => node.textContent)
+    expect(renderedNames()).toEqual(['低分候选人', '高分候选人', '待评分候选人'])
+
+    const sort = root.querySelector('select[aria-label="评分排序"]') as HTMLSelectElement
+    sort.value = 'desc'
+    sort.dispatchEvent(new Event('change'))
+    await flush()
+    expect(renderedNames()).toEqual(['高分候选人', '低分候选人', '待评分候选人'])
+
+    sort.value = 'asc'
+    sort.dispatchEvent(new Event('change'))
+    await flush()
+    expect(renderedNames()).toEqual(['低分候选人', '高分候选人', '待评分候选人'])
+  })
 })
