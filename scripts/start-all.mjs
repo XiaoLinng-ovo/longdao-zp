@@ -269,7 +269,7 @@ async function main() {
       port: 3100,
       cwd: root,
       command: 'npm start',
-      healthUrl: 'http://127.0.0.1:3100/health',
+      healthUrl: 'http://127.0.0.1:3100/api/v1/health',
     },
     {
       name: 'Worker',
@@ -299,7 +299,7 @@ async function main() {
   }
 
   const checks = [
-    ['API', 'http://127.0.0.1:3100/health', 90_000],
+    ['API', 'http://127.0.0.1:3100/api/v1/health', 90_000],
     ['Worker', 'http://127.0.0.1:4001/health', 30_000],
     ['Web', 'http://127.0.0.1:5174/', 30_000],
   ]

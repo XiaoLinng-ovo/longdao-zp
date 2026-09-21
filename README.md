@@ -130,5 +130,5 @@ OPENAI_TIMEOUT_MS=30000
 - 页面仍显示旧的 `quarantined`：确认访问的是当前 API（默认 `3100`），停止旧 API 进程后重新执行 `pnpm start`，并确认数据库 migration 已执行。
 - 上传简历失败并提示对象存储不可用：确认 MinIO 容器在运行（`docker compose -f deploy/docker-compose.yml up -d minio`）且 `S3_ENDPOINT` 指向的地址可达；`.\start-local.ps1` 会在启动 API 前自动完成这步检查。
 - 简历库没有数据：确认 API 与前端使用同一个 PostgreSQL 数据库，且 Web 的 `/api` 代理指向实际 API；不要只启动 Web。
-- API 返回 502：通常是代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/health`，再检查 Web 的 `VITE_API_PROXY_TARGET`。
+- API 返回 502：通常是代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/api/v1/health`，再检查 Web 的 `VITE_API_PROXY_TARGET`。
 - 数据库连接失败：检查 PostgreSQL 是否启动、端口和账号是否正确；可先执行 `node scripts/check-postgres-ready.mjs`。
