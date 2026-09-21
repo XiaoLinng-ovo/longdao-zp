@@ -79,6 +79,32 @@ void describe('OpenAI-compatible resume analyzer', () => {
     )
   })
 
+  it('accepts common model variations for numeric strings and object arrays', async () => {
+    const analyzer = createOpenAIResumeAnalyzer({
+      baseUrl: 'https://llm.example/v1',
+      apiKey: 'secret',
+      model: 'resume-model',
+      fetch: async () => Response.json({
+        choices: [{ message: { content: JSON.stringify({
+          summary: '模型返回了可用的结构化结果。',
+          score: '91',
+          strengths: [
+            { evidence: '五年 TypeScript 开发经验', relevance: '满足核心技能要求' },
+          ],
+          matchedRequirements: [
+            { requirement: 'PostgreSQL', evidence: '负责过 PostgreSQL 性能优化' },
+          ],
+          interviewQuestions: ['请说明一次数据库性能优化经历。'],
+          confidence: '0.86',
+        }) } }],
+      }),
+    })
+    const result = await createResumeAnalysisHandler({ analyze: analyzer })(task, context)
+    assert.equal(result.analysis.report.assessment.score, 91)
+    assert.equal(result.analysis.report.assessment.confidence, 0.86)
+    assert.deepEqual(result.analysis.report.assessment.strengths, ['五年 TypeScript 开发经验：满足核心技能要求'])
+  })
+
   it('classifies timeout and non-2xx responses as retryable failures', async () => {
     const timeoutAnalyzer = createOpenAIResumeAnalyzer({
       baseUrl: 'https://llm.example/v1', apiKey: 'secret', model: 'resume-model', timeoutMs: 1,
