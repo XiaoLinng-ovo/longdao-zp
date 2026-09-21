@@ -646,12 +646,14 @@ export class NormalizedRecruitingRepository {
       })))
       const interviewNo = businessNumber('INT', 'int', input.businessId ?? input.id, this.generateBusinessId)
       const round = input.round ?? await this.nextInterviewRound(client, applicationId)
+      // 阶段跟着轮次走：第 1 轮=初试，第 2 轮及以后=复试（与迁移 0021 的口径一致，面试问题表按阶段归属）。
+      const stage = round >= 2 ? 'final' : 'initial'
       const row = await queryOne<InterviewRow>(client,
         `INSERT INTO interviews
-          (id, interview_no, application_id, round, type, title, status, scheduled_start_at, scheduled_end_at, timezone, location, meeting_url, participants)
-         VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13::jsonb)
+          (id, interview_no, application_id, round, stage, type, title, status, scheduled_start_at, scheduled_end_at, timezone, location, meeting_url, participants)
+         VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz, $11, $12, $13, $14::jsonb)
          RETURNING ${INTERVIEW_COLUMNS}`,
-        [uuidOrGenerated(input.id), interviewNo, applicationId, round, input.type ?? 'other', required(input.title, 'title'),
+        [uuidOrGenerated(input.id), interviewNo, applicationId, round, stage, input.type ?? 'other', required(input.title, 'title'),
          input.status ?? 'scheduled', input.scheduledStartAt ?? null, input.scheduledEndAt ?? null, input.timezone ?? null,
          input.location ?? null, input.meetingUrl ?? null, JSON.stringify(participants)])
       return mapInterview(row)
@@ -664,7 +666,10 @@ export class NormalizedRecruitingRepository {
       const assignments: string[] = []
       const values: unknown[] = []
       const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
-      if (input.round !== undefined) add('round', input.round)
+      if (input.round !== undefined) {
+        add('round', input.round)
+        add('stage', input.round >= 2 ? 'final' : 'initial')
+      }
       if (input.type !== undefined) add('type', input.type)
       if (input.title !== undefined) add('title', required(input.title, 'title'))
       if (input.status !== undefined) add('status', input.status)
@@ -1075,7 +1080,7 @@ interface ApprovalRecordRow extends QueryResultRow { id: string; approval_instan
 
 interface JobSpecVersionRow extends QueryResultRow { id: string; job_id: string; version: number; content: Record<string, unknown> | null; created_by: string | null; created_at: string | Date; confirmed_at: string | Date | null }
 interface JobDescriptionVersionRow extends QueryResultRow { id: string; job_id: string; version: number; title: string; content: string; status: string; created_by: string | null; created_at: string | Date; confirmed_at: string | Date | null }
-interface InterviewRow extends QueryResultRow { id: string; interview_no: string; application_id: string; round: number; type: string; title: string; status: string; scheduled_start_at: string | Date | null; scheduled_end_at: string | Date | null; timezone: string | null; location: string | null; meeting_url: string | null; participants: unknown; created_at: string | Date; updated_at: string | Date }
+interface InterviewRow extends QueryResultRow { id: string; interview_no: string; application_id: string; round: number; stage: string; type: string; title: string; status: string; scheduled_start_at: string | Date | null; scheduled_end_at: string | Date | null; timezone: string | null; location: string | null; meeting_url: string | null; participants: unknown; created_at: string | Date; updated_at: string | Date }
 interface InterviewFeedbackRow extends QueryResultRow { id: string; interview_id: string; interviewer_id: string; status: string; overall_score: string | number | null; recommendation: string | null; ratings: unknown; strengths: unknown; concerns: unknown; notes: string | null; submitted_at: string | Date | null; locked_at: string | Date | null }
 interface OfferRow extends QueryResultRow { id: string; application_id: string; status: string; current_version_id: string | null; approval_status: string; sent_at: string | Date | null; responded_at: string | Date | null; expires_at: string | Date | null; version: number; created_at: string | Date; updated_at: string | Date }
 interface OfferVersionRow extends QueryResultRow { id: string; offer_id: string; version: number; position_title: string; department_id: string; employment_type: string; start_date: string | Date | null; compensation: unknown; benefits: unknown; content: string; created_at: string | Date }
@@ -1093,7 +1098,7 @@ const ANALYSIS_RESULT_RETURNING = 'id, analysis_task_id, resume_id, application_
 
 const JOB_SPEC_VERSION_COLUMNS = 'id, job_id, version, content, created_by, created_at, confirmed_at'
 const JD_VERSION_COLUMNS = 'id, job_id, version, title, content, status, created_by, created_at, confirmed_at'
-const INTERVIEW_COLUMNS = 'id, interview_no, application_id, round, type, title, status, scheduled_start_at, scheduled_end_at, timezone, location, meeting_url, participants, created_at, updated_at'
+const INTERVIEW_COLUMNS = 'id, interview_no, application_id, round, stage, type, title, status, scheduled_start_at, scheduled_end_at, timezone, location, meeting_url, participants, created_at, updated_at'
 const FEEDBACK_COLUMNS = 'f.id, f.interview_id, f.interviewer_id, f.status, f.overall_score, f.recommendation, f.ratings, f.strengths, f.concerns, f.notes, f.submitted_at, f.locked_at'
 const OFFER_COLUMNS = 'id, application_id, status, current_version_id, approval_status, sent_at, responded_at, expires_at, version, created_at, updated_at'
 const OFFER_VERSION_COLUMNS = 'v.id, v.offer_id, v.version, v.position_title, v.department_id, v.employment_type, v.start_date, v.compensation, v.benefits, v.content, v.created_at'
@@ -1118,7 +1123,7 @@ const APPLICATION_SELECT = `SELECT a.id, a.application_no, a.candidate_id, c.can
   LEFT JOIN candidates c ON c.id = a.candidate_id
   LEFT JOIN jobs j ON j.id = a.job_id`
 
-const INTERVIEW_SELECT = `SELECT i.id, i.interview_no, i.application_id, i.round, i.type, i.title, i.status, i.scheduled_start_at, i.scheduled_end_at, i.timezone, i.location, i.meeting_url, i.participants, i.created_at, i.updated_at
+const INTERVIEW_SELECT = `SELECT i.id, i.interview_no, i.application_id, i.round, i.stage, i.type, i.title, i.status, i.scheduled_start_at, i.scheduled_end_at, i.timezone, i.location, i.meeting_url, i.participants, i.created_at, i.updated_at
   FROM interviews i
   LEFT JOIN applications a ON a.id = i.application_id`
 const OFFER_SELECT = `SELECT o.id, o.application_id, o.status, o.current_version_id, o.approval_status, o.sent_at, o.responded_at, o.expires_at, o.version, o.created_at, o.updated_at
@@ -1160,7 +1165,7 @@ function mapJobDescriptionVersion(row: JobDescriptionVersionRow): JobDescription
 }
 
 function mapInterview(row: InterviewRow): InterviewDbRecord {
-  return { id: row.id, businessId: row.interview_no, applicationId: row.application_id, round: Number(row.round), type: row.type, title: row.title, status: row.status, scheduledStartAt: row.scheduled_start_at ? iso(row.scheduled_start_at) : null, scheduledEndAt: row.scheduled_end_at ? iso(row.scheduled_end_at) : null, timezone: row.timezone, location: row.location, meetingUrl: row.meeting_url, participants: jsonArray<InterviewParticipantDbRecord>(row.participants), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  return { id: row.id, businessId: row.interview_no, applicationId: row.application_id, round: Number(row.round), stage: (row.stage === 'final' ? 'final' : 'initial'), type: row.type, title: row.title, status: row.status, scheduledStartAt: row.scheduled_start_at ? iso(row.scheduled_start_at) : null, scheduledEndAt: row.scheduled_end_at ? iso(row.scheduled_end_at) : null, timezone: row.timezone, location: row.location, meetingUrl: row.meeting_url, participants: jsonArray<InterviewParticipantDbRecord>(row.participants), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapInterviewFeedback(row: InterviewFeedbackRow): InterviewFeedbackDbRecord {

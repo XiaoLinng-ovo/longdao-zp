@@ -174,6 +174,10 @@ void describe('worker health', () => {
     assert.deepEqual(enabled.openai, {
       baseUrl: 'https://llm.example/v1/', apiKey: 'secret', model: 'resume-model', timeoutMs: 45_000,
     })
+    assert.equal(enabled.leaseDurationMs, 75_000)
+    assert.equal(enabled.useLlmAnalysis, false)
+    assert.equal(loadConfig({ WORKER_USE_LLM_ANALYSIS: 'true' }, 'test-host').useLlmAnalysis, true)
+    assert.equal(loadConfig({ WORKER_LEASE_DURATION_MS: '200000' }, 'test-host').leaseDurationMs, 200_000)
   })
 
   it('loads bounded worker concurrency from environment', () => {

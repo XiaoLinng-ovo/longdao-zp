@@ -9,6 +9,8 @@ export interface ApiInterview {
   code: string
   applicationId: string
   round: number
+  /** 面试阶段：第 1 轮=初试，第 2 轮及以后=复试（与后端 interviews.stage 一致）。 */
+  stage?: 'initial' | 'final'
   type: InterviewType
   title: string
   status: 'scheduled' | 'completed' | 'cancelled'

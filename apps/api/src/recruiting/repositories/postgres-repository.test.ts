@@ -99,7 +99,40 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     const nameLookup = pool.client.calls.find((call) => call.sql.includes('lower(display_name) = lower($1)'))
     assert.deepEqual(nameLookup?.values, ['林晓'])
     const insert = pool.client.calls.find((call) => call.sql.includes('INSERT INTO interviews'))
-    assert.deepEqual(JSON.parse(String(insert?.values[12])), [{ userId, name: '林晓', role: 'interviewer', required: true }])
+    assert.deepEqual(JSON.parse(String(insert?.values[13])), [{ userId, name: '林晓', role: 'interviewer', required: true }])
+    // 第 1 轮属于初试阶段，面试问题表按 stage 归属，必须跟着轮次一起写入。
+    assert.equal(insert?.values[4], 'initial')
+  })
+
+  it('marks a second-round interview as the final stage so 复试问答归属正确', async () => {
+    const interviewId = '99999999-9999-4999-8999-999999999999'
+    const applicationId = applicationRow.id
+    const interviewRow = {
+      id: interviewId,
+      interview_no: 'INT-1002',
+      application_id: applicationId,
+      round: 2,
+      stage: 'final',
+      type: 'onsite',
+      title: '复试',
+      status: 'scheduled',
+      scheduled_start_at: null,
+      scheduled_end_at: null,
+      timezone: null,
+      location: null,
+      meeting_url: null,
+      participants: [],
+      created_at: '2026-09-10T00:00:00.000Z',
+      updated_at: '2026-09-10T00:00:00.000Z',
+    }
+    const pool = new FakePool([], [[], [{ id: applicationId }], [interviewRow]])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const result = await repository.createInterview({ applicationId, round: 2, title: '复试', participants: [] })
+
+    const insert = pool.client.calls.find((call) => call.sql.includes('INSERT INTO interviews'))
+    assert.equal(insert?.values[4], 'final')
+    assert.equal(result.stage, 'final')
   })
 
   it('keeps a free-text interviewer name when no system user matches', async () => {
@@ -134,7 +167,7 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
 
     assert.equal(result.participants[0]?.userId, '张三')
     const insert = pool.client.calls.find((call) => call.sql.includes('INSERT INTO interviews'))
-    assert.deepEqual(JSON.parse(String(insert?.values[12])), [{ userId: '张三', name: '张三', role: 'interviewer', required: true }])
+    assert.deepEqual(JSON.parse(String(insert?.values[13])), [{ userId: '张三', name: '张三', role: 'interviewer', required: true }])
   })
 
   it('lists and loads normalized analysis tasks and results', async () => {

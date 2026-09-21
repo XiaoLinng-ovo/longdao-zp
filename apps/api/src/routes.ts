@@ -27,6 +27,8 @@ import { createJobDescriptionGenerator, generateLocalJobDescription, JobDescript
 import { createFunAsrClient, FunAsrError, loadFunAsrConfig } from './interviews/funasr-client.js';
 import { mapInterviewRoles, type ConfirmedSpeakerRoles } from './interviews/role-mapper.js';
 import { LiveInterviewSessionRepository } from './interviews/live-session-repository.js';
+import { QuestionSheetRepository } from './interviews/question-sheet-repository.js';
+import { QuestionSheetService } from './interviews/question-sheet-service.js';
 import { createLiveInterviewAudioStorage } from './interviews/live-audio-storage.js';
 import { parseLiveSessionPath } from './interviews/live-route.js';
 import { createObjectStorageFromEnv } from '@smartrecruit-pro/object-storage';
@@ -35,6 +37,7 @@ import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, v
 
 const recruiting = new RecruitingService();
 const liveInterviewSessions = new LiveInterviewSessionRepository(createDatabasePool());
+const questionSheets = new QuestionSheetService(new QuestionSheetRepository(createDatabasePool()));
 const liveInterviewAudioStorage = createLiveInterviewAudioStorage(createObjectStorageFromEnv(process.env, resolve(process.cwd(), '../../data/interviews')));
 const adminService = new AdminService(createDatabasePool());
 const dingTalkJobSync = new DingTalkJobSyncService(
@@ -513,6 +516,85 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (interviewMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') { const input = await recruiting.getInterviewQuestionContext(interviewMatch[1]!); const requestedCount = body.questionCount === undefined ? input.questionCount : Number(body.questionCount); if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 20) throw new HttpError(400, 'INVALID_INPUT', 'questionCount 必须是 1 到 20 的整数'); const generationInput = { ...input, questionCount: requestedCount }; try { const generator=createInterviewQuestionGenerator(loadInterviewQuestionGeneratorConfig()); const generated=await generator.generate(generationInput); sendSuccess(context,{...generated,engine:'llm'}) } catch(error) { if(error instanceof InterviewQuestionGenerationError && error.code === 'INVALID_INPUT') throw new HttpError(400,error.code,error.message); sendSuccess(context,{...generateLocalInterviewQuestions(generationInput),engine:'local_fallback'}) } } return; }
     const applicationMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/status$/);
     if (applicationMatch && method === 'POST') { requireRole(auth, APPLICATION_WRITE_ROLES); await recruiting.assertApplicationInScope(applicationMatch[1]!, departmentScope(auth)); const body = await readJson(context); sendSuccess(context, await recruiting.updateApplicationStatus(applicationMatch[1]!, String(body.status) as never, body.reason, auth.user.id)); return; }
+
+    // 面试问题表（初试 2 张 / 复试 3 张）：读写沿用应聘的部门范围口径。
+    const sheetListMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/question-sheets$/);
+    if (sheetListMatch && method === 'GET') {
+      await recruiting.assertApplicationInScope(sheetListMatch[1]!, departmentScope(auth));
+      sendSuccess(context, await questionSheets.getApplicationView(sheetListMatch[1]!));
+      return;
+    }
+    const sheetMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/question-sheets\/(initial|final)\/(hr_screen|hiring_department|business|hr|boss)(?:\/(.*))?$/);
+    if (sheetMatch) {
+      const applicationId = sheetMatch[1]!; const stage = sheetMatch[2] as 'initial' | 'final'; const sheetType = sheetMatch[3] as 'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'; const suffix = sheetMatch[4] ?? '';
+      await recruiting.assertApplicationInScope(applicationId, departmentScope(auth));
+      if (!suffix && method === 'POST') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        sendSuccess(context, await questionSheets.requestGeneration(applicationId, stage, sheetType, auth.user.id));
+        return;
+      }
+      if (suffix === 'submit' && method === 'POST') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        const sheet = await questionSheets.requireSheet(applicationId, stage, sheetType);
+        sendSuccess(context, await questionSheets.submit(sheet.id, auth.user.id));
+        return;
+      }
+      if (suffix === 'lock' && method === 'POST') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        const sheet = await questionSheets.requireSheet(applicationId, stage, sheetType);
+        sendSuccess(context, await questionSheets.lock(sheet.id, auth.user.id));
+        return;
+      }
+      if (suffix === 'questions' && method === 'POST') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        const body = await readJson(context);
+        const sheet = await questionSheets.requireSheet(applicationId, stage, sheetType);
+        sendSuccess(context, await questionSheets.addManualQuestion(sheet.id, {
+          question: String(body.question ?? '').trim(),
+          ...(typeof body.dimension === 'string' ? { dimension: body.dimension } : {}),
+          ...(typeof body.answerText === 'string' ? { answerText: body.answerText } : {}),
+        }), 201);
+        return;
+      }
+      const questionMatch = suffix.match(/^questions\/([^/]+)$/);
+      if (questionMatch && method === 'PATCH') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        const body = await readJson(context);
+        const sheet = await questionSheets.requireSheet(applicationId, stage, sheetType);
+        sendSuccess(context, await questionSheets.patchQuestion(sheet.id, questionMatch[1]!, {
+          ...(body.finalTier === undefined ? {} : { finalTier: (body.finalTier === null ? null : String(body.finalTier)) as 'excellent' | 'pass' | 'below' | null }),
+          ...(body.finalScore === undefined ? {} : { finalScore: body.finalScore === null ? null : Number(body.finalScore) }),
+          ...(body.comment === undefined ? {} : { comment: body.comment === null ? null : String(body.comment) }),
+        }, auth.user.id));
+        return;
+      }
+      if (questionMatch && method === 'DELETE') {
+        requireRole(auth, INTERVIEW_WRITE_ROLES);
+        const sheet = await questionSheets.requireSheet(applicationId, stage, sheetType);
+        await questionSheets.deleteQuestion(sheet.id, questionMatch[1]!);
+        sendSuccess(context, { ok: true });
+        return;
+      }
+    }
+    const stageDecisionMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/stages\/(initial|final)\/decision$/);
+    if (stageDecisionMatch && method === 'POST') {
+      requireRole(auth, INTERVIEW_WRITE_ROLES);
+      await recruiting.assertApplicationInScope(stageDecisionMatch[1]!, departmentScope(auth));
+      const body = await readJson(context);
+      sendSuccess(context, await questionSheets.recordDecision(stageDecisionMatch[1]!, stageDecisionMatch[2] as 'initial' | 'final', String(body.decision ?? '') as never, auth.user.id));
+      return;
+    }
+    const stageWeightsMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/stages\/(initial|final)\/weights$/);
+    if (stageWeightsMatch && method === 'PATCH') {
+      requireRole(auth, INTERVIEW_WRITE_ROLES);
+      await recruiting.assertApplicationInScope(stageWeightsMatch[1]!, departmentScope(auth));
+      const body = await readJson(context);
+      const rawSheets = body && typeof body.sheets === 'object' && body.sheets !== null ? body.sheets as Record<string, unknown> : {};
+      const sheets: Record<string, number> = {};
+      for (const [key, value] of Object.entries(rawSheets)) sheets[key] = Number(value);
+      sendSuccess(context, await questionSheets.updateStageWeights(stageWeightsMatch[1]!, stageWeightsMatch[2] as 'initial' | 'final', { sheets, recording: Number(body.recording ?? 0) }, auth.user.id));
+      return;
+    }
     const jobMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)(?:\/(.*))?$/);
     if (jobMatch) {
       const id = jobMatch[1]!; const suffix = jobMatch[2] ?? '';

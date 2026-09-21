@@ -8,6 +8,19 @@ import { createIdempotencyMiddleware } from './idempotency.js';
 import { PostgresIdempotencyStore } from './idempotency-postgres.js';
 import { createDatabasePool } from './db/connection.js';
 import routeMiddleware, { notFoundMiddleware } from './routes.js';
+import { QuestionSheetRepository } from './interviews/question-sheet-repository.js';
+import { QuestionSheetService, startQuestionSheetPoll } from './interviews/question-sheet-service.js';
+
+/**
+ * 面试表生成是分钟级的模型调用，放在 API 进程内做后台轮询，避免阻塞请求。
+ * 与 worker 的轮询写法一致；单实例部署下由 updated_at 顺序领取任务。
+ */
+function startQuestionSheetPollResolved(): () => void {
+  if (process.env.NODE_ENV === 'test' || (process.env.QUESTION_SHEET_POLL ?? '').toLowerCase() === 'off') return () => undefined
+  const interval = Number(process.env.QUESTION_SHEET_POLL_MS ?? '5000')
+  const service = new QuestionSheetService(new QuestionSheetRepository(createDatabasePool()))
+  return startQuestionSheetPoll({ service, pollIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 5000 })
+}
 
 const authMiddleware: Middleware = async (context, next) => {
   await attachAuth(context);
@@ -52,6 +65,8 @@ export function createHttpServer(config: AppConfig = loadConfig()): Server {
 }
 
 export async function startServer(config: AppConfig = loadConfig()): Promise<Server> {
+  // 面试表生成是分钟级的模型调用，放到进程内的后台轮询，避免阻塞请求。
+  const stopQuestionSheetPoll = startQuestionSheetPollResolved()
   const server = createHttpServer(config);
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => {
@@ -66,5 +81,6 @@ export async function startServer(config: AppConfig = loadConfig()): Promise<Ser
     server.once('listening', onListening);
     server.listen(config.port, config.host);
   });
+  server.once('close', () => stopQuestionSheetPoll())
   return server;
 }

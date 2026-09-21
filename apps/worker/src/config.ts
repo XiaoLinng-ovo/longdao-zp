@@ -14,6 +14,7 @@ export interface WorkerConfig {
   healthPort: number
   shutdownTimeoutMs: number
   pollPostgres: boolean
+  useLlmAnalysis: boolean
   clamavHost?: string
   clamavPort: number
   clamavTimeoutMs: number
@@ -60,6 +61,9 @@ export function loadConfig(
   const openaiBaseUrl = env.OPENAI_BASE_URL?.trim()
   const openaiApiKey = env.OPENAI_API_KEY?.trim()
   const openaiModel = env.OPENAI_MODEL?.trim()
+  const openaiTimeoutMs = openaiBaseUrl && openaiApiKey && openaiModel
+    ? readInteger(env, 'OPENAI_TIMEOUT_MS', 120_000, { minimum: 1 })
+    : undefined
   return {
     appName: env.APP_NAME?.trim() || 'smartrecruit-pro-worker',
     appVersion: env.APP_VERSION?.trim() || '0.1.0',
@@ -69,11 +73,12 @@ export function loadConfig(
     maxAttempts: readInteger(env, 'WORKER_MAX_ATTEMPTS', 3, { minimum: 1 }),
     concurrency: readInteger(env, 'WORKER_CONCURRENCY', 3, { minimum: 1, maximum: 20 }),
     pollIntervalMs: readInteger(env, 'WORKER_POLL_INTERVAL_MS', 1000, { minimum: 0 }),
-    leaseDurationMs: readInteger(env, 'WORKER_LEASE_DURATION_MS', 60_000, { minimum: 1 }),
+    leaseDurationMs: readInteger(env, 'WORKER_LEASE_DURATION_MS', openaiTimeoutMs ? openaiTimeoutMs + 30_000 : 60_000, { minimum: 1 }),
     healthHost: env.WORKER_HEALTH_HOST?.trim() || '127.0.0.1',
     healthPort: readPort(env, 'WORKER_HEALTH_PORT', 4001),
     shutdownTimeoutMs: readInteger(env, 'WORKER_SHUTDOWN_TIMEOUT_MS', 10_000, { minimum: 1 }),
     pollPostgres: env.WORKER_DB_POLL?.trim() === 'true',
+    useLlmAnalysis: env.WORKER_USE_LLM_ANALYSIS?.trim() === 'true',
     ...(clamavHost === undefined ? {} : { clamavHost }),
     clamavPort: readPort(env, 'CLAMAV_PORT', 3310),
     clamavTimeoutMs: readInteger(env, 'CLAMAV_TIMEOUT_MS', 30_000, { minimum: 1 }),
@@ -83,7 +88,7 @@ export function loadConfig(
         baseUrl: openaiBaseUrl,
         apiKey: openaiApiKey,
         model: openaiModel,
-        timeoutMs: readInteger(env, 'OPENAI_TIMEOUT_MS', 120_000, { minimum: 1 }),
+        timeoutMs: openaiTimeoutMs ?? 120_000,
       },
     } : {}),
   }

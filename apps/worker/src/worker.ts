@@ -32,13 +32,12 @@ export interface StartWorkerOptions {
 export async function startWorker(config: WorkerConfig, options: StartWorkerOptions = {}): Promise<WorkerRuntime> {
   const now = options.now ?? (() => new Date().toISOString())
   const health = new HealthStateStore(config, now)
+  const llmHandlers = config.useLlmAnalysis && config.openai !== undefined
+    ? { handlers: { 'resume-analysis': createResumeAnalysisHandler({ analyze: createOpenAIResumeAnalyzer(config.openai) }) } }
+    : {}
   const executor = options.executor ?? createTaskExecutor({
     now,
-    ...(config.openai === undefined ? {} : {
-      handlers: {
-        'resume-analysis': createResumeAnalysisHandler({ analyze: createOpenAIResumeAnalyzer(config.openai) }),
-      },
-    }),
+    ...llmHandlers,
   })
   const healthServer = await startHealthServer(config, health)
 

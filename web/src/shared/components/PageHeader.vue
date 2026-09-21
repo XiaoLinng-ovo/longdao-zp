@@ -7,6 +7,7 @@ defineProps<{ title: string; description?: string }>()
     <div>
       <h2>{{ title }}</h2>
       <p v-if="description">{{ description }}</p>
+      <slot name="meta" />
     </div>
     <slot />
   </div>

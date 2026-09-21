@@ -5,7 +5,9 @@ import { apiClient } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
+import QuestionSheetDialog from '../components/QuestionSheetDialog.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { stageOfRound } from '../api/question-sheets'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import {
   concludeInterview,
@@ -40,6 +42,7 @@ const feedbackForm = ref({
 })
 
 const showConclude = ref(false)
+const showSheets = ref(false)
 const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
@@ -186,6 +189,18 @@ onMounted(load)
     title="面试详情"
     :description="detail ? `${candidateName} · ${jobTitle}` : '查看面试安排、候选人与反馈记录'"
   >
+    <template #meta>
+      <button
+        v-if="detail"
+        class="sheet-entry"
+        type="button"
+        title="面试问题表（题目、候选人回答、AI 打分与阶段综合分公式）"
+        @click="showSheets = true"
+      >
+        <span aria-hidden="true">▤</span>
+        面试问题表
+      </button>
+    </template>
     <div class="inline-actions">
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
         进入 AI 面试室
@@ -309,9 +324,42 @@ onMounted(load)
       </div>
     </div>
   </div>
+
+  <QuestionSheetDialog
+    v-if="detail"
+    :open="showSheets"
+    :application-id="detail.applicationId"
+    :default-stage="detail.stage ?? stageOfRound(detail.round)"
+    @close="showSheets = false"
+  />
 </template>
 
 <style scoped>
+/* 低调入口：跟在标题说明下方，像「设置」一样的次级链接，不抢主操作。 */
+.sheet-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 3px 8px 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.sheet-entry span {
+  font-size: 12px;
+}
+
+.sheet-entry:hover {
+  border-color: var(--border);
+  background: #f8fafc;
+  color: #475569;
+}
+
 .interview-summary {
   margin-bottom: 16px;
   padding: 16px 18px;

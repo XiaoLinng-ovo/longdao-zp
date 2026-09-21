@@ -288,6 +288,8 @@ export interface InterviewDbRecord {
   businessId: string
   applicationId: string
   round: number
+  /** 面试阶段：第 1 轮=initial（初试），第 2 轮及以后=final（复试）。面试问题表按阶段归属。 */
+  stage: 'initial' | 'final'
   type: string
   title: string
   status: string
