@@ -133,6 +133,14 @@ export const appRoutes: AppRouteRecord[] = [
     },
   },
   {
+    path: '/reports',
+    name: 'reports',
+    component: () => import('../modules/reports/pages/ReportOverviewPage.vue'),
+    meta: {
+      title: '招聘数据看板', navLabel: '招聘数据看板', icon: '▦', group: '洞察', crumb: '洞察 / 数据看板',
+    },
+  },
+  {
     path: '/forbidden',
     name: 'forbidden',
     component: () => import('../shared/components/ForbiddenPage.vue'),
