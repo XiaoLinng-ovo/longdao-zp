@@ -205,19 +205,54 @@ function openCommandWindow(component) {
   child.unref()
 }
 
-async function waitForHttp(url, timeoutMs) {
+async function waitForHttp(url, timeoutMs, verify = async () => true) {
   if (dryRun) return true
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
-      if (response.ok) return true
+      if (response.ok && await verify(response)) return true
     } catch {
       // Service is still starting.
     }
     await delay(500)
   }
   return false
+}
+
+async function isExpectedJsonService(url, serviceName) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+    if (!response.ok) return false
+    const payload = await response.json()
+    return payload?.service === serviceName || payload?.data?.service === serviceName
+  } catch {
+    return false
+  }
+}
+
+async function isExpectedWeb(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+    if (!response.ok) return false
+    return (await response.text()).includes('龙道招聘系统')
+  } catch {
+    return false
+  }
+}
+
+async function selectComponentPort(preferredPort, expectedUrl, expectedIdentity) {
+  for (let port = preferredPort; port < preferredPort + 40; port += 1) {
+    if (!(await isPortOpen(port))) return { port, alreadyRunning: false }
+    const expected = expectedIdentity === 'api'
+      ? await isExpectedJsonService(expectedUrl(port), 'smartrecruit-pro-api')
+      : expectedIdentity === 'worker'
+        ? await isExpectedJsonService(expectedUrl(port), 'smartrecruit-pro-worker')
+        : await isExpectedWeb(expectedUrl(port))
+    if (expected) return { port, alreadyRunning: true }
+    warn(`Port ${port} is occupied by another service; trying ${port + 1}`)
+  }
+  throw new Error(`No available port found from ${preferredPort}`)
 }
 
 function openUrl(url) {
@@ -262,36 +297,45 @@ async function main() {
   }
   let startupFailed = false
 
+  const apiPort = await selectComponentPort(3100, (port) => `http://127.0.0.1:${port}/api/v1/health`, 'api')
+  const workerPort = await selectComponentPort(4001, (port) => `http://127.0.0.1:${port}/health`, 'worker')
+  const webPort = await selectComponentPort(5174, (port) => `http://127.0.0.1:${port}/`, 'web')
+
   const components = [
     {
       name: 'API',
       title: 'SmartRecruit API',
-      port: 3100,
+      port: apiPort.port,
+      alreadyRunning: apiPort.alreadyRunning,
       cwd: root,
-      command: 'npm start',
-      healthUrl: 'http://127.0.0.1:3100/api/v1/health',
+      command: `set PORT=${apiPort.port}&& npm start`,
+      healthUrl: `http://127.0.0.1:${apiPort.port}/api/v1/health`,
+      identity: 'api',
     },
     {
       name: 'Worker',
       title: 'SmartRecruit Worker',
-      port: 4001,
+      port: workerPort.port,
+      alreadyRunning: workerPort.alreadyRunning,
       cwd: resolve(root, 'apps', 'worker'),
-      command: 'npm start',
-      healthUrl: 'http://127.0.0.1:4001/health',
+      command: `set WORKER_HEALTH_PORT=${workerPort.port}&& npm start`,
+      healthUrl: `http://127.0.0.1:${workerPort.port}/health`,
+      identity: 'worker',
     },
     {
       name: 'Web',
       title: 'SmartRecruit Web',
-      port: 5174,
+      port: webPort.port,
+      alreadyRunning: webPort.alreadyRunning,
       cwd: resolve(root, 'web'),
-      command: 'npm run dev',
-      healthUrl: 'http://127.0.0.1:5174/',
+      command: `set VITE_API_PROXY_TARGET=http://127.0.0.1:${apiPort.port}&& npm run dev -- --port ${webPort.port}`,
+      healthUrl: `http://127.0.0.1:${webPort.port}/`,
+      identity: 'web',
     },
   ]
 
   for (const component of components) {
-    const alreadyRunning = await isPortOpen(component.port)
-    if (alreadyRunning) {
+    if (component.alreadyRunning) {
       log(`${component.name} already appears to be running on port ${component.port}`)
       continue
     }
@@ -299,12 +343,12 @@ async function main() {
   }
 
   const checks = [
-    ['API', 'http://127.0.0.1:3100/api/v1/health', 90_000],
-    ['Worker', 'http://127.0.0.1:4001/health', 30_000],
-    ['Web', 'http://127.0.0.1:5174/', 30_000],
+    ['API', `http://127.0.0.1:${apiPort.port}/api/v1/health`, 90_000, async (response) => (await response.json()).data?.service === 'smartrecruit-pro-api'],
+    ['Worker', `http://127.0.0.1:${workerPort.port}/health`, 30_000, async (response) => (await response.json()).service === 'smartrecruit-pro-worker'],
+    ['Web', `http://127.0.0.1:${webPort.port}/`, 30_000, async (response) => (await response.text()).includes('龙道招聘系统')],
   ]
-  for (const [name, url, timeoutMs] of checks) {
-    const ready = await waitForHttp(url, timeoutMs)
+  for (const [name, url, timeoutMs, verify] of checks) {
+    const ready = await waitForHttp(url, timeoutMs, verify)
     if (ready) log(`${name} is ready: ${url}`)
     else {
       startupFailed = true
@@ -318,7 +362,7 @@ async function main() {
     return
   }
 
-  openUrl('http://127.0.0.1:5174')
+  openUrl(`http://127.0.0.1:${webPort.port}`)
   log('Startup request complete. Keep the three service windows open.')
 }
 
