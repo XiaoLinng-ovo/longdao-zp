@@ -35,6 +35,23 @@ export interface AdminAnalysisTask {
 export interface AdminAuditLog {
   id: string; actorId: string | null; actorEmail: string | null; action: string; resourceType: string; resourceId: string | null; requestId: string | null; metadata: Record<string, unknown>; createdAt: string
 }
+export type AiPromptSkillTarget = 'job_spec' | 'jd' | 'both'
+export interface AdminAiPromptSkill {
+  id: string; name: string; targetType: AiPromptSkillTarget; content: string; isActive: boolean; createdBy: string | null; createdAt: string; updatedAt: string
+}
+
+export async function listAiPromptSkills(): Promise<AdminAiPromptSkill[]> {
+  return (await apiClient.getJson<AdminAiPromptSkill[]>('/admin/ai-skills')).data
+}
+export async function createAiPromptSkill(input: { name: string; targetType: AiPromptSkillTarget; content: string }): Promise<AdminAiPromptSkill> {
+  return (await apiClient.postJson<AdminAiPromptSkill>('/admin/ai-skills', input)).data
+}
+export async function updateAiPromptSkill(id: string, patch: Partial<Pick<AdminAiPromptSkill, 'name' | 'targetType' | 'content' | 'isActive'>>): Promise<AdminAiPromptSkill> {
+  return (await apiClient.patchJson<AdminAiPromptSkill>(`/admin/ai-skills/${encodeURIComponent(id)}`, patch)).data
+}
+export async function deleteAiPromptSkill(id: string): Promise<{ deleted: boolean }> {
+  return (await apiClient.deleteJson<{ deleted: boolean }>(`/admin/ai-skills/${encodeURIComponent(id)}`)).data
+}
 
 interface ReadyPayload {
   status: string

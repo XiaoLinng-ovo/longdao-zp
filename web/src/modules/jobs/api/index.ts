@@ -94,6 +94,20 @@ export interface CreateJobInput {
 
 export type UpdateJobInput = Partial<Omit<CreateJobInput, 'recruitmentRequestId'>>
 
+export interface GenerateJobDocumentInput {
+  prompt?: string
+  skillId?: string
+}
+
+export type AiPromptSkillTarget = 'job_spec' | 'jd' | 'both'
+
+export interface AiPromptSkill {
+  id: string
+  name: string
+  targetType: AiPromptSkillTarget
+  content: string
+}
+
 export interface CreateSpecInput {
   title: string
   summary: string
@@ -155,16 +169,20 @@ export async function createSpec(id: string, input: CreateSpecInput): Promise<Ap
   return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec`, input)).data
 }
 
-export async function generateJobSpec(id: string): Promise<ApiJob> {
-  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec/generate`, {})).data
+export async function generateJobSpec(id: string, input: GenerateJobDocumentInput = {}): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/spec/generate`, input)).data
 }
 
 export async function createJd(id: string, input: { language: string; content: string; generatedBy?: 'human' | 'ai_assisted' | 'local_fallback' }): Promise<ApiJob> {
   return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd`, input)).data
 }
 
-export async function generateJobDescription(id: string): Promise<ApiJob> {
-  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd/generate`, {})).data
+export async function generateJobDescription(id: string, input: GenerateJobDocumentInput = {}): Promise<ApiJob> {
+  return (await apiClient.postJson<ApiJob>(`/jobs/${id}/jd/generate`, input)).data
+}
+
+export async function listActiveAiSkills(targetType: 'job_spec' | 'jd'): Promise<AiPromptSkill[]> {
+  return (await apiClient.getJson<AiPromptSkill[]>(`/ai-skills?targetType=${encodeURIComponent(targetType)}`)).data
 }
 
 export async function listJobSpecVersions(id: string): Promise<ApiJobSpecVersion[]> {

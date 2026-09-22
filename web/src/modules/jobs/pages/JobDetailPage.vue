@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
-import { createJd, createSpec, generateJobDescription, generateJobSpec, getJob, jobAction, listJobDescriptionVersions, listJobSpecVersions, updateJob, type ApiJob, type ApiJobJdVersion, type ApiJobSpecVersion, type JobAction, type JobRequirement, type UpdateJobInput } from '../api'
+import { createJd, createSpec, generateJobDescription, generateJobSpec, getJob, jobAction, listActiveAiSkills, listJobDescriptionVersions, listJobSpecVersions, updateJob, type AiPromptSkill, type ApiJob, type ApiJobJdVersion, type ApiJobSpecVersion, type JobAction, type JobRequirement, type UpdateJobInput } from '../api'
 import { JOB_ACTION_LABEL, JOB_REASON_REQUIRED, JOB_STATUS_LABEL, editableFieldsForStatus, jobActionsFor, jobPublishHint, jobStatusLabel, validateJobForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { actionLabel, employmentTypeLabel, statusLabel, workModeLabel } from '../../../shared/utils/labels'
@@ -38,6 +38,12 @@ const jdVersions = ref<ApiJobJdVersion[]>([])
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
 const editError = ref('')
+const aiSkills = ref<AiPromptSkill[]>([])
+const specPrompt = ref('')
+const jdPrompt = ref('')
+const selectedSpecSkillId = ref('')
+const selectedJdSkillId = ref('')
+const aiSkillsError = ref('')
 
 const pendingAction = ref<JobAction | null>(null)
 const reason = ref('')
@@ -103,18 +109,29 @@ async function refresh() {
   clearFlags()
   try {
     job.value = await getJob(jobId.value)
-    const [specHistory, jdHistory, departmentRows] = await Promise.all([
+    const [specHistory, jdHistory, departmentRows, specSkillsResult, jdSkillsResult] = await Promise.all([
       listJobSpecVersions(jobId.value),
       listJobDescriptionVersions(jobId.value),
       loadDepartments().catch(() => []),
+      listActiveAiSkills('job_spec').then((value) => ({ status: 'fulfilled' as const, value })).catch((reason) => ({ status: 'rejected' as const, reason })),
+      listActiveAiSkills('jd').then((value) => ({ status: 'fulfilled' as const, value })).catch((reason) => ({ status: 'rejected' as const, reason })),
     ])
     specVersions.value = specHistory
     jdVersions.value = jdHistory
     departments.value = departmentRows
+    const specSkills = specSkillsResult.status === 'fulfilled' ? specSkillsResult.value : []
+    const jdSkills = jdSkillsResult.status === 'fulfilled' ? jdSkillsResult.value : []
+    // 两类 Skill 合并去重，兼容后端同时返回 target_type=both 的 Skill。
+    aiSkills.value = [...new Map([...specSkills, ...jdSkills].map((item) => [item.id, item])).values()]
     specConfirmed.value = Boolean(job.value?.spec?.confirmed)
     jdConfirmed.value = Boolean(job.value?.jd?.confirmed)
     resetSpecForm()
     resetJdForm()
+    if (specSkillsResult.status === 'rejected' && jdSkillsResult.status === 'rejected') {
+      aiSkillsError.value = '暂时无法读取可复用 Skill，仍可直接输入本次生成要求。'
+    } else {
+      aiSkillsError.value = ''
+    }
     await loadAuditEvents(jobId.value)
     if (approvedRequestId.value && !requestTitle.value) {
       try {
@@ -183,7 +200,10 @@ async function generateSpec() {
   acting.value = true
   clearFlags()
   try {
-    job.value = await generateJobSpec(job.value.id)
+    job.value = await generateJobSpec(job.value.id, {
+      ...(specPrompt.value.trim() ? { prompt: specPrompt.value.trim() } : {}),
+      ...(selectedSpecSkillId.value ? { skillId: selectedSpecSkillId.value } : {}),
+    })
     specVersions.value = await listJobSpecVersions(job.value.id)
     specConfirmed.value = Boolean(job.value.spec?.confirmed)
     editingSpec.value = false
@@ -203,7 +223,10 @@ async function generateJd() {
   acting.value = true
   clearFlags()
   try {
-    job.value = await generateJobDescription(job.value.id)
+    job.value = await generateJobDescription(job.value.id, {
+      ...(jdPrompt.value.trim() ? { prompt: jdPrompt.value.trim() } : {}),
+      ...(selectedJdSkillId.value ? { skillId: selectedJdSkillId.value } : {}),
+    })
     jdVersions.value = await listJobDescriptionVersions(job.value.id)
     jdConfirmed.value = Boolean(job.value.jd?.confirmed)
     editingJd.value = false
@@ -373,6 +396,19 @@ onMounted(async () => {
             </template>
           </div>
         </header>
+        <div v-if="!editingSpec" class="generation-options">
+          <label>本次生成要求 <textarea v-model="specPrompt" rows="3" maxlength="4000" placeholder="例如：突出 3 年以上 B2B SaaS 销售经验，语气专业简洁，补充可量化的绩效指标"></textarea></label>
+          <div class="generation-option-row">
+            <label>可复用 Skill
+              <select v-model="selectedSpecSkillId">
+                <option value="">不使用 Skill</option>
+                <option v-for="skill in aiSkills.filter((item) => item.targetType === 'job_spec' || item.targetType === 'both')" :key="skill.id" :value="skill.id">{{ skill.name }}</option>
+              </select>
+            </label>
+            <span class="prompt-count">{{ specPrompt.length }}/4000</span>
+          </div>
+          <p v-if="aiSkillsError" class="hint">{{ aiSkillsError }}</p>
+        </div>
         <template v-if="editingSpec">
           <label>标题<input v-model="specForm.title" /></label>
           <label>摘要<textarea v-model="specForm.summary" rows="2"></textarea></label>
@@ -404,6 +440,19 @@ onMounted(async () => {
             </template>
           </div>
         </header>
+        <div v-if="!editingJd" class="generation-options">
+          <label>本次生成要求 <textarea v-model="jdPrompt" rows="3" maxlength="4000" placeholder="例如：面向候选人公开发布，突出工作职责、任职要求和成长空间，避免夸张表述"></textarea></label>
+          <div class="generation-option-row">
+            <label>可复用 Skill
+              <select v-model="selectedJdSkillId">
+                <option value="">不使用 Skill</option>
+                <option v-for="skill in aiSkills.filter((item) => item.targetType === 'jd' || item.targetType === 'both')" :key="skill.id" :value="skill.id">{{ skill.name }}</option>
+              </select>
+            </label>
+            <span class="prompt-count">{{ jdPrompt.length }}/4000</span>
+          </div>
+          <p v-if="aiSkillsError" class="hint">{{ aiSkillsError }}</p>
+        </div>
         <textarea v-if="editingJd" v-model="jdForm.content" rows="12"></textarea>
         <pre v-else-if="job.jd">{{ job.jd.content }}</pre>
         <p v-else class="hint">尚未生成 JD。</p>
@@ -500,6 +549,12 @@ ul { margin: 8px 0 0; padding-left: 20px; }
 .document-card input, .document-card textarea { width: 100%; }
 .document-card > pre { margin: 0; white-space: pre-wrap; font-family: inherit; line-height: 1.7; }
 .document-block { margin-top: 14px; }
+.generation-options { margin: 0 0 14px; padding: 12px; border: 1px solid #d9e9ef; border-radius: 12px; background: linear-gradient(135deg, #f8fcfd, #f5fbf7); }
+.generation-options label { margin-bottom: 8px; color: #4f6877; }
+.generation-options textarea, .generation-options select { border: 1px solid #cbdde5; border-radius: 8px; padding: 8px 10px; background: rgba(255,255,255,.84); color: #243b53; }
+.generation-option-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+.generation-option-row label { flex: 1; margin-bottom: 0; }
+.prompt-count { color: #8aa0ad; font-size: 12px; white-space: nowrap; padding-bottom: 9px; }
 .document-block > span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--text-muted); }
 .details-stack { display: grid; gap: 10px; margin-top: 18px; }
 .details-stack details { border: 1px solid var(--border); background: #fff; padding: 12px 14px; }

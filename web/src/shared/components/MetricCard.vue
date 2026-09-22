@@ -6,7 +6,7 @@ defineProps<{ metric: Metric }>()
 
 <template>
   <article class="metric-card" :class="`tone-${metric.tone ?? 'teal'}`">
-    <span>{{ metric.label }}</span>
+    <div class="metric-topline"><span>{{ metric.label }}</span><span class="metric-icon" aria-hidden="true">{{ metric.tone === 'blue' ? '✦' : metric.tone === 'amber' ? '◒' : metric.tone === 'red' ? '✓' : '▤' }}</span></div>
     <strong>{{ metric.value }}</strong>
     <small v-if="metric.trend">{{ metric.trend }}</small>
   </article>

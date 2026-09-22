@@ -4,7 +4,7 @@ import { sendSuccess, type ApiMeta } from './response.js';
 import { readBody, readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
-import { AdminService, AdminNotFoundError, AdminValidationError } from './admin/service.js';
+import { AdminService, AdminNotFoundError, AdminValidationError, type AiPromptSkillTarget } from './admin/service.js';
 import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
 import type { ChannelProvider } from './integrations/channels/types.js';
@@ -301,7 +301,8 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/reports',
     '/api/v1/workflow-events',
 
-    '/api/v1/admin'
+    '/api/v1/admin',
+    '/api/v1/ai-skills'
   ];
   const isProtectedPath = protectedPaths.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
   if (!isProtectedPath) {
@@ -403,6 +404,32 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/reports/funnel' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).funnel); return; }
     if (path === '/api/v1/reports/channels' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).channels); return; }
     if (path === '/api/v1/reports/cycle-time' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).recruitmentCycle); return; }
+
+    if (path === '/api/v1/ai-skills' && method === 'GET') {
+      const targetType = context.url.searchParams.get('targetType')
+      if (targetType !== null && targetType !== 'job_spec' && targetType !== 'jd') throw new HttpError(400, 'VALIDATION_ERROR', 'targetType 必须是 job_spec 或 jd')
+      sendSuccess(context, await adminService.listAiPromptSkills(true, targetType as AiPromptSkillTarget | undefined)); return;
+    }
+    if (path === '/api/v1/admin/ai-skills' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listAiPromptSkills()); return; }
+    if (path === '/api/v1/admin/ai-skills' && method === 'POST') {
+      requireRole(auth, ADMIN_ROLES);
+      try { sendSuccess(context, await adminService.createAiPromptSkill(await readJson(context) as never, auth.user.id, context.requestId), 201); }
+      catch (error) { if (error instanceof AdminValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message); throw error; }
+      return;
+    }
+    const adminAiSkillMatch = path.match(/^\/api\/v1\/admin\/ai-skills\/([^/]+)$/);
+    if (adminAiSkillMatch && method === 'PATCH') {
+      requireRole(auth, ADMIN_ROLES);
+      try { sendSuccess(context, await adminService.updateAiPromptSkill(adminAiSkillMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); }
+      catch (error) { if (error instanceof AdminValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message); if (error instanceof AdminNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message); throw error; }
+      return;
+    }
+    if (adminAiSkillMatch && method === 'DELETE') {
+      requireRole(auth, ADMIN_ROLES);
+      try { await adminService.deleteAiPromptSkill(adminAiSkillMatch[1]!, auth.user.id, context.requestId); sendSuccess(context, { deleted: true }); }
+      catch (error) { if (error instanceof AdminNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message); throw error; }
+      return;
+    }
 
     if (path === '/api/v1/admin/users' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await adminService.listUsers()); return; }
     if (path === '/api/v1/admin/departments' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendSuccess(context, await adminService.listDepartments()); return; }
@@ -603,8 +630,15 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (!suffix && method === 'PATCH') { requireRole(auth, JOB_WRITE_ROLES); assertVersion(parseIfMatch(context), job.version); const result = await recruiting.updateJob(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
       if (suffix === 'spec/generate' && method === 'POST') {
         requireRole(auth, JOB_WRITE_ROLES);
+        const body = await readJson(context);
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
+        const skillId = typeof body.skillId === 'string' ? body.skillId.trim() : undefined;
+        if (prompt && prompt.length > 4000) throw new HttpError(400, 'VALIDATION_ERROR', '提示词不能超过 4000 个字符');
+        const skill = skillId ? await adminService.getAiPromptSkill(skillId, true) : undefined;
+        if (skill && skill.targetType !== 'job_spec' && skill.targetType !== 'both') throw new HttpError(400, 'VALIDATION_ERROR', '所选 Skill 不适用于岗位说明书');
+        const generationInput = { jobTitle: job.title, ...(prompt ? { prompt } : {}), ...(skill ? { skill: skill.content } : {}) };
         try {
-          const generated = await createJobSpecGenerator(loadJobSpecGeneratorConfig()).generate({ jobTitle: job.title });
+          const generated = await createJobSpecGenerator(loadJobSpecGeneratorConfig()).generate(generationInput);
           sendSuccess(context, await recruiting.createSpec(id, generated, auth.user.id));
         } catch (error) {
           if (error instanceof JobSpecGenerationError) {
@@ -621,14 +655,22 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (suffix === 'spec' && method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.createSpec(id, await readJson(context) as never, auth.user.id)); return; }
       if (suffix === 'jd/generate' && method === 'POST') {
         requireRole(auth, JOB_WRITE_ROLES);
+        const body = await readJson(context);
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
+        const skillId = typeof body.skillId === 'string' ? body.skillId.trim() : undefined;
+        if (prompt && prompt.length > 4000) throw new HttpError(400, 'VALIDATION_ERROR', '提示词不能超过 4000 个字符');
+        const skill = skillId ? await adminService.getAiPromptSkill(skillId, true) : undefined;
+        if (skill && skill.targetType !== 'jd' && skill.targetType !== 'both') throw new HttpError(400, 'VALIDATION_ERROR', '所选 Skill 不适用于 JD');
         const generationInput = {
           jobTitle: job.title,
-          spec: job.spec ? {
+          ...(prompt ? { prompt } : {}),
+          ...(skill ? { skill: skill.content } : {}),
+          ...(job.spec ? { spec: {
             summary: job.spec.summary,
             responsibilities: job.spec.responsibilities,
             requirements: job.spec.requirements,
             skills: job.spec.skills,
-          } : undefined,
+          } } : {}),
         };
         try {
           const generated = await createJobDescriptionGenerator(loadJobDescriptionGeneratorConfig()).generate(generationInput);
@@ -651,6 +693,8 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (method === 'POST') { requireRole(auth, JOB_WRITE_ROLES); sendSuccess(context, await recruiting.jobAction(id, suffix.replaceAll('-', '_'), (await readJson(context)).reason, auth.user.id)); return; }
     }
   } catch (error) {
+    if (error instanceof AdminValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message);
+    if (error instanceof AdminNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message);
     errorFromRecruiting(error);
   }
 

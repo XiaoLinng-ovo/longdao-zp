@@ -1,11 +1,34 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AiSettings, type AiConnectionTestResult, type AdminAnalysisTask, type AdminAuditLog } from '../api'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, listAiPromptSkills, createAiPromptSkill, updateAiPromptSkill, deleteAiPromptSkill, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type AiSettings, type AiConnectionTestResult, type AdminAnalysisTask, type AdminAuditLog, type AdminAiPromptSkill, type AiPromptSkillTarget } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
 import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings.vue'
 import { actionLabel, statusLabel } from '../../../shared/utils/labels'
+import { administrationModules, isAdministrationModuleKey, type AdministrationModuleKey } from '../moduleConfig'
+
+const route = useRoute()
+const router = useRouter()
+const routeQuery = computed(() => route?.query ?? {})
+
+const activeModule = computed<AdministrationModuleKey>(() => {
+  const value = Array.isArray(routeQuery.value.module) ? routeQuery.value.module[0] : routeQuery.value.module
+  return isAdministrationModuleKey(value) ? value : 'users'
+})
+const activeModuleLabel = computed(() => administrationModules.find((module) => module.key === activeModule.value)?.label ?? '用户与角色')
+
+function selectModule(value: string) {
+  if (!isAdministrationModuleKey(value)) return
+  router?.push({ path: '/administration', query: { ...routeQuery.value, module: value } })
+}
+
+watch(() => routeQuery.value.module, (value) => {
+  if (value !== undefined && !isAdministrationModuleKey(Array.isArray(value) ? value[0] : value)) {
+    router?.replace({ path: '/administration', query: { ...routeQuery.value, module: 'users' } })
+  }
+})
 
 const rows = ref<AdminCheckRow[]>([])
 const events = ref<WorkflowEvent[]>([])
@@ -49,6 +72,12 @@ const aiDraft = ref({ baseUrl: '', apiKey: '', model: '', timeoutMs: '' })
 const confirmingAiKeyClear = ref(false)
 const aiModels = ref<string[]>([])
 const aiSettingsUnavailable = ref(false)
+const aiSkills = ref<AdminAiPromptSkill[]>([])
+const aiSkillDraft = ref({ name: '', targetType: 'both' as AiPromptSkillTarget, content: '' })
+const editingAiSkillId = ref<string | null>(null)
+const savingAiSkill = ref(false)
+const deletingAiSkillId = ref<string | null>(null)
+const aiSkillsError = ref('')
 /** 下拉候选：测试连接拉到的全部模型，外加已保存的模型（可能不在返回列表里）。 */
 const aiModelOptions = computed(() => {
   const configured = aiSettings.value?.env.OPENAI_MODEL.value.trim()
@@ -106,23 +135,72 @@ async function refresh() {
   error.value = ''
   departmentError.value = ''
   aiSettingsUnavailable.value = false
-  try {
-    const [checks, audit, adminUsers, adminRoles, adminDepartments, adminSettings, adminDingTalkSettings, adminVirusScan, aiConfig, tasks, logs] = await Promise.all([
-      listAdminChecks(),
-      loadWorkflowEvents(subjectType.value || undefined, 80),
-      listAdminUsers(), listAdminRoles(), listAdminDepartments(), getAdminSettings(), getDingTalkSettings(), getResumeVirusScanSetting(), getAiSettings().catch(() => { aiSettingsUnavailable.value = true; return null }), listFailedAnalysisTasks(), listAdminAuditLogs(80),
-    ])
-    rows.value = checks
-    events.value = audit
-    eventsPage.value = 1
-    users.value = adminUsers; roles.value = adminRoles; departments.value = adminDepartments; settings.value = adminSettings; dingTalkSettings.value = adminDingTalkSettings; resumeVirusScanEnabled.value = adminVirusScan.enabled; if (aiConfig) applyAiSettings(aiConfig); failedTasks.value = tasks; auditLogs.value = logs; auditPage.value = 1
-    settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
-    dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '读取系统配置失败'
-  } finally {
-    loading.value = false
+
+  // 系统配置由多个相互独立的模块组成。某个可选接口（例如旧 API 尚未提供
+  // AI 或钉钉配置接口）失败时，不能让其它模块一起变成空白。
+  const results = await Promise.allSettled([
+    listAdminChecks(),
+    loadWorkflowEvents(subjectType.value || undefined, 80),
+    listAdminUsers(),
+    listAdminRoles(),
+    listAdminDepartments(),
+    getAdminSettings(),
+    getDingTalkSettings(),
+    getResumeVirusScanSetting(),
+    getAiSettings(),
+    listFailedAnalysisTasks(),
+    listAdminAuditLogs(80),
+    listAiPromptSkills(),
+  ])
+
+  const failures: string[] = []
+  const read = <T>(index: number, label: string): T | undefined => {
+    const result = results[index]
+    if (result?.status === 'fulfilled') return result.value as T
+    const cause = result?.status === 'rejected' ? result.reason : undefined
+    failures.push(`${label}：${cause instanceof Error ? cause.message : '暂时无法读取'}`)
+    return undefined
   }
+
+  const checks = read<AdminCheckRow[]>(0, '系统运行检查')
+  const audit = read<WorkflowEvent[]>(1, '流程审计记录')
+  const adminUsers = read<AdminUser[]>(2, '用户')
+  const adminRoles = read<AdminRole[]>(3, '角色')
+  const adminDepartments = read<AdminDepartment[]>(4, '部门')
+  const adminSettings = read<AdminSettings>(5, '系统设置')
+  const adminDingTalkSettings = read<DingTalkEnvSettings>(6, '钉钉配置')
+  const adminVirusScan = read<{ enabled: boolean }>(7, '简历病毒扫描设置')
+  const aiConfig = read<AiSettings>(8, 'AI 模型配置')
+  const tasks = read<AdminAnalysisTask[]>(9, '失败分析任务')
+  const logs = read<AdminAuditLog[]>(10, '管理审计日志')
+  const skills = results[11]?.status === 'fulfilled' ? results[11].value as AdminAiPromptSkill[] : undefined
+  if (results[11]?.status === 'rejected') aiSkillsError.value = results[11].reason instanceof Error ? results[11].reason.message : '暂时无法读取 Skill'
+  else aiSkillsError.value = ''
+
+  if (checks) rows.value = checks
+  if (audit) { events.value = audit; eventsPage.value = 1 }
+  if (adminUsers) users.value = adminUsers
+  if (adminRoles) roles.value = adminRoles
+  if (adminDepartments) departments.value = adminDepartments
+  if (adminSettings) {
+    settings.value = adminSettings
+    settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
+  }
+  if (adminDingTalkSettings) {
+    dingTalkSettings.value = adminDingTalkSettings
+    dingTalkDraft.value = Object.fromEntries(dingTalkFields.map(({ key }) => [key, '']))
+  }
+  if (adminVirusScan) resumeVirusScanEnabled.value = adminVirusScan.enabled
+  if (aiConfig) applyAiSettings(aiConfig)
+  else if (results[8]?.status === 'rejected') aiSettingsUnavailable.value = true
+  if (tasks) failedTasks.value = tasks
+  if (logs) { auditLogs.value = logs; auditPage.value = 1 }
+  if (skills) aiSkills.value = skills
+
+  if (failures.length) {
+    error.value = `部分系统配置暂时无法读取：${failures.join('；')}`
+  }
+  loading.value = false
 }
 
 async function saveResumeVirusScan() {
@@ -187,6 +265,56 @@ async function clearAiApiKey() {
   } finally {
     savingAiSettings.value = false
   }
+}
+
+function resetAiSkillDraft() {
+  aiSkillDraft.value = { name: '', targetType: 'both', content: '' }
+  editingAiSkillId.value = null
+}
+
+function editAiSkill(skill: AdminAiPromptSkill) {
+  editingAiSkillId.value = skill.id
+  aiSkillDraft.value = { name: skill.name, targetType: skill.targetType, content: skill.content }
+  aiSkillsError.value = ''
+}
+
+async function saveAiSkill() {
+  const name = aiSkillDraft.value.name.trim()
+  const content = aiSkillDraft.value.content.trim()
+  if (!name || !content) { aiSkillsError.value = '请输入 Skill 名称和内容'; return }
+  savingAiSkill.value = true
+  aiSkillsError.value = ''
+  try {
+    const saved = editingAiSkillId.value
+      ? await updateAiPromptSkill(editingAiSkillId.value, { name, targetType: aiSkillDraft.value.targetType, content })
+      : await createAiPromptSkill({ name, targetType: aiSkillDraft.value.targetType, content })
+    aiSkills.value = editingAiSkillId.value
+      ? aiSkills.value.map((item) => item.id === saved.id ? saved : item)
+      : [saved, ...aiSkills.value]
+    resetAiSkillDraft()
+  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '保存 Skill 失败' }
+  finally { savingAiSkill.value = false }
+}
+
+async function toggleAiSkill(skill: AdminAiPromptSkill) {
+  savingAiSkill.value = true
+  aiSkillsError.value = ''
+  try {
+    const saved = await updateAiPromptSkill(skill.id, { isActive: !skill.isActive })
+    aiSkills.value = aiSkills.value.map((item) => item.id === saved.id ? saved : item)
+  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '更新 Skill 状态失败' }
+  finally { savingAiSkill.value = false }
+}
+
+async function removeAiSkill(skill: AdminAiPromptSkill) {
+  deletingAiSkillId.value = skill.id
+  aiSkillsError.value = ''
+  try {
+    await deleteAiPromptSkill(skill.id)
+    aiSkills.value = aiSkills.value.filter((item) => item.id !== skill.id)
+    if (editingAiSkillId.value === skill.id) resetAiSkillDraft()
+  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '删除 Skill 失败' }
+  finally { deletingAiSkillId.value = null }
 }
 
 async function saveUser(user: AdminUser) {
@@ -293,10 +421,22 @@ onMounted(refresh)
   <PageHeader title="管理后台" description="查看招聘团队、流程与系统服务配置">
     <button class="btn btn-ghost" type="button" :disabled="loading" @click="refresh">刷新</button>
   </PageHeader>
+  <div class="module-toolbar" aria-label="系统配置模块选择">
+    <div>
+      <span class="module-toolbar-eyebrow">当前配置模块</span>
+      <strong>{{ activeModuleLabel }}</strong>
+    </div>
+    <label class="module-select-label">
+      <span>切换模块</span>
+      <select :value="activeModule" aria-label="切换系统配置模块" @change="selectModule(($event.target as HTMLSelectElement).value)">
+        <option v-for="module in administrationModules" :key="module.key" :value="module.key">{{ module.label }}</option>
+      </select>
+    </label>
+  </div>
   <div v-if="loading" class="loading-note">正在读取系统配置与审计记录...</div>
-  <div v-else-if="error" class="error-note" role="alert">{{ error }} <button class="btn btn-ghost" type="button" @click="refresh">重试</button></div>
-  <template v-else>
-    <section class="section">
+  <div v-else>
+    <div v-if="error" class="error-note" role="alert">{{ error }} <button class="btn btn-ghost" type="button" @click="refresh">重试</button></div>
+    <section v-if="activeModule === 'users'" class="section">
       <h3 class="section-title">用户与角色</h3>
       <div class="table-wrap">
         <table><thead><tr><th>用户</th><th>角色</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
@@ -306,7 +446,7 @@ onMounted(refresh)
       </div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'departments'" class="section">
       <div class="section-heading">
         <div><h3 class="section-title">部门管理</h3><p class="muted">停用后部门不再出现在新建需求的下拉选项中，历史记录仍保留；已无关联记录的部门可以直接删除。</p></div>
         <div class="inline-actions"><input v-model="departmentDraft.name" class="text-input" placeholder="新部门名称" aria-label="部门名称" @keyup.enter="addDepartment" /><button class="btn btn-primary" type="button" :disabled="creatingDepartment" @click="addDepartment">{{ creatingDepartment ? '新增中...' : '新增部门' }}</button></div>
@@ -340,7 +480,7 @@ onMounted(refresh)
       </tbody></table></div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'settings'" class="section">
       <div class="section-heading">
         <div><h3 class="section-title">系统设置</h3></div>
         <button v-if="hasSettings" class="btn btn-primary" type="button" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? '保存中...' : '保存设置' }}</button>
@@ -362,7 +502,7 @@ onMounted(refresh)
       </div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'ai'" class="section">
       <div class="section-heading">
         <div><h3 class="section-title">AI 模型</h3><p class="muted">保存后写入 <code>ENV_FILE_PATH</code> 指定的 .env 文件，并立即对当前 API 进程生效。密钥为写入专用，保存后不再回显。</p></div>
         <div class="inline-actions">
@@ -397,9 +537,67 @@ onMounted(refresh)
       </div>
       <div v-else-if="aiSettingsUnavailable" class="error-note">无法读取模型配置：后端未提供该接口，通常是 API 还在运行旧构建。请在服务器上重新构建并重启 API。</div>
       <div v-else class="table-empty">正在读取模型配置...</div>
+    <div class="ai-skills-panel">
+      <div class="section-heading">
+        <div>
+          <h3 class="section-title">岗位文档生成 Skill</h3>
+          <p class="muted">把常用的写作规则保存为 Skill，生成岗位说明书或 JD 时可以直接选择复用。</p>
+        </div>
+        <button v-if="editingAiSkillId" class="btn btn-ghost" type="button" @click="resetAiSkillDraft">新建 Skill</button>
+      </div>
+
+      <div v-if="aiSkillsError" class="error-note" role="alert">{{ aiSkillsError }}</div>
+
+      <div class="form-panel ai-skill-editor">
+        <div class="form-grid ai-skill-editor-grid">
+          <div class="form-field">
+            <label for="ai-skill-name">Skill 名称</label>
+            <input id="ai-skill-name" v-model="aiSkillDraft.name" maxlength="80" placeholder="例如：专业简洁型 JD" />
+          </div>
+          <div class="form-field">
+            <label for="ai-skill-target">适用范围</label>
+            <select id="ai-skill-target" v-model="aiSkillDraft.targetType">
+              <option value="both">岗位说明书和 JD</option>
+              <option value="job_spec">仅岗位说明书</option>
+              <option value="jd">仅 JD</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="ai-skill-content">Skill 内容</label>
+          <textarea id="ai-skill-content" v-model="aiSkillDraft.content" rows="5" maxlength="8000" placeholder="例如：使用专业、清晰、可执行的语言；职责按重要性排序；避免空泛形容词；尽量补充可衡量的结果指标。"></textarea>
+          <small class="muted">把你希望模型长期遵循的写作风格、结构和限制写在这里，最多 8000 个字符。</small>
+        </div>
+        <div class="inline-actions">
+          <button class="btn btn-primary" type="button" :disabled="savingAiSkill" @click="saveAiSkill">{{ savingAiSkill ? '保存中...' : (editingAiSkillId ? '保存修改' : '创建 Skill') }}</button>
+          <button v-if="editingAiSkillId" class="btn btn-ghost" type="button" :disabled="savingAiSkill" @click="resetAiSkillDraft">取消编辑</button>
+        </div>
+      </div>
+
+      <div class="table-wrap ai-skills-table">
+        <table>
+          <thead><tr><th>名称</th><th>适用范围</th><th>状态</th><th>内容</th><th class="col-actions">操作</th></tr></thead>
+          <tbody>
+            <tr v-for="skill in aiSkills" :key="skill.id">
+              <td><strong>{{ skill.name }}</strong></td>
+              <td>{{ skill.targetType === 'both' ? '岗位说明书和 JD' : skill.targetType === 'job_spec' ? '仅岗位说明书' : '仅 JD' }}</td>
+              <td><span :class="skill.isActive ? 'skill-status active' : 'skill-status'">{{ skill.isActive ? '启用' : '停用' }}</span></td>
+              <td><span class="skill-content-preview">{{ skill.content }}</span></td>
+              <td class="row-actions">
+                <button class="btn btn-ghost btn-sm" type="button" @click="editAiSkill(skill)">编辑</button>
+                <button class="btn btn-ghost btn-sm" type="button" :disabled="savingAiSkill" @click="toggleAiSkill(skill)">{{ skill.isActive ? '停用' : '启用' }}</button>
+                <button class="btn btn-danger btn-sm" type="button" :disabled="deletingAiSkillId === skill.id" @click="removeAiSkill(skill)">{{ deletingAiSkillId === skill.id ? '删除中...' : '删除' }}</button>
+              </td>
+            </tr>
+            <tr v-if="!aiSkills.length"><td colspan="5" class="table-empty">暂无 Skill，请先创建一个可复用的生成规则。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'dingtalk'" class="section">
       <div class="section-heading"><div><h3 class="section-title">钉钉集成配置</h3><p class="muted">保存后写入 <code>ENV_FILE_PATH</code> 指定的 .env 文件，并立即对当前 API 进程生效。</p></div><button class="btn btn-primary" type="button" :disabled="savingDingTalk" @click="saveDingTalkSettings">{{ savingDingTalk ? '保存中...' : '保存钉钉配置' }}</button></div>
       <div class="form-grid form-panel">
         <div v-for="field in dingTalkFields" :key="field.key" class="form-field">
@@ -410,15 +608,15 @@ onMounted(refresh)
       </div>
     </section>
 
-    <ChannelIntegrationSettings />
+    <div v-else-if="activeModule === 'channels'"><ChannelIntegrationSettings /></div>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'failed-tasks'" class="section">
       <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
         <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.attempts }}</td><td>{{ task.lastError || '—' }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="3" class="table-empty">暂无失败任务</td></tr>
       </tbody></table></div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'audit-logs'" class="section">
       <div class="section-heading">
         <h3 class="section-title">管理审计日志</h3>
         <label class="page-size">
@@ -448,7 +646,7 @@ onMounted(refresh)
       </div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'health'" class="section">
       <h3 class="section-title">系统运行检查</h3>
       <div class="table-wrap">
         <table>
@@ -464,7 +662,7 @@ onMounted(refresh)
       </div>
     </section>
 
-    <section class="section">
+    <section v-else-if="activeModule === 'workflow-audit'" class="section">
       <div class="section-heading">
         <h3 class="section-title">流程审计记录</h3>
         <div class="inline-actions">
@@ -519,11 +717,38 @@ onMounted(refresh)
         </div>
       </div>
     </section>
-  </template>
-  <SecurityNotice />
+
+    <section v-else-if="activeModule === 'security'" class="section security-section">
+      <h3 class="section-title">安全提示</h3>
+      <SecurityNotice />
+    </section>
+  </div>
 </template>
 
 <style scoped>
+.module-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid #dcecf0;
+  border-radius: 16px;
+  background: linear-gradient(120deg, #f7fcfb 0%, #f4f8ff 100%);
+  box-shadow: 0 8px 22px rgba(78, 137, 157, .07);
+}
+.module-toolbar-eyebrow { display: block; margin-bottom: 4px; color: #8aa4b2; font-size: 11px; }
+.module-toolbar strong { color: #24445b; font-size: 16px; }
+.module-select-label { display: inline-flex; align-items: center; gap: 9px; color: #7890a4; font-size: 12px; }
+.module-select-label select { min-width: 170px; border: 1px solid #cfe2eb; border-radius: 10px; padding: 8px 32px 8px 11px; background: rgba(255,255,255,.86); color: #31536d; outline: none; }
+.module-select-label select:focus { border-color: #79c7bb; box-shadow: 0 0 0 3px rgba(121, 199, 187, .16); }
+.security-section :deep(.security-note) { margin-top: 0; }
+@media (max-width: 700px) {
+  .module-toolbar { align-items: flex-start; flex-direction: column; }
+  .module-select-label { width: 100%; justify-content: space-between; }
+  .module-select-label select { flex: 1; min-width: 0; }
+}
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .page-size { display: inline-flex; align-items: center; gap: 7px; color: var(--muted, #64748b); font-size: 12px; }
 .page-size select { border: 1px solid #cbd5e1; border-radius: 7px; padding: 6px 9px; background: #fff; color: #334155; }
@@ -557,4 +782,14 @@ onMounted(refresh)
 .ai-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 0.7fr); }
 @media (max-width: 1180px) { .ai-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .ai-grid { grid-template-columns: 1fr; } }
+
+.ai-skills-panel { margin-top: 18px; padding-top: 18px; border-top: 1px solid #e5eef2; }
+.ai-skill-editor { margin-top: 12px; }
+.ai-skill-editor-grid { grid-template-columns: minmax(0, 1.4fr) minmax(220px, .8fr); }
+.ai-skill-editor textarea { width: 100%; min-height: 116px; resize: vertical; }
+.ai-skills-table { margin-top: 14px; }
+.skill-status { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; }
+.skill-status.active { background: #dcfce7; color: #166534; }
+.skill-content-preview { display: -webkit-box; overflow: hidden; max-width: 360px; color: #64748b; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+@media (max-width: 760px) { .ai-skill-editor-grid { grid-template-columns: 1fr; } .ai-skills-table { overflow-x: auto; } }
 </style>

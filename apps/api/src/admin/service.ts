@@ -69,6 +69,33 @@ export interface AdminRoleUpdate {
   name?: string;
 }
 
+
+export type AiPromptSkillTarget = 'job_spec' | 'jd' | 'both'
+
+export interface AiPromptSkillRecord {
+  id: string
+  name: string
+  targetType: AiPromptSkillTarget
+  content: string
+  isActive: boolean
+  createdBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AiPromptSkillCreate {
+  name?: string
+  targetType?: AiPromptSkillTarget
+  content?: string
+}
+
+export interface AiPromptSkillUpdate {
+  name?: string
+  targetType?: AiPromptSkillTarget
+  content?: string
+  isActive?: boolean
+}
+
 const USER_SELECT = `
   SELECT u.id, u.email, u.display_name, u.is_active, u.last_login_at, u.created_at,
          d.code AS department_code,
@@ -113,6 +140,20 @@ function toAudit(row: Record<string, unknown>): AdminAuditRecord {
 function toDepartment(row: Record<string, unknown>): AdminDepartmentRecord {
   const date = (value: unknown): string => value instanceof Date ? value.toISOString() : String(value)
   return { id: String(row.id), code: String(row.code), name: String(row.name), isActive: Boolean(row.is_active), createdAt: date(row.created_at), updatedAt: date(row.updated_at) }
+}
+
+function toAiPromptSkill(row: Record<string, unknown>): AiPromptSkillRecord {
+  const date = (value: unknown): string => value instanceof Date ? value.toISOString() : String(value)
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    targetType: String(row.target_type) as AiPromptSkillTarget,
+    content: String(row.content),
+    isActive: Boolean(row.is_active),
+    createdBy: row.created_by === null || row.created_by === undefined ? null : String(row.created_by),
+    createdAt: date(row.created_at),
+    updatedAt: date(row.updated_at),
+  }
 }
 
 /**
@@ -177,6 +218,81 @@ export class AdminService {
   async listRoles(): Promise<AdminRoleRecord[]> {
     const result = await this.pool.query('SELECT id, code, name FROM roles ORDER BY code');
     return result.rows.map((row) => ({ id: String(row.id), code: String(row.code), name: String(row.name) }));
+  }
+
+  async listAiPromptSkills(activeOnly = false, targetType?: AiPromptSkillTarget): Promise<AiPromptSkillRecord[]> {
+    const conditions: string[] = []
+    const values: string[] = []
+    if (activeOnly) conditions.push('is_active = true')
+    if (targetType) {
+      values.push(targetType)
+      conditions.push(`(target_type = $${values.length} OR target_type = 'both')`)
+    }
+    const result = await this.pool.query(
+      `SELECT id, name, target_type, content, is_active, created_by, created_at, updated_at
+         FROM ai_prompt_skills
+        ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+        ORDER BY updated_at DESC, name`,
+      values,
+    )
+    return result.rows.map(toAiPromptSkill)
+  }
+
+  async getAiPromptSkill(id: string, activeOnly = false): Promise<AiPromptSkillRecord> {
+    const result = await this.pool.query(
+      `SELECT id, name, target_type, content, is_active, created_by, created_at, updated_at
+         FROM ai_prompt_skills
+        WHERE id = $1 ${activeOnly ? 'AND is_active = true' : ''}`,
+      [id],
+    )
+    if (!result.rows[0]) throw new AdminNotFoundError(`未找到提示词 Skill：${id}`)
+    return toAiPromptSkill(result.rows[0])
+  }
+
+  async createAiPromptSkill(input: AiPromptSkillCreate, actorId: string, requestId?: string): Promise<AiPromptSkillRecord> {
+    const name = String(input.name ?? '').trim()
+    const content = String(input.content ?? '').trim()
+    const targetType = input.targetType ?? 'both'
+    this.validateAiPromptSkill(name, content, targetType)
+    const result = await this.pool.query(
+      `INSERT INTO ai_prompt_skills (name, target_type, content, created_by)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, target_type, content, is_active, created_by, created_at, updated_at`,
+      [name, targetType, content, actorId],
+    )
+    const skill = toAiPromptSkill(result.rows[0])
+    await this.appendAudit(actorId, 'admin.ai_prompt_skill.create', 'ai_prompt_skill', skill.id, requestId, { name, targetType })
+    return skill
+  }
+
+  async updateAiPromptSkill(id: string, patch: AiPromptSkillUpdate, actorId: string, requestId?: string): Promise<AiPromptSkillRecord> {
+    const current = await this.getAiPromptSkill(id)
+    const name = patch.name === undefined ? current.name : String(patch.name).trim()
+    const content = patch.content === undefined ? current.content : String(patch.content).trim()
+    const targetType = patch.targetType === undefined ? current.targetType : patch.targetType
+    this.validateAiPromptSkill(name, content, targetType)
+    const result = await this.pool.query(
+      `UPDATE ai_prompt_skills
+          SET name = $1, target_type = $2, content = $3, is_active = $4, updated_at = now()
+        WHERE id = $5
+        RETURNING id, name, target_type, content, is_active, created_by, created_at, updated_at`,
+      [name, targetType, content, patch.isActive === undefined ? current.isActive : Boolean(patch.isActive), id],
+    )
+    const skill = toAiPromptSkill(result.rows[0])
+    await this.appendAudit(actorId, 'admin.ai_prompt_skill.update', 'ai_prompt_skill', id, requestId, { changed: Object.keys(patch) })
+    return skill
+  }
+
+  async deleteAiPromptSkill(id: string, actorId: string, requestId?: string): Promise<void> {
+    await this.getAiPromptSkill(id)
+    await this.pool.query('DELETE FROM ai_prompt_skills WHERE id = $1', [id])
+    await this.appendAudit(actorId, 'admin.ai_prompt_skill.delete', 'ai_prompt_skill', id, requestId, {})
+  }
+
+  private validateAiPromptSkill(name: string, content: string, targetType: string): asserts targetType is AiPromptSkillTarget {
+    if (!name || name.length > 80) throw new AdminValidationError('Skill 名称不能为空且不能超过 80 个字符')
+    if (!content || content.length > 8000) throw new AdminValidationError('Skill 内容不能为空且不能超过 8000 个字符')
+    if (targetType !== 'job_spec' && targetType !== 'jd' && targetType !== 'both') throw new AdminValidationError('Skill 适用范围无效')
   }
 
   async listDepartments(activeOnly = false): Promise<AdminDepartmentRecord[]> {

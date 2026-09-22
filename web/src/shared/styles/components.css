@@ -31,3 +31,32 @@
 .actions-panel .hint{font-size:11px;color:var(--muted)}
 .requirement-row{display:grid;grid-template-columns:1fr 1fr auto auto;gap:8px;align-items:center;margin-bottom:8px}
 @media(max-width:760px){.detail-grid{grid-template-columns:1fr}.requirement-row{grid-template-columns:1fr}}
+
+/* 卡片式浅色 dashboard 基础样式 */
+.dashboard-metrics { margin-bottom: 18px; }
+.metric-card { border: 1px solid #e3edf4; border-top: 0; border-radius: 16px; padding: 17px 18px; min-height: 126px; background: rgba(255,255,255,.96); box-shadow: 0 8px 22px rgba(76, 111, 140, .075); transition: transform .18s ease, box-shadow .18s ease; }
+.metric-card:hover { transform: translateY(-3px); box-shadow: 0 14px 28px rgba(76, 111, 140, .12); }
+.metric-card::before { content: ''; display: block; width: 42px; height: 3px; margin: -17px 0 15px -18px; border-radius: 0 0 8px 0; background: #3ab88a; }
+.metric-card.tone-blue::before { background: #5b9bf3; }
+.metric-card.tone-amber::before { background: #f4b55f; }
+.metric-card.tone-red::before { background: #ef8399; }
+.metric-topline { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.metric-topline > span:first-child { color: #8299ad; font-size: 12px; }
+.metric-icon { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: #eaf8f3; color: #32aa82; font-size: 14px; }
+.tone-blue .metric-icon { background: #edf5ff; color: #5b94e3; }
+.tone-amber .metric-icon { background: #fff7e9; color: #e9a245; }
+.tone-red .metric-icon { background: #fff0f3; color: #e87890; }
+.metric-card strong { margin: 11px 0 3px; color: #17324c; font-size: 29px; letter-spacing: -.02em; }
+.metric-card small { color: #5bbf99; font-size: 11.5px; }
+.tone-blue small { color: #5595e7; }
+.tone-amber small { color: #dfa14c; }
+.tone-red small { color: #e4778d; }
+.btn { border-radius: 9px; padding: 8px 13px; transition: .18s ease; }
+.btn-primary { background: #397fe8; box-shadow: 0 5px 12px rgba(57,127,232,.16); }
+.btn-primary:hover { background: #2468d5; transform: translateY(-1px); }
+.btn-secondary { background: #eaf4ff; border-color: #d8eaff; color: #367ad7; }
+.btn-secondary:hover { background: #dceeff; }
+.btn-ghost:hover { border-color: #b9d2e9; background: #f6fbff; color: #3178df; }
+.table-wrap { border-color: #e3edf4; border-radius: 14px; box-shadow: 0 8px 24px rgba(76, 111, 140, .06); }
+.table-wrap th { background: #f7fafc; color: #8198ab; }
+.table-wrap td { color: #466078; }
