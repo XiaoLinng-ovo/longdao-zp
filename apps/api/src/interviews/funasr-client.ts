@@ -36,3 +36,24 @@ export function createFunAsrClient(config: FunAsrConfig, fetchImpl: FetchLike = 
     return segments as SpeakerSegment[]
   } }
 }
+
+/**
+ * FunASR 的正式接口是 POST /transcribe，GET 返回 405 也说明网络链路可达。
+ * readiness 只关心服务是否在线，不能把“配置存在”误判成“服务可用”。
+ */
+export async function probeFunAsrService(
+  config: FunAsrConfig,
+  fetchImpl: FetchLike = fetch,
+  probeTimeoutMs = 1500,
+): Promise<boolean> {
+  try {
+    await fetchImpl(config.baseUrl, {
+      method: 'GET',
+      headers: config.token ? { authorization: `Bearer ${config.token}` } : {},
+      signal: AbortSignal.timeout(Math.max(1, Math.min(config.timeoutMs, probeTimeoutMs))),
+    })
+    return true
+  } catch {
+    return false
+  }
+}

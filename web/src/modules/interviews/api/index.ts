@@ -19,7 +19,7 @@ export interface ApiInterview {
   timezone?: string
   location?: string
   meetingUrl?: string
-  participants: Array<{ userId: string; name?: string; role: 'interviewer' | 'coordinator' | 'observer'; required: boolean }>
+  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required: boolean }>
   feedbackStatus: 'draft' | 'submitted' | 'locked' | 'pending'
   application: { id: string; code: string; candidateId: string; jobId: string; status: string }
   createdAt: string
@@ -31,7 +31,9 @@ export interface ApiJob { id: string; code: string; title: string }
 export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; candidateName?: string; jobTitle?: string }
 export interface ScheduleCandidate { id: string; code: string; fullName: string; email?: string }
 export interface ScheduleJob { id: string; code: string; title: string }
-export interface InterviewScheduleData { candidates: ScheduleCandidate[]; jobs: ScheduleJob[]; applications: ApiApplication[] }
+export interface InterviewerOption { id: string; displayName: string; email?: string; departmentCode?: string | null }
+export interface InterviewerParticipantOption { id: string; name: string }
+export interface InterviewScheduleData { candidates: ScheduleCandidate[]; jobs: ScheduleJob[]; applications: ApiApplication[]; interviewers: InterviewerOption[] }
 
 export interface CreateInterviewInput {
   applicationId: string
@@ -65,6 +67,7 @@ export interface InterviewView {
   scheduledAt: string
   interviewers: string[]
   interviewerIds: string[]
+  interviewerOptions: InterviewerParticipantOption[]
   feedbackStatus: Interview['feedbackStatus']
   status: string
   applicationId: string
@@ -95,6 +98,10 @@ export const PARTICIPANT_ROLE_LABEL: Record<string, string> = {
 
 function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: Map<string, string>): InterviewView {
   const app = row.application
+  const interviewerParticipants = row.participants.filter((participant) => (participant.role ?? 'interviewer') === 'interviewer')
+  const interviewerOptions = interviewerParticipants
+    .filter((participant) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(participant.userId))
+    .map((participant) => ({ id: participant.userId, name: participant.name || participant.userId }))
   return {
     id: row.code || row.id,
     entityId: row.id,
@@ -103,7 +110,8 @@ function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: M
     round: `${row.round} 轮`,
     scheduledAt: row.scheduledStartAt ? new Date(row.scheduledStartAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '待安排',
     interviewers: row.participants.map((p) => p.name || p.userId),
-    interviewerIds: row.participants.filter((p) => p.role === 'interviewer').map((p) => p.userId),
+    interviewerIds: interviewerOptions.map((participant) => participant.id),
+    interviewerOptions,
     feedbackStatus: (row.feedbackStatus === 'locked' || row.status === 'completed' ? 'completed' : row.feedbackStatus === 'submitted' ? 'submitted' : 'scheduled') as Interview['feedbackStatus'],
     status: row.status,
     applicationId: row.applicationId,
@@ -122,15 +130,17 @@ export async function loadInterviews(): Promise<InterviewView[]> {
 }
 
 export async function loadInterviewScheduleData(): Promise<InterviewScheduleData> {
-  const [applicationResponse, candidateResponse, jobResponse] = await Promise.all([
+  const [applicationResponse, candidateResponse, jobResponse, interviewerResponse] = await Promise.all([
     apiClient.getJson<ApiApplication[]>('/applications'),
     apiClient.getJson<ApiCandidate[]>('/candidates'),
     apiClient.getJson<ApiJob[]>('/jobs'),
+    apiClient.getJson<InterviewerOption[]>('/interviewer-options'),
   ])
   return {
     candidates: candidateResponse.data.map((candidate) => ({ id: candidate.id, code: candidate.code, fullName: candidate.fullName })),
     jobs: jobResponse.data.map((job) => ({ id: job.id, code: job.code, title: job.title })),
     applications: applicationResponse.data,
+    interviewers: interviewerResponse.data,
   }
 }
 

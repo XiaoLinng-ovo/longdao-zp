@@ -36,7 +36,15 @@ const emit = defineEmits<{
           <td>
             <div class="inline-actions">
               <button class="btn btn-ghost" type="button" @click="emit('detail', row)">详情</button>
-              <button class="btn btn-ghost" type="button" @click="emit('feedback', row)">填写反馈</button>
+              <button
+                v-if="row.interviewerOptions.length"
+                class="btn btn-ghost"
+                type="button"
+                @click="emit('feedback', row)"
+              >
+                填写反馈
+              </button>
+              <span v-else class="list-muted">需重排面试官</span>
               <button
                 v-if="row.status === 'scheduled'"
                 class="btn btn-primary"
@@ -55,3 +63,11 @@ const emit = defineEmits<{
     </table>
   </div>
 </template>
+
+<style scoped>
+.list-muted {
+  color: #b45309;
+  font-size: 12px;
+  white-space: nowrap;
+}
+</style>

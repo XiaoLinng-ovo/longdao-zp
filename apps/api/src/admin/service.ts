@@ -25,6 +25,13 @@ export interface AdminRoleRecord {
   name: string;
 }
 
+export interface InterviewerOptionRecord {
+  id: string;
+  displayName: string;
+  email: string;
+  departmentCode: string | null;
+}
+
 export interface AdminDepartmentRecord {
   id: string;
   code: string;
@@ -218,6 +225,22 @@ export class AdminService {
   async listRoles(): Promise<AdminRoleRecord[]> {
     const result = await this.pool.query('SELECT id, code, name FROM roles ORDER BY code');
     return result.rows.map((row) => ({ id: String(row.id), code: String(row.code), name: String(row.name) }));
+  }
+
+  async listInterviewerOptions(): Promise<InterviewerOptionRecord[]> {
+    const result = await this.pool.query(
+      `SELECT u.id, u.display_name, u.email, d.code AS department_code
+         FROM users u
+         LEFT JOIN departments d ON d.id = u.department_id
+        WHERE u.is_active = true
+        ORDER BY u.display_name, u.email`
+    )
+    return result.rows.map((row) => ({
+      id: String(row.id),
+      displayName: String(row.display_name),
+      email: String(row.email),
+      departmentCode: row.department_code === null || row.department_code === undefined ? null : String(row.department_code),
+    }))
   }
 
   async listAiPromptSkills(activeOnly = false, targetType?: AiPromptSkillTarget): Promise<AiPromptSkillRecord[]> {

@@ -101,3 +101,33 @@ describe('AdminService departments', () => {
     await assert.rejects(() => new AdminService(pool).deleteDepartment('missing', 'admin-1'), AdminNotFoundError)
   })
 })
+
+describe('AdminService interviewer options', () => {
+  it('lists active users as safe interviewer options', async () => {
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql, ...(values === undefined ? {} : { values }) })
+        return {
+          rows: [{
+            id: '11111111-1111-4111-8111-111111111111',
+            display_name: '林晓',
+            email: 'lin@example.com',
+            department_code: 'dept-tech',
+          }],
+        }
+      },
+    } as never
+
+    const result = await new AdminService(pool).listInterviewerOptions()
+
+    assert.deepEqual(result, [{
+      id: '11111111-1111-4111-8111-111111111111',
+      displayName: '林晓',
+      email: 'lin@example.com',
+      departmentCode: 'dept-tech',
+    }])
+    assert.match(calls[0]?.sql ?? '', /is_active = true/u)
+    assert.doesNotMatch(calls[0]?.sql ?? '', /password_hash/u)
+  })
+})

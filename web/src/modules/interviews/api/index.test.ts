@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../../../shared/api'
-import { getInterview, loadInterviews, type ApiInterviewDetail } from './index'
+import { getInterview, loadInterviewScheduleData, loadInterviews, type ApiInterviewDetail } from './index'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
@@ -71,5 +71,27 @@ describe('Interview API', () => {
 
     expect(rows[0]?.interviewers).toEqual(['林晓'])
     expect(rows[0]?.interviewerIds).toEqual([interviewerId])
+    expect(rows[0]?.interviewerOptions).toEqual([{ id: interviewerId, name: '林晓' }])
+  })
+
+  it('loads active interviewer options for the schedule form', async () => {
+    getJson.mockImplementation((path: string) => {
+      if (path === '/applications') return Promise.resolve({ ok: true, requestId: 'test', data: [] } as never)
+      if (path === '/candidates') return Promise.resolve({ ok: true, requestId: 'test', data: [] } as never)
+      if (path === '/jobs') return Promise.resolve({ ok: true, requestId: 'test', data: [] } as never)
+      if (path === '/interviewer-options') {
+        return Promise.resolve({
+          ok: true,
+          requestId: 'test',
+          data: [{ id: '77777777-7777-4777-8777-777777777777', displayName: '林晓', email: 'lin@example.com' }],
+        } as never)
+      }
+      throw new Error(`unexpected ${path}`)
+    })
+
+    const result = await loadInterviewScheduleData()
+
+    expect(result.interviewers).toEqual([{ id: '77777777-7777-4777-8777-777777777777', displayName: '林晓', email: 'lin@example.com' }])
+    expect(getJson).toHaveBeenCalledWith('/interviewer-options')
   })
 })

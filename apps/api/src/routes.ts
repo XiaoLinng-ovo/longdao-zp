@@ -24,7 +24,7 @@ import { createInterviewQuestionGenerator, generateLocalInterviewQuestions, Inte
 import { createInterviewAnswerAnalyzer, InterviewAnswerAnalysisError, loadInterviewAnswerAnalyzerConfig } from './interviews/answer-analyzer.js';
 import { createJobSpecGenerator, generateLocalJobSpec, JobSpecGenerationError, loadJobSpecGeneratorConfig } from './recruiting/job-spec-generator.js';
 import { createJobDescriptionGenerator, generateLocalJobDescription, JobDescriptionGenerationError, loadJobDescriptionGeneratorConfig } from './recruiting/job-description-generator.js';
-import { createFunAsrClient, FunAsrError, loadFunAsrConfig } from './interviews/funasr-client.js';
+import { createFunAsrClient, FunAsrError, loadFunAsrConfig, probeFunAsrService } from './interviews/funasr-client.js';
 import { mapInterviewRoles, type ConfirmedSpeakerRoles } from './interviews/role-mapper.js';
 import { LiveInterviewSessionRepository } from './interviews/live-session-repository.js';
 import { QuestionSheetRepository } from './interviews/question-sheet-repository.js';
@@ -187,13 +187,21 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   if (path === '/api/v1/ready') {
+    const funasrStatus = await (async () => {
+      try {
+        const config = loadFunAsrConfig()
+        return await probeFunAsrService(config) ? 'ok' : 'unavailable'
+      } catch {
+        return 'unavailable'
+      }
+    })()
     sendSuccess(context, {
       status: 'ready',
       checks: {
         configuration: 'ok',
         auth: context.auth ? 'ok' : 'anonymous',
         externalServices: {
-          funasr: (() => { try { loadFunAsrConfig(); return 'ok' } catch { return 'unavailable' } })(),
+          funasr: funasrStatus,
           llm: (() => { try { loadInterviewAnswerAnalyzerConfig(); return 'ok' } catch { return 'unavailable' } })(),
           ocr: process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable',
         },
@@ -292,6 +300,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/analysis-results',
     '/api/v1/applications',
     '/api/v1/interviews',
+    '/api/v1/interviewer-options',
     '/api/v1/interview-live-sessions',
     '/api/v1/interview-live-segments',
     '/api/v1/offers',
@@ -514,6 +523,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     const offerMatch = path.match(/^\/api\/v1\/offers\/([^/]+)(?:\/(.*))?$/);
     if (offerMatch) { const id=offerMatch[1]!; const suffix=offerMatch[2] ?? ''; await recruiting.assertOfferInScope(id, departmentScope(auth)); if (!suffix && method === 'GET') { const result = await recruiting.getOffer(id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (!suffix && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); const current = await recruiting.getOffer(id); assertVersion(parseIfMatch(context), current.version); const result = await recruiting.updateOffer(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); const body=await readJson(context); const action=suffix.replaceAll('-', '_'); const dingTalkApproval = getDingTalkApproval(); if (!dingTalkApproval || !usePostgres || !['submit_approval','approve','reject'].includes(action)) { sendSuccess(context, await recruiting.offerAction(id, action, body.reason, auth.user.id)); return; } const offer=await recruiting.getOffer(id); const version=offer.versions.find((item)=>item.id===offer.currentVersionId) ?? offer.versions.sort((a,b)=>b.version-a.version)[0]; if (!version) throw new HttpError(409,'OFFER_VERSION_REQUIRED','Offer 缺少当前版本'); try { const result=await executeOfferApprovalAction({ offerId:offer.id, action, actorId:auth.user.id, offer:{positionTitle:version.positionTitle,departmentId:version.departmentId,baseSalary:version.compensation.baseSalary}, performLocalAction:()=>recruiting.offerAction(id,action,body.reason,auth.user.id), getCurrentInstanceId:async()=>{ const found=await createDatabasePool().query(`WITH created AS (INSERT INTO approval_instances (id, subject_type, subject_id, version, status, current_step, created_by, updated_at) SELECT gen_random_uuid(), 'offer', $1::uuid, COALESCE(MAX(version), 0) + 1, 'pending', 1, $2::uuid, now() FROM approval_instances WHERE subject_type = 'offer' AND subject_id = $1::uuid RETURNING id) INSERT INTO approval_steps (id, approval_instance_id, step_no, approver_role_code, status) SELECT gen_random_uuid(), id, 1, 'approver', 'pending' FROM created RETURNING approval_instance_id AS id`,[offer.id,auth.user.id]); if (!found.rows[0]) throw new DingTalkApprovalWorkflowError('APPROVAL_INSTANCE_REQUIRED','当前 Offer 无可用审批实例',409); return String(found.rows[0].id) }, resolveOriginatorUserId:(userId)=>dingTalkApprovalRepository.resolveExternalUserId(userId), startExternalApproval:(input)=>dingTalkApproval.start(input), assertLocalDecisionAllowed:(subjectType,subjectId)=>dingTalkApproval.assertLocalDecisionAllowed(subjectType,subjectId) }); sendSuccess(context,result) } catch(error) { if(error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status,error.code,error.message); throw error } return; } }
     if (path === '/api/v1/interviews' && method === 'GET') { sendList(context, await recruiting.listInterviews(context.url.searchParams.get('applicationId') ?? undefined, departmentScope(auth))); return; }
+    if (path === '/api/v1/interviewer-options' && method === 'GET') { requireRole(auth, INTERVIEW_WRITE_ROLES); sendSuccess(context, await adminService.listInterviewerOptions()); return; }
     if (path === '/api/v1/interviews' && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertApplicationInScope(String((await readJson(context)).applicationId ?? ''), departmentScope(auth)); sendSuccess(context, await recruiting.createInterview(await readJson(context) as never, auth.user.id), 201); return; }
     const liveSessionCreateMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/live-sessions$/);
     if (liveSessionCreateMatch && method === 'GET') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); sendSuccess(context, await liveInterviewSessions.findActive(liveSessionCreateMatch[1]!) ?? null); return; }

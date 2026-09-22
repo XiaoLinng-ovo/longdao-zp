@@ -47,14 +47,14 @@ const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
 const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
-const interviewerOptions = computed(() => detail.value?.participants.filter((participant) => participant.role === 'interviewer') ?? [])
+const interviewerOptions = computed(() => detail.value?.participants.filter((participant) => (participant.role ?? 'interviewer') === 'interviewer') ?? [])
 const scheduleText = computed(() => {
   if (!detail.value) return ''
   const start = formatDate(detail.value.scheduledStartAt)
   return detail.value.scheduledEndAt ? `${start} - ${formatDate(detail.value.scheduledEndAt)}` : start
 })
 const participantText = computed(() => detail.value?.participants
-  .map((participant) => `${participant.name || '待确认'}（${PARTICIPANT_ROLE_LABEL[participant.role] || '面试官'}${participant.required ? '，必须参加' : ''}）`)
+  .map((participant) => `${participant.name || '待确认'}（${PARTICIPANT_ROLE_LABEL[participant.role ?? 'interviewer'] || '面试官'}${participant.required ? '，必须参加' : ''}）`)
   .join('、') || '未设置')
 
 function interviewerName(userId: string): string {

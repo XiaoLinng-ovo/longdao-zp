@@ -15,6 +15,7 @@ import {
   type InterviewScheduleData,
   type InterviewType,
   type InterviewView,
+  type InterviewerOption,
   type ScheduleCandidate,
   type ScheduleJob,
 } from '../api'
@@ -33,6 +34,7 @@ const acting = ref(false)
 const candidates = ref<ScheduleCandidate[]>([])
 const jobs = ref<ScheduleJob[]>([])
 const applications = ref<ApiApplication[]>([])
+const interviewers = ref<InterviewerOption[]>([])
 const candidateSearch = ref('')
 const router = useRouter()
 
@@ -45,7 +47,7 @@ const arrangeForm = ref({
   scheduledAt: '',
   location: '',
   meetingUrl: '',
-  interviewerName: '',
+  interviewerId: '',
 })
 
 const showFeedback = ref(false)
@@ -101,6 +103,7 @@ async function openArrange() {
       candidates.value = options.candidates
       jobs.value = options.jobs
       applications.value = options.applications
+      interviewers.value = options.interviewers
     } catch (cause) {
       error.value = describeApiFailure(cause, '读取申请失败').message
     }
@@ -119,7 +122,8 @@ async function submitArrange() {
   if (!form.candidateId.trim()) { error.value = '请选择候选人'; return }
   if (!form.jobId.trim()) { error.value = '请选择岗位'; return }
   if (!form.title.trim()) form.title = '面试'
-  if (!form.interviewerName.trim()) { error.value = '请填写面试官'; return }
+  const interviewer = interviewers.value.find((item) => item.id === form.interviewerId)
+  if (!interviewer) { error.value = '请选择系统面试官'; return }
 
   acting.value = true
   clearFlags()
@@ -135,8 +139,8 @@ async function submitArrange() {
       location: form.location.trim() || undefined,
       meetingUrl: form.meetingUrl.trim() || undefined,
       participants: [{
-        userId: form.interviewerName.trim(),
-        name: form.interviewerName.trim(),
+        userId: interviewer.id,
+        name: interviewer.displayName,
         role: 'interviewer',
         required: true,
       }],
@@ -144,7 +148,7 @@ async function submitArrange() {
     feedback.value = '面试已创建'
     showArrange.value = false
     candidateSearch.value = ''
-    arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerName: '' }
+    arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerId: '' }
     await refresh()
   } catch (cause) {
     error.value = describeApiFailure(cause, '安排面试失败').message
@@ -157,7 +161,7 @@ function openFeedback(row: InterviewView) {
   clearFlags()
   feedbackTarget.value = row
   feedbackForm.value = {
-    interviewerId: row.interviewerIds[0] || '',
+    interviewerId: row.interviewerOptions[0]?.id || '',
     overallScore: 80,
     recommendation: 'yes',
     strengths: '',
@@ -175,7 +179,7 @@ async function submitFeedbackForm() {
   if (acting.value || !feedbackTarget.value) return
   const target = feedbackTarget.value
   const form = feedbackForm.value
-  if (!form.interviewerId.trim()) { error.value = '请填写面试官 ID'; return }
+  if (!form.interviewerId.trim()) { error.value = '请选择面试官'; return }
   const score = Number(form.overallScore)
   if (!Number.isFinite(score) || score < 0 || score > 100) { error.value = '综合评分需在 0-100 之间'; return }
 
@@ -270,7 +274,14 @@ onMounted(refresh)
         <div class="form-field"><label>开始时间</label><input v-model="arrangeForm.scheduledAt" type="datetime-local" /></div>
         <div class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
         <div class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
-        <div class="form-field"><label>面试官</label><input v-model="arrangeForm.interviewerName" placeholder="输入系统用户姓名或邮箱" /></div>
+        <div class="form-field">
+          <label>面试官</label>
+          <select v-model="arrangeForm.interviewerId" aria-label="面试官">
+            <option value="" disabled>选择系统用户</option>
+            <option v-for="interviewer in interviewers" :key="interviewer.id" :value="interviewer.id">{{ interviewer.displayName }}{{ interviewer.email ? `（${interviewer.email}）` : '' }}</option>
+          </select>
+          <small v-if="!interviewers.length">暂无可用系统用户，请先在管理后台创建并启用用户。</small>
+        </div>
       </div>
       <div class="dialog-buttons">
         <button class="btn btn-ghost" type="button" :disabled="acting" @click="showArrange = false">取消</button>
@@ -284,7 +295,14 @@ onMounted(refresh)
       <h3>填写面试反馈</h3>
       <p>{{ feedbackTarget.candidate }} · {{ feedbackTarget.job }} · {{ feedbackTarget.round }}</p>
       <div class="form-grid" style="grid-template-columns:1fr 1fr">
-        <div class="form-field"><label>面试官 ID</label><input v-model="feedbackForm.interviewerId" /></div>
+        <div class="form-field">
+          <label>面试官</label>
+          <select v-model="feedbackForm.interviewerId" aria-label="反馈面试官">
+            <option value="" disabled>选择本场面试官</option>
+            <option v-for="interviewer in feedbackTarget.interviewerOptions" :key="interviewer.id" :value="interviewer.id">{{ interviewer.name }}</option>
+          </select>
+          <small v-if="!feedbackTarget.interviewerOptions.length">该面试未绑定系统用户，请重新安排面试。</small>
+        </div>
         <div class="form-field"><label>综合评分（0-100）</label><input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" /></div>
         <div class="form-field" style="grid-column:1 / -1">
           <label>推荐结论</label>
@@ -296,7 +314,7 @@ onMounted(refresh)
       </div>
       <div class="dialog-buttons">
         <button class="btn btn-ghost" type="button" :disabled="acting" @click="showFeedback = false">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
+        <button class="btn btn-primary" type="button" :disabled="acting || !feedbackTarget.interviewerOptions.length" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
       </div>
     </div>
   </div>

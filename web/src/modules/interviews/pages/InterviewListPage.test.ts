@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import InterviewListPage from './InterviewListPage.vue'
-import { createInterview, loadInterviewScheduleData, loadInterviews } from '../api'
+import { createInterview, loadInterviewScheduleData, loadInterviews, lockFeedback, submitFeedback } from '../api'
 import { createApplication } from '../../candidates/api'
 
 vi.mock('../api', async (importOriginal) => {
@@ -49,7 +49,7 @@ afterEach(() => {
 describe('InterviewListPage', () => {
   it('opens the arrange interview form in a modal instead of below the table', async () => {
     mockedLoadInterviews.mockResolvedValue([])
-    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [] })
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
 
     root = document.createElement('div')
     document.body.appendChild(root)
@@ -80,6 +80,7 @@ describe('InterviewListPage', () => {
       ],
       jobs: [{ id: 'job-1', code: 'JOB-1', title: '后端工程师' }],
       applications: [],
+      interviewers: [],
     })
 
     root = document.createElement('div')
@@ -106,9 +107,10 @@ describe('InterviewListPage', () => {
   it('starts from resume candidates and creates an application before scheduling when needed', async () => {
     mockedLoadInterviews.mockResolvedValue([])
     mockedLoadApplications.mockResolvedValue({
-        candidates: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王五', email: 'wang@example.com' }],
+      candidates: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王五', email: 'wang@example.com' }],
       jobs: [{ id: 'job-1', code: 'JOB-1', title: '后端工程师' }],
       applications: [],
+      interviewers: [{ id: '77777777-7777-4777-8777-777777777777', displayName: '林晓', email: 'lin@example.com' }],
     })
     mockedCreateApplication.mockResolvedValue({
       id: 'app-new',
@@ -141,9 +143,9 @@ describe('InterviewListPage', () => {
     jobSelect.dispatchEvent(new Event('change'))
     await flush()
 
-    const interviewer = root.querySelector('input[placeholder="输入系统用户姓名或邮箱"]') as HTMLInputElement
-    interviewer.value = '林晓'
-    interviewer.dispatchEvent(new Event('input'))
+    const interviewer = root.querySelector('select[aria-label="面试官"]') as HTMLSelectElement
+    interviewer.value = '77777777-7777-4777-8777-777777777777'
+    interviewer.dispatchEvent(new Event('change'))
     await flush()
 
     const createButton = [...root.querySelectorAll('button')].find((button) => button.textContent === '创建面试')
@@ -153,7 +155,75 @@ describe('InterviewListPage', () => {
     expect(mockedCreateApplication).toHaveBeenCalledWith({ candidateId: 'candidate-1', jobId: 'job-1' })
     expect(mockedCreateInterview).toHaveBeenCalledWith(expect.objectContaining({
       applicationId: 'app-new',
-      participants: [expect.objectContaining({ userId: '林晓', name: '林晓', role: 'interviewer', required: true })],
+      participants: [expect.objectContaining({ userId: '77777777-7777-4777-8777-777777777777', name: '林晓', role: 'interviewer', required: true })],
     }))
+  })
+
+  it('feedback uses the scheduled interviewer instead of a free-text id', async () => {
+    const interviewerId = '77777777-7777-4777-8777-777777777777'
+    mockedLoadInterviews.mockResolvedValue([{
+      id: 'INT-1',
+      entityId: 'interview-1',
+      candidate: '王五',
+      job: '后端工程师',
+      round: '1 轮',
+      scheduledAt: '09-22 10:00',
+      interviewers: ['林晓'],
+      interviewerIds: [interviewerId],
+      interviewerOptions: [{ id: interviewerId, name: '林晓' }],
+      feedbackStatus: 'scheduled',
+      status: 'scheduled',
+      applicationId: 'app-1',
+    }])
+    vi.mocked(submitFeedback).mockResolvedValue({})
+    vi.mocked(lockFeedback).mockResolvedValue({})
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(InterviewListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    const feedbackButton = [...root.querySelectorAll('button')].find((button) => button.textContent?.trim() === '填写反馈')
+    feedbackButton!.click()
+    await flush()
+
+    const interviewer = root.querySelector('select[aria-label="反馈面试官"]') as HTMLSelectElement
+    expect(interviewer.value).toBe(interviewerId)
+
+    const submit = [...root.querySelectorAll('button')].find((button) => button.textContent?.trim() === '提交并锁定')
+    submit!.click()
+    await flush()
+
+    expect(submitFeedback).toHaveBeenCalledWith('interview-1', expect.objectContaining({ interviewerId }))
+    expect(lockFeedback).toHaveBeenCalledWith('interview-1', interviewerId)
+  })
+
+  it('marks legacy interviews without a system interviewer for rescheduling', async () => {
+    mockedLoadInterviews.mockResolvedValue([{
+      id: 'INT-legacy',
+      entityId: 'interview-legacy',
+      candidate: '历史候选人',
+      job: '历史岗位',
+      round: '1 轮',
+      scheduledAt: '待安排',
+      interviewers: ['张三'],
+      interviewerIds: [],
+      interviewerOptions: [],
+      feedbackStatus: 'scheduled',
+      status: 'scheduled',
+      applicationId: 'app-legacy',
+    }])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(InterviewListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    expect(root.textContent).toContain('需重排面试官')
+    expect([...root.querySelectorAll('button')].some((button) => button.textContent === '填写反馈')).toBe(false)
   })
 })

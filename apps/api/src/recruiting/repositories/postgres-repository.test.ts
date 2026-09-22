@@ -135,39 +135,22 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     assert.equal(result.stage, 'final')
   })
 
-  it('keeps a free-text interviewer name when no system user matches', async () => {
+  it('rejects a free-text interviewer when no system user matches', async () => {
     const interviewId = '88888888-8888-4888-8888-888888888888'
     const applicationId = applicationRow.id
-    const interviewRow = {
-      id: interviewId,
-      interview_no: 'INT-1002',
-      application_id: applicationId,
-      round: 1,
-      type: 'technical',
-      title: '技术面',
-      status: 'scheduled',
-      scheduled_start_at: null,
-      scheduled_end_at: null,
-      timezone: null,
-      location: null,
-      meeting_url: null,
-      participants: [{ userId: '张三', name: '张三', role: 'interviewer', required: true }],
-      created_at: '2026-09-20T00:00:00.000Z',
-      updated_at: '2026-09-20T00:00:00.000Z',
-    }
-    const pool = new FakePool([], [[], [{ id: applicationId }], [], [interviewRow]])
+    const pool = new FakePool([], [[], [{ id: applicationId }], []])
     const repository = new NormalizedRecruitingRepository(pool)
 
-    const result = await repository.createInterview({
-      applicationId,
-      round: 1,
-      title: '技术面',
-      participants: [{ userId: '张三', name: '张三', role: 'interviewer', required: true }],
-    })
-
-    assert.equal(result.participants[0]?.userId, '张三')
-    const insert = pool.client.calls.find((call) => call.sql.includes('INSERT INTO interviews'))
-    assert.deepEqual(JSON.parse(String(insert?.values[13])), [{ userId: '张三', name: '张三', role: 'interviewer', required: true }])
+    await assert.rejects(
+      () => repository.createInterview({
+        applicationId,
+        round: 1,
+        title: '技术面',
+        participants: [{ userId: '张三', name: '张三', role: 'interviewer', required: true }],
+      }),
+      /未找到有效面试官/u,
+    )
+    assert.equal(pool.client.calls.some((call) => call.sql.includes('INSERT INTO interviews')), false)
   })
 
   it('lists and loads normalized analysis tasks and results', async () => {
