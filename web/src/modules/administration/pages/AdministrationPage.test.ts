@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import AdministrationPage from './AdministrationPage.vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings, listAiPromptSkills } from '../api'
 
-vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn() }))
+vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn(), listAiPromptSkills: vi.fn(), createAiPromptSkill: vi.fn(), updateAiPromptSkill: vi.fn(), deleteAiPromptSkill: vi.fn() }))
 const mockedChecks = vi.mocked(listAdminChecks)
 const mockedCreateDepartment = vi.mocked(createAdminDepartment)
 const mockedUpdateDepartment = vi.mocked(updateAdminDepartment)
@@ -21,6 +22,7 @@ const mockedAiConnectionTest = vi.mocked(testAiConnection)
 const mockedFailedTasks = vi.mocked(listFailedAnalysisTasks)
 const mockedAuditLogs = vi.mocked(listAdminAuditLogs)
 const mockedChannelSettings = vi.mocked(getChannelSettings)
+const mockedAiPromptSkills = vi.mocked(listAiPromptSkills)
 
 const checks = [{ category: '服务健康', owner: '系统管理员', status: 'active' as const, detail: 'smartrecruit-api' }]
 const event = { id: 'event-1', subjectType: 'offer' as const, subjectId: 'OFF-1', subjectLabel: 'OFF-1', action: 'expire', fromStatus: 'sent', toStatus: 'expired', actorId: 'user-demo', createdAt: '2026-09-11T00:00:00Z' }
@@ -45,21 +47,42 @@ beforeEach(() => {
     '51job': { id: '51job', name: '前程无忧', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
     official_site: { id: 'official_site', name: '公司官网', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
   })
+  mockedAiPromptSkills.mockResolvedValue([])
 })
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); vi.resetAllMocks() })
+
+async function mountAdmin(moduleKey = 'users', path = '/administration') {
+  app?.unmount()
+  app = undefined
+  root?.remove()
+  root = undefined
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/administration', component: { template: '<div />' } }],
+  })
+  await router.push(`${path}?module=${moduleKey}`)
+  await router.isReady()
+  root = document.createElement('div')
+  document.body.appendChild(root)
+  app = createApp(AdministrationPage)
+  app.use(router)
+  app.mount(root)
+  await flush()
+}
 
 describe('管理后台页面', () => {
   it('展示系统检查与流程审计记录，而不是空占位', async () => {
     mockedChecks.mockResolvedValue(checks)
     mockedEvents.mockResolvedValue([event])
     mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([]); mockedDepartments.mockResolvedValue([]); mockedSettings.mockResolvedValue({}); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false }); mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
-    root = document.createElement('div'); document.body.appendChild(root)
-    app = createApp(AdministrationPage); app.mount(root)
-    await flush()
-    expect(root.textContent).toContain('服务健康')
-    expect(root.textContent).toContain('流程审计记录')
-    expect(root.textContent).toContain('OFF-1')
-    expect(root.textContent).toContain('过期')
+
+    await mountAdmin('health')
+    expect(root!.textContent).toContain('服务健康')
+
+    await mountAdmin('workflow-audit')
+    expect(root!.textContent).toContain('流程审计记录')
+    expect(root!.textContent).toContain('OFF-1')
+    expect(root!.textContent).toContain('过期')
   })
 
   it('AI 配置接口不可用时给出明确提示，而不是一直停在加载态', async () => {
@@ -68,29 +91,33 @@ describe('管理后台页面', () => {
     mockedSettings.mockResolvedValue({}); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false })
     mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
     mockedAiSettings.mockRejectedValue(new Error('未找到接口：GET /api/v1/admin/ai-settings'))
-    root = document.createElement('div'); document.body.appendChild(root)
-    app = createApp(AdministrationPage); app.mount(root)
-    await flush()
-    expect(root.textContent).toContain('无法读取模型配置')
-    expect(root.textContent).not.toContain('正在读取模型配置')
+    await mountAdmin('ai')
+    expect(root!.textContent).toContain('无法读取模型配置')
+    expect(root!.textContent).not.toContain('正在读取模型配置')
   })
 
-  it('加载并展示用户、角色、系统设置、失败任务和管理审计', async () => {
+  it('按模块加载并展示用户、系统设置、失败任务和管理审计', async () => {
     mockedChecks.mockResolvedValue([]); mockedEvents.mockResolvedValue([])
     mockedUsers.mockResolvedValue([{ id: 'u1', email: 'admin@example.com', displayName: '管理员', role: 'admin', departmentCode: 'HQ', isActive: true, lastLoginAt: null, createdAt: '2026-09-01T00:00:00Z' }])
     mockedRoles.mockResolvedValue([{ id: 'r1', code: 'admin', name: '系统管理员' }]); mockedDepartments.mockResolvedValue([{ id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z' }])
     mockedSettings.mockResolvedValue({ timezone: 'Asia/Shanghai' }); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false })
     mockedFailedTasks.mockResolvedValue([{ id: 't1', resumeId: 'res-1', status: 'failed', attempts: 2, idempotencyKey: 'k', lastError: '解析失败', availableAt: '2026-09-01T00:00:00Z', createdAt: '2026-09-01T00:00:00Z' }])
     mockedAuditLogs.mockResolvedValue([{ id: 'a1', actorId: 'u1', actorEmail: 'admin@example.com', action: 'admin.settings.update', resourceType: 'system_settings', resourceId: null, requestId: 'req-1', metadata: {}, createdAt: '2026-09-01T00:00:00Z' }])
-    root = document.createElement('div'); document.body.appendChild(root)
-    app = createApp(AdministrationPage); app.mount(root); await flush()
-    expect(root.textContent).toContain('用户与角色')
-    expect(root.textContent).toContain('admin@example.com')
-    expect(root.textContent).toContain('系统管理员')
+
+    await mountAdmin('users')
+    expect(root!.textContent).toContain('用户与角色')
+    expect(root!.textContent).toContain('admin@example.com')
+    expect(root!.textContent).toContain('系统管理员')
+
+    await mountAdmin('settings')
     expect(root!.querySelector<HTMLInputElement>('#setting-timezone')?.value).toBe('Asia/Shanghai')
-    expect(root.textContent).toContain('解析失败')
-    expect(root.textContent).toContain('修改系统设置')
-    expect(root.textContent).toContain('共 1 条，第 1 / 1 页')
+    expect(root!.textContent).toContain('保存设置')
+
+    await mountAdmin('failed-tasks')
+    expect(root!.textContent).toContain('解析失败')
+
+    await mountAdmin('audit-logs')
+    expect(root!.textContent).toContain('共 1 条，第 1 / 1 页')
   })
 
   const departmentsFixture = [
@@ -104,8 +131,7 @@ describe('管理后台页面', () => {
     mockedDepartments.mockResolvedValue(departments)
     mockedSettings.mockResolvedValue({}); mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false })
     mockedFailedTasks.mockResolvedValue([]); mockedAuditLogs.mockResolvedValue([])
-    root = document.createElement('div'); document.body.appendChild(root)
-    app = createApp(AdministrationPage); app.mount(root); await flush()
+    await mountAdmin('departments')
   }
 
   function departmentRows() {

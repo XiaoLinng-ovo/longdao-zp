@@ -7,6 +7,7 @@ import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
 import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings.vue'
 import { actionLabel, statusLabel } from '../../../shared/utils/labels'
+import { formatAnalysisError } from '../../../shared/utils/analysis-error'
 import { administrationModules, isAdministrationModuleKey, type AdministrationModuleKey } from '../moduleConfig'
 
 const route = useRoute()
@@ -612,7 +613,7 @@ onMounted(refresh)
 
     <section v-else-if="activeModule === 'failed-tasks'" class="section">
       <h3 class="section-title">失败分析任务</h3><div class="table-wrap"><table><thead><tr><th>重试次数</th><th>错误</th><th>创建时间</th></tr></thead><tbody>
-        <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.attempts }}</td><td>{{ task.lastError || '—' }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="3" class="table-empty">暂无失败任务</td></tr>
+        <tr v-for="task in failedTasks" :key="task.id"><td>{{ task.attempts }}</td><td>{{ formatAnalysisError(task.lastError) }}</td><td>{{ new Date(task.createdAt).toLocaleString() }}</td></tr><tr v-if="!failedTasks.length"><td colspan="3" class="table-empty">暂无失败任务</td></tr>
       </tbody></table></div>
     </section>
 

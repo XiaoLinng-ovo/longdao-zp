@@ -7,6 +7,7 @@ import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import FunnelSummary from '../components/FunnelSummary.vue'
 import { processAnalysisTask } from '../../candidates/api'
+import { formatAnalysisError } from '../../../shared/utils/analysis-error'
 
 type DashboardPayload = Awaited<ReturnType<typeof loadDashboard>>
 
@@ -113,7 +114,7 @@ onMounted(refresh)
             <span class="todo-bullet bullet-blue"></span><span class="todo-copy"><strong>{{ row.candidateName }}：待反馈面试</strong><small>{{ row.jobTitle }} · 第 {{ row.round }} 轮</small></span><span class="todo-action">去处理</span>
           </button>
           <button v-for="row in failedTasks.slice(0, 1)" :key="`failed-${row.id}`" class="todo-item" type="button" @click="retryTask(row)">
-            <span class="todo-bullet bullet-red"></span><span class="todo-copy"><strong>简历分析任务待重试</strong><small>{{ row.lastError || '分析任务处理失败' }}</small></span><span class="todo-action">重试</span>
+            <span class="todo-bullet bullet-red"></span><span class="todo-copy"><strong>简历分析任务待重试</strong><small>{{ formatAnalysisError(row.lastError) }}</small></span><span class="todo-action">重试</span>
           </button>
           <div v-if="!todoTotal" class="todo-empty">太棒了，当前没有需要处理的待办事项 ✨</div>
         </div>
@@ -154,7 +155,7 @@ onMounted(refresh)
 
     <section class="section dashboard-section"><div class="section-heading"><div><span class="section-eyebrow">面试协作</span><h3 class="section-title">待反馈面试</h3></div><span class="section-note">共 {{ pendingFeedback.length }} 条记录</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>候选人</th><th>岗位</th><th>轮次</th><th>反馈状态</th></tr></thead><tbody><tr v-for="row in pendingFeedback" :key="row.id" class="row-clickable" role="link" tabindex="0" @click="openInterview(row)" @keydown.enter="openInterview(row)"><td><span class="row-link" @click.stop="openInterview(row)">{{ row.candidateName }}</span></td><td>{{ row.jobTitle }}</td><td>第 {{ row.round }} 轮</td><td><StatusTag :status="row.feedbackStatus" /></td></tr><tr v-if="!pendingFeedback.length"><td colspan="4" class="table-empty">暂无待反馈面试</td></tr></tbody></table></div></section>
 
-    <section class="section dashboard-section"><div class="section-heading"><div><span class="section-eyebrow">系统任务</span><h3 class="section-title">失败分析任务</h3></div><span class="section-note">自动化处理队列</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>状态</th><th>尝试次数</th><th>失败原因</th><th>操作</th></tr></thead><tbody><tr v-for="row in failedTasks" :key="row.id"><td><StatusTag :status="row.status" /></td><td>{{ row.attempts }}</td><td>{{ row.lastError || '未记录失败原因' }}</td><td><button class="btn btn-primary" type="button" :disabled="retryingTaskId === row.id" @click="retryTask(row)">{{ retryingTaskId === row.id ? '重试中...' : '重新处理' }}</button></td></tr><tr v-if="!failedTasks.length"><td colspan="4" class="table-empty">暂无失败分析任务</td></tr></tbody></table></div></section>
+    <section class="section dashboard-section"><div class="section-heading"><div><span class="section-eyebrow">系统任务</span><h3 class="section-title">失败分析任务</h3></div><span class="section-note">自动化处理队列</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>状态</th><th>尝试次数</th><th>失败原因</th><th>操作</th></tr></thead><tbody><tr v-for="row in failedTasks" :key="row.id"><td><StatusTag :status="row.status" /></td><td>{{ row.attempts }}</td><td>{{ formatAnalysisError(row.lastError) }}</td><td><button class="btn btn-primary" type="button" :disabled="retryingTaskId === row.id" @click="retryTask(row)">{{ retryingTaskId === row.id ? '重试中...' : '重新处理' }}</button></td></tr><tr v-if="!failedTasks.length"><td colspan="4" class="table-empty">暂无失败分析任务</td></tr></tbody></table></div></section>
   </template>
 </template>
 
