@@ -1,0 +1,19 @@
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#0f172a;background:#f1f5f9;font-size:14px;font-synthesis:none;text-rendering:optimizeLegibility;--primary:#2563eb;--primary-d:#1d4ed8;--primary-bg:#eff6ff;--purple:#7c3aed;--teal:#0d9488;--bg:#f1f5f9;--card:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0;--sidebar:#0f1e3d;--sidebar-text:#94a3b8;--radius:10px;--shadow:0 1px 3px rgba(15,23,42,.06),0 4px 14px rgba(15,23,42,.05)}*{box-sizing:border-box}body{margin:0;min-width:320px;background:var(--bg)}button,input,select,textarea{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none}
+
+/* 清新浅色工作台主题 */
+:root {
+  --primary: #397fe8;
+  --primary-d: #2468d5;
+  --primary-bg: #eef6ff;
+  --teal: #38b98a;
+  --bg: #f4f8fb;
+  --card: #ffffff;
+  --text: #19324a;
+  --muted: #8198ab;
+  --border: #e3edf4;
+  --sidebar: #ffffff;
+  --sidebar-text: #7890a4;
+  --radius: 14px;
+  --shadow: 0 8px 26px rgba(75, 111, 138, .075);
+}
+body { background: linear-gradient(180deg, #f5f9fc 0%, #f2f7fb 100%); }

@@ -1,0 +1,157 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smartrecruit}
+      POSTGRES_USER: ${POSTGRES_USER:-smartrecruit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartrecruit} -d ${POSTGRES_DB:-smartrecruit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [smartrecruit]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [smartrecruit]
+
+  minio:
+    image: quay.io/minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-smartrecruit}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [smartrecruit]
+
+  clamav:
+    image: clamav/clamav:stable
+    ports:
+      - "${CLAMAV_PORT:-3310}:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 2>/dev/null | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+    networks: [smartrecruit]
+
+  ocr:
+    build:
+      context: ../ocr-service
+    environment:
+      PADDLEOCR_LANG: ${PADDLEOCR_LANG:-ch}
+    ports:
+      - "${OCR_PORT:-8090}:8090"
+    volumes:
+      - paddle_models:/root/.paddlex
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks: [smartrecruit]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3100
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-smartrecruit}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
+      S3_QUARANTINE_BUCKET: resume-quarantine
+      S3_FORCE_PATH_STYLE: "true"
+      OCR_SERVICE_URL: http://ocr:8090
+      RESUME_VIRUS_SCAN_ENABLED: "false"
+      ALLOWED_ORIGINS: http://127.0.0.1:5174,http://localhost:5174
+    ports:
+      - "${API_PORT:-3100}:3100"
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      ocr: { condition: service_healthy }
+    networks: [smartrecruit]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["node", "apps/worker/dist/src/index.js"]
+    environment:
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      WORKER_DB_POLL: "true"
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: 4001
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-smartrecruit}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
+      S3_QUARANTINE_BUCKET: resume-quarantine
+      S3_FORCE_PATH_STYLE: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      api: { condition: service_started }
+    networks: [smartrecruit]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "${WEB_PORT:-5174}:5174"
+    depends_on:
+      api: { condition: service_started }
+    networks: [smartrecruit]
+
+networks:
+  smartrecruit:
+    name: smartrecruit
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  clamav_data:
+  paddle_models:

@@ -1,0 +1,7 @@
+paddleocr>=3.0.0
+paddlepaddle>=3.0.0
+paddlex[ocr]>=3.7.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pypdfium2>=4.30.0

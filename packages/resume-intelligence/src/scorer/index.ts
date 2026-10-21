@@ -1,0 +1,89 @@
+import type { MatchAssessment, RequirementAssessment, RequirementMatchResult, ScoreMatchInput } from '../contracts/types.js'
+import { isRequirementConflicted, matchResumeToJob, requirementKindLabel, MATCHER_VERSION } from '../matcher/index.js'
+
+export const SCORER_VERSION = '0.2.0'
+
+function average(values: number[], fallback = 0): number {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : fallback
+}
+
+function clamp(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+/** 岗位没有该类要求时返回 null：既不能算 0 分（等价于最差），也不能算满分（等价于无门槛）。 */
+function assessDimension(assessments: RequirementAssessment[], kind: RequirementAssessment['kind']): number | null {
+  const values = assessments.filter((assessment) => assessment.kind === kind).map((assessment) => assessment.score)
+  return values.length ? clamp(average(values)) : null
+}
+
+function potentialScore(input: ScoreMatchInput, assessments: RequirementAssessment[]): number {
+  const completeness = [
+    input.extraction.candidate.fullName,
+    input.extraction.candidate.email,
+    input.extraction.profile.summary,
+    input.extraction.experience.length ? 'experience' : '',
+    input.extraction.skills.length ? 'skills' : '',
+  ].filter(Boolean).length
+  const hardConflicts = assessments.filter(isRequirementConflicted).length
+  return clamp(Math.max(0, completeness * 18 - hardConflicts * 10))
+}
+
+function recommendation(score: number, conflicts: RequirementAssessment[]): MatchAssessment['recommendation'] {
+  if (conflicts.length > 0) return score >= 65 ? 'needs_review' : 'weak_match'
+  if (score >= 85) return 'strong_match'
+  if (score >= 70) return 'match'
+  if (score >= 50) return 'needs_review'
+  return 'weak_match'
+}
+
+function buildQuestions(missing: RequirementAssessment[]): string[] {
+  return missing.slice(0, 5).map((item) => `请结合具体项目说明你在“${item.label}”方面的经验和成果。`)
+}
+
+export function scoreResumeMatch(input: ScoreMatchInput): MatchAssessment {
+  const matches: RequirementMatchResult = input.requirementMatches ?? matchResumeToJob(input.extraction, input.job)
+  const assessments = matches.assessments
+  const conflicts = assessments.filter(isRequirementConflicted)
+  const missingRequirements = assessments.filter((assessment) => !assessment.matched)
+  const matchedRequirements = assessments.filter((assessment) => assessment.matched)
+  const hard = assessments.filter((assessment) => assessment.hard)
+  const hardRequirement = hard.length ? clamp(average(hard.map((assessment) => assessment.score))) : null
+  const experience = assessDimension(assessments, 'experience')
+  const skills = assessDimension(assessments, 'skill')
+  const education = assessDimension(assessments, 'education')
+  const potential = potentialScore(input, assessments)
+  const evidenceCount = assessments.reduce((sum, assessment) => sum + assessment.evidence.length, 0)
+  const confidence = Math.max(0.25, Math.min(0.95, 0.45 + Math.min(0.45, evidenceCount * 0.06) - Math.min(0.2, conflicts.length * 0.04)))
+  const strengths = matchedRequirements.slice(0, 6).map((assessment) => `${requirementKindLabel(assessment.kind)}匹配：${assessment.label}`)
+  const risks = assessments.filter((item) => !item.matched || item.status === 'partial').map((assessment) => `${assessment.status === 'partial' ? '部分满足' : isRequirementConflicted(assessment) ? '硬性要求冲突' : '待核实'}：${assessment.label}`)
+  const hasRequirements = assessments.length > 0
+  if (!hasRequirements) risks.unshift('岗位未提供任职要求，无法评估岗位匹配度；综合评分暂不可用；潜力维度仅反映简历完整度，请先完善岗位说明书。')
+
+  // 总分按「每一条岗位要求」加权平均，而不是先按维度取均值再平均：
+  // 维度平均会让没被归类的通用要求（以及该维度内的个别失败项）对总分失去影响，
+  // 出现「一半要求没有证据却仍是强匹配」。硬性要求权重更高，未满足时明显拉低总分。
+  const HARD_REQUIREMENT_WEIGHT = 2.5
+  const requirementWeights = assessments.map((assessment) => ({ score: assessment.score, weight: assessment.hard ? HARD_REQUIREMENT_WEIGHT : 1 }))
+  const totalRequirementWeight = requirementWeights.reduce((sum, item) => sum + item.weight, 0)
+  const score = hasRequirements
+    ? clamp(requirementWeights.reduce((sum, item) => sum + item.score * item.weight, 0) / totalRequirementWeight)
+    : null
+
+  return {
+    score,
+    recommendation: score !== null ? recommendation(score, conflicts) : 'needs_review',
+    dimensions: { hardRequirement, experience, skills, education, potential },
+    matchedRequirements,
+    conflicts,
+    missingRequirements,
+    strengths,
+    risks,
+    interviewQuestions: buildQuestions(missingRequirements),
+    confidence: Number(confidence.toFixed(2)),
+    advisoryOnly: true,
+    applicationStatusMutation: 'none',
+  }
+}
+
+export { MATCHER_VERSION }
