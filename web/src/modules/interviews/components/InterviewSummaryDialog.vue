@@ -1,22 +1,46 @@
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
-import { loadInterviewSummary, requestInterviewSummary, type SummaryEvidence, type InterviewSummaryView } from '../api/summary'
+import { loadInterviewSummary, requestInterviewSummary, type InterviewSummaryView } from '../api/summary'
+import { loadQuestionSheets, STAGE_DECISION_LABEL, STAGE_LABEL, type ApiStageReview, type InterviewStage } from '../api/question-sheets'
 
-const props = defineProps<{ open: boolean; interviewId: string }>()
+const props = defineProps<{ open: boolean; interviewId: string; applicationId?: string; stage?: InterviewStage; candidateName?: string; jobTitle?: string; interviewDate?: string }>()
 const emit = defineEmits<{ (event: 'close'): void }>()
 const view = ref<InterviewSummaryView | null>(null)
 const report = computed(() => view.value?.report)
 const busy = ref(false)
 const loading = ref(false)
 const error = ref('')
-const transcriptDetails = ref<HTMLDetailsElement | null>(null)
-async function showEvidence(evidence: SummaryEvidence) {
-  if (evidence.turnId && transcriptDetails.value) transcriptDetails.value.open = true
-  await nextTick()
-  const id = evidence.turnId ? `turn-${evidence.turnId}` : `pair-${evidence.pairId}`
-  document.getElementById(id)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+const review = ref<ApiStageReview | null>(null)
+const reviewLoading = ref(false)
+const reviewError = ref('')
+let reviewVersion = 0
+const recommendationLabels = { advance: '建议推进后续流程', reject: '不建议推进后续流程', hold: '建议补充评估' }
+const analysisReady = computed(() => view.value?.status === 'ready')
+const recommendation = computed(() => analysisReady.value ? report.value?.recommendation : null)
+const recommendationLabel = computed(() => recommendation.value ? recommendationLabels[recommendation.value.outcome] : '')
+const resultLabel = computed(() => reviewLoading.value ? '读取中' : reviewError.value ? '暂时无法读取' : review.value?.decision ? STAGE_DECISION_LABEL[review.value.decision] : '待人工确认')
+function formatDate(value?: string) {
+  if (!value) return '未记录'
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '未记录'
 }
+async function loadReview() {
+  if (!props.applicationId || !props.stage) return
+  const current = ++reviewVersion
+  reviewLoading.value = true
+  reviewError.value = ''
+  try {
+    const data = await loadQuestionSheets(props.applicationId)
+    if (current === reviewVersion && props.open) review.value = data.reviews.find(row => row.stage === props.stage) ?? null
+  } catch (cause) {
+    if (current === reviewVersion) {
+      review.value = null
+      reviewError.value = describeApiFailure(cause, '读取面试结果失败').message
+    }
+  } finally { if (current === reviewVersion) reviewLoading.value = false }
+}
+function refresh() { void load(); void loadReview() }
 let timer: ReturnType<typeof setTimeout> | undefined
 let version = 0
 let requestVersion = 0
@@ -24,9 +48,6 @@ let readFailures = 0
 let bodyOverflow = ''
 let ownsScrollLock = false
 const pending = computed(() => view.value?.status === 'pending' || view.value?.status === 'generating')
-const labels = { interviewer: '面试官', candidate: '候选人', unknown: '说话人待确认' }
-const kinds = { assessment: '正式考察', logistics: '流程与安排', unreviewed: '待核实' }
-const time = (ms: number) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`
 function clearTimer() { if (timer) clearTimeout(timer); timer = undefined }
 function schedule(retry = false) {
   clearTimer()
@@ -80,8 +101,9 @@ function releaseScrollLock() {
   document.body.style.overflow = bodyOverflow
   ownsScrollLock = false
 }
-watch(() => [props.open, props.interviewId] as const, ([open]) => {
+watch(() => [props.open, props.interviewId, props.applicationId, props.stage] as const, ([open]) => {
   version++; requestVersion++; readFailures = 0; clearTimer(); busy.value = false; loading.value = false; error.value = ''; view.value = null
+  reviewVersion++; review.value = null; reviewLoading.value = false; reviewError.value = ''
   if (open) {
     if (!ownsScrollLock) {
       bodyOverflow = document.body.style.overflow
@@ -89,10 +111,10 @@ watch(() => [props.open, props.interviewId] as const, ([open]) => {
       ownsScrollLock = true
     }
     document.addEventListener('keydown', keydown)
-    void load()
+    refresh()
   } else { document.removeEventListener('keydown', keydown); releaseScrollLock() }
 }, { immediate: true })
-onUnmounted(() => { version++; clearTimer(); document.removeEventListener('keydown', keydown); releaseScrollLock() })
+onUnmounted(() => { version++; reviewVersion++; clearTimer(); document.removeEventListener('keydown', keydown); releaseScrollLock() })
 </script>
 
 <template>
@@ -101,7 +123,7 @@ onUnmounted(() => { version++; clearTimer(); document.removeEventListener('keydo
       <header class="report-head">
         <h2>面试总结表</h2>
         <div class="inline-actions">
-          <button class="btn btn-ghost" type="button" :disabled="loading || busy" @click="load">刷新</button>
+          <button class="btn btn-ghost" type="button" :disabled="loading || busy || reviewLoading" @click="refresh">刷新</button>
           <button class="btn btn-primary" type="button" :disabled="busy || pending || loading" @click="generate">{{ pending ? '总结生成中' : report ? '重新生成' : '生成总结' }}</button>
           <button class="report-close" type="button" aria-label="关闭面试总结表" title="关闭" @click="emit('close')">&times;</button>
         </div>
@@ -112,33 +134,47 @@ onUnmounted(() => { version++; clearTimer(); document.removeEventListener('keydo
         <p v-else-if="loading && !view" class="loading-note">正在读取面试总结...</p>
         <p v-else-if="!report" class="empty-state">尚无面试总结。</p>
         <template v-if="report">
+          <dl class="report-info" aria-label="面试信息">
+            <div><dt>候选人</dt><dd>{{ candidateName || '未记录' }}</dd></div>
+            <div><dt>应聘岗位</dt><dd>{{ jobTitle || '未记录' }}</dd></div>
+            <div><dt>面试阶段</dt><dd>{{ stage ? STAGE_LABEL[stage] : '未记录' }}</dd></div>
+            <div><dt>面试日期</dt><dd>{{ formatDate(interviewDate) }}</dd></div>
+          </dl>
           <section class="report-overview" aria-label="总体评价">
-            <div class="report-score"><strong>{{ pending || view?.status === 'failed' ? '待评分' : report.overallScore ?? '未评分' }}</strong><span v-if="report.overallScore !== null && !pending && view?.status !== 'failed'"> / 100</span></div>
-            <div><h3>总体评价</h3><p>{{ report.summary }}</p><small>依据完整实际对话理解已体现的能力；参考面试表不作为必答清单，未考察内容不扣分。</small><small>实际面试评价 · {{ report.dimensions.length }} 个已考察维度 · {{ new Date(report.generatedAt).toLocaleString('zh-CN') }}</small></div>
+            <div class="score-column"><h3>候选人评分</h3><div class="report-score"><strong>{{ pending || view?.status === 'failed' ? '待评分' : report.overallScore ?? '未评分' }}</strong><span v-if="report.overallScore !== null && !pending && view?.status !== 'failed'"> / 100</span></div><small>AI 综合评价</small></div>
+            <div><h3>AI 总体评价</h3><p>{{ report.summary }}</p><small class="report-context">未考察内容不扣分 · {{ report.dimensions.length }} 个已考察维度</small></div>
           </section>
           <p v-if="report.version === 'actual-dialogue-v1'" class="muted">这是历史问答报告，可点击“重新生成”按完整对话重新分析；历史分数不参与当前录音分计算。</p>
           <ul v-if="report.warnings.length" class="report-warnings"><li v-for="warning in report.warnings" :key="warning">{{ warning }}</li></ul>
+          <div class="report-analysis">
+            <section v-for="group in [{ title: '优势分析', tone: 'strengths', rows: report.strengths }, { title: '劣势与待提升', tone: 'concerns', rows: report.concerns }]" :key="group.title" class="analysis-column" :class="group.tone" :aria-label="group.title">
+              <h3>{{ group.title }}</h3><p v-if="!group.rows.length" class="muted">暂无有充分原文依据的评价。</p>
+              <ol v-else class="finding-list"><li v-for="(finding, index) in group.rows" :key="index" class="report-finding"><p>{{ finding.text }}</p><blockquote v-for="(evidence, evidenceIndex) in finding.evidence" :key="evidenceIndex">{{ evidence.quote }}</blockquote></li></ol>
+            </section>
+          </div>
           <section v-if="report.dimensions.length" class="report-section">
             <h3>维度评分</h3>
             <div class="report-table-wrap"><table class="report-table"><thead><tr><th>考察维度</th><th>分数</th><th>评价与原文证据</th></tr></thead>
-              <tbody><tr v-for="dimension in report.dimensions" :key="dimension.name"><th>{{ dimension.name }}</th><td>{{ dimension.score }}</td><td><p>{{ dimension.text }}</p><blockquote v-for="(evidence, index) in dimension.evidence" :key="index"><a :href="evidence.turnId ? `#turn-${evidence.turnId}` : `#pair-${evidence.pairId}`" @click.prevent="showEvidence(evidence)">{{ evidence.turnId ? '发言原文' : '对应问答' }}</a>：“{{ evidence.quote }}”</blockquote></td></tr></tbody>
+              <tbody><tr v-for="dimension in report.dimensions" :key="dimension.name"><th>{{ dimension.name }}</th><td>{{ dimension.score }}</td><td><p>{{ dimension.text }}</p><blockquote v-for="(evidence, index) in dimension.evidence" :key="index">“{{ evidence.quote }}”</blockquote></td></tr></tbody>
             </table></div>
           </section>
-          <section v-for="group in [{ title: '已体现的优势', rows: report.strengths }, { title: '风险与关注点', rows: report.concerns }]" :key="group.title" class="report-section">
-            <h3>{{ group.title }}</h3><p v-if="!group.rows.length" class="muted">暂无有充分原文依据的评价。</p>
-            <div v-for="(finding, index) in group.rows" :key="index" class="report-finding"><p>{{ finding.text }}</p><blockquote v-for="(evidence, evidenceIndex) in finding.evidence" :key="evidenceIndex">“{{ evidence.quote }}”</blockquote></div>
+          <section v-if="report.unassessed.length" class="report-section"><h3>待核实</h3><ul><li v-for="item in report.unassessed" :key="item">{{ item }}</li></ul></section>
+          <section class="report-section report-recommendation" aria-label="推荐建议">
+            <h3>推荐建议</h3>
+            <template v-if="recommendation">
+              <p class="recommendation-value">{{ recommendationLabel }}</p>
+              <p>{{ recommendation.text }}</p>
+            </template>
+            <p v-else class="muted">{{ pending ? '正在生成推荐建议。' : view?.status === 'failed' ? '分析未完成，暂不提供推荐建议。' : '暂无有充分依据的推荐建议，可重新生成总结或补充评估。' }}</p>
+            <small>AI 建议仅供参考，不替代人工面试结论。</small>
           </section>
-          <section v-if="report.unassessed.length" class="report-section"><h3>未考察与待核实</h3><ul><li v-for="item in report.unassessed" :key="item">{{ item }}</li></ul></section>
-          <section class="report-section"><h3>实际面试问答 <small>{{ report.pairs.length }} 组</small></h3>
-            <p v-if="!report.pairs.length" class="muted">没有可可靠配对的提问与回答。</p>
-            <article v-for="(pair, index) in report.pairs" :id="`pair-${pair.id}`" :key="pair.id" class="report-pair">
-              <div class="report-meta"><span>{{ index + 1 }} · {{ time(pair.startMs) }}–{{ time(pair.endMs) }}</span><span>{{ kinds[pair.kind] }}</span></div>
-              <h4>{{ pair.question }}</h4><p>{{ pair.answer || '未记录到可确认的候选人回答，不计分。' }}</p>
-            </article>
+          <section class="report-section human-result">
+            <h3>面试结果</h3>
+            <p class="result-value" :data-decision="review?.decision || 'pending'">{{ resultLabel }}</p>
+            <small v-if="review?.decision && !reviewError && !reviewLoading">人工确认<span v-if="review.decidedAt"> · {{ formatDate(review.decidedAt) }}</span></small>
+            <p v-if="reviewError" class="muted">{{ reviewError }}</p>
           </section>
-          <details ref="transcriptDetails" class="report-section"><summary>完整语音转写 <small>{{ report.transcript.length }} 段</small></summary>
-            <div v-for="turn in report.transcript" :id="`turn-${turn.id}`" :key="turn.id" class="report-turn"><div class="report-meta">{{ time(turn.startMs) }}–{{ time(turn.endMs) }} · {{ labels[turn.role] }}</div><p>{{ turn.text }}</p></div>
-          </details>
+          <footer class="report-meta">总结生成时间：{{ formatDate(report.generatedAt) }}</footer>
         </template>
       </div>
     </section>
@@ -152,14 +188,37 @@ onUnmounted(() => { version++; clearTimer(); document.removeEventListener('keydo
 .report-head h2 { margin: 0; font-size: 18px; }
 .report-close { width: 32px; height: 32px; border: 0; background: transparent; cursor: pointer; font-size: 24px; color: #59665f; }
 .report-body { overflow: auto; overscroll-behavior: contain; padding: 0 22px 22px; }
-.report-overview { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 20px; padding: 22px 0; border-bottom: 1px solid #dce4df; }
+.report-info { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; margin: 0; padding: 22px 0; border-bottom: 1px solid #dce4df; }
+.report-info dt { margin-bottom: 8px; color: #64706a; font-size: 12px; }
+.report-info dd { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.report-overview { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 26px; padding: 26px 0; border-bottom: 1px solid #dce4df; }
+.score-column { border-right: 1px solid #dce4df; }
+.score-column h3 { color: #64706a; font-size: 13px; font-weight: 500; }
+.report-context { display: block; margin-top: 12px; }
 .report-score { align-self: center; color: #14795b; font-variant-numeric: tabular-nums; }
 .report-score strong { font-size: 30px; }
 .report-score span, small, .muted { color: #64706a; font-size: 12px; }
 h3 { margin: 0 0 10px; font-size: 15px; } h4 { font-size: 14px; margin: 8px 0; }
 p { margin: 6px 0; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
-.report-pair p, .report-turn p { white-space: normal; }
 .report-section { padding: 20px 0; border-bottom: 1px solid #e5ebe7; }
+.report-analysis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; padding: 24px 0; border-bottom: 1px solid #e5ebe7; }
+.analysis-column { padding: 20px; min-width: 0; border-top: 3px solid; }
+.strengths { background: #eff8f3; border-color: #60a98a; }
+.strengths h3 { color: #21634c; }
+.concerns { background: #fff8ed; border-color: #d6a34e; }
+.concerns h3 { color: #885d22; }
+.finding-list { margin: 0; padding-left: 20px; }
+.report-finding { padding: 10px 0; font-size: 13px; }
+.report-finding + .report-finding { border-top: 1px solid #dfe6df; }
+.report-finding::marker { font-weight: 600; color: #64706a; }
+.report-recommendation { padding: 20px; margin-top: 20px; background: #eef6fc; border-left: 3px solid #79a9ce; }
+.recommendation-value { color: #2b618b; font-weight: 600; font-size: 15px; }
+.human-result { display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap; }
+.human-result h3 { margin: 0; }
+.result-value { margin: 0; padding: 4px 12px; border-radius: 6px; background: #f0f2f4; color: #5d6872; font-weight: 600; }
+.result-value[data-decision="advanced"], .result-value[data-decision="hired"] { color: #21634c; background: #e3f4e9; }
+.result-value[data-decision="rejected"] { color: #a04444; background: #fceeee; }
+.result-value[data-decision="hold"] { color: #885d22; background: #fff3d8; }
 .report-section ul { padding-left: 20px; font-size: 13px; line-height: 1.8; }
 .report-warnings { color: #985d16; background: #fff9e9; padding: 12px 14px 12px 32px; font-size: 12px; line-height: 1.8; }
 .report-table-wrap { overflow-x: auto; }
@@ -168,8 +227,6 @@ p { margin: 6px 0; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywh
 .report-table th:first-child { width: 22%; } .report-table th:nth-child(2) { width: 54px; }
 .report-table thead { background: #f3f6f4; }
 blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid #86b5a4; font-size: 12px; line-height: 1.7; color: #64706a; overflow-wrap: anywhere; }
-.report-pair, .report-finding, .report-turn { padding: 12px 0; border-bottom: 1px solid #edf1ee; }
-.report-meta { display: flex; flex-wrap: wrap; gap: 12px; color: #64706a; font-size: 11px; }
-summary { cursor: pointer; font-size: 15px; font-weight: 600; }
-@media(max-width: 600px) { .summary-overlay { padding: 8px; } .report-head { padding: 12px; } .report-body { padding: 0 12px 12px; } .report-overview { grid-template-columns: 1fr; gap: 8px; } .report-score strong { font-size: 26px; } .report-table th, .report-table td { padding: 6px; } }
+.report-meta { padding-top: 16px; color: #64706a; font-size: 11px; }
+@media(max-width: 600px) { .summary-overlay { padding: 8px; } .report-head { padding: 12px; } .report-body { padding: 0 12px 12px; } .report-info { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; } .report-overview, .report-analysis { grid-template-columns: 1fr; gap: 16px; } .score-column { border-right: 0; } .report-score strong { font-size: 26px; } .report-table th, .report-table td { padding: 6px; } }
 </style>

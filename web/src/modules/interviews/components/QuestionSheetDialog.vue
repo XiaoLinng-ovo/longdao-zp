@@ -43,7 +43,7 @@ onUnmounted(() => {
       <header class="sheet-dialog-head">
         <div>
           <h3>面试问题表</h3>
-          <p>综合分公式的权重可调，结论由人确认；向下滚动查看每题的打分明细。</p>
+          <p>按角色考察点人工评分；各表换算为百分制参与综合分，阶段结论由人确认。</p>
         </div>
         <button class="btn btn-ghost" type="button" @click="close">关闭</button>
       </header>
@@ -85,6 +85,15 @@ onUnmounted(() => {
   margin: 0;
   color: #1e293b;
   font-size: 16px;
+}
+
+.sheet-dialog-head > div {
+  min-width: 0;
+}
+
+.sheet-dialog-head > button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sheet-dialog-head p {

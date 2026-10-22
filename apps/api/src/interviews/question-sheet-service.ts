@@ -14,25 +14,19 @@ import {
 } from './question-sheet-repository.js'
 import {
   DEFAULT_QUESTION_TIERS,
-  QUESTION_SHEET_PROMPT_VERSION,
   QuestionSheetGenerationError,
-  createQuestionSheetGenerator,
   createStageReviewGenerator,
   loadQuestionSheetGeneratorConfig,
-  type GeneratedSheetQuestion,
-  type QuestionSheetGenerationInput,
   type QuestionSheetGeneratorConfig,
   type StageReviewInput,
 } from './question-sheet-generator.js'
+import { ASSESSMENT_RUBRICS, ASSESSMENT_RUBRIC_VERSION, questionMaximum, rubricTypeForSheet, tiersForCriterion } from './question-sheet-rubrics.js'
 
 /** 两个阶段各自的表类型：初试 2 张，复试 3 张。 */
 export const STAGE_SHEET_TYPES: Record<InterviewStage, QuestionSheetType[]> = {
   initial: ['hr_screen', 'hiring_department'],
   final: ['business', 'hr', 'boss'],
 }
-
-const GENERATION_BATCH_SIZE = 5
-const GENERATION_CONCURRENCY = 2
 
 export const SHEET_TYPE_LABEL: Record<QuestionSheetType, string> = {
   hr_screen: '人事面试表',
@@ -126,13 +120,14 @@ export interface ApplicationQuestionSheetsView {
 
 export function aggregateQuestionSheet(sheet: InterviewQuestionSheetRecord): QuestionSheetAggregate {
   const scored = sheet.questions.filter((question) => typeof question.finalScore === 'number')
-  const buckets = new Map<string, number[]>()
+  const buckets = new Map<string, Array<{ score: number; max: number }>>()
   for (const question of scored) {
     const key = question.dimension?.trim() || question.category?.trim() || '综合能力'
-    buckets.set(key, [...(buckets.get(key) ?? []), question.finalScore as number])
+    buckets.set(key, [...(buckets.get(key) ?? []), { score: question.finalScore as number, max: questionMaximum(question) }])
   }
-  const ratings = Object.fromEntries([...buckets].map(([key, values]) => [key, Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)]))
-  const score = scored.length ? Math.round(scored.reduce((sum, question) => sum + (question.finalScore as number), 0) / scored.length) : null
+  const normalized = (values: Array<{ score: number; max: number }>) => Math.round(values.reduce((sum, item) => sum + item.score, 0) / values.reduce((sum, item) => sum + item.max, 0) * 100)
+  const ratings = Object.fromEntries([...buckets].map(([key, values]) => [key, normalized(values)]))
+  const score = scored.length ? normalized(scored.map(question => ({ score: question.finalScore as number, max: questionMaximum(question) }))) : null
   return { score, ratings, scoredCount: scored.length, totalCount: sheet.questions.length }
 }
 
@@ -145,11 +140,13 @@ export class QuestionSheetService {
       fetchImpl?: typeof fetch
       resolveAiEnv?: (applicationId: string) => Promise<NodeJS.ProcessEnv>
       logger?: Pick<Console, 'error' | 'warn' | 'log'>
-      /** 测试注入：避免真实模型调用。 */
-      createGenerator?: (config: QuestionSheetGeneratorConfig) => ReturnType<typeof createQuestionSheetGenerator>
       createStageReview?: (config: QuestionSheetGeneratorConfig) => ReturnType<typeof createStageReviewGenerator>
     } = {},
   ) {}
+
+  async listDashboardReviews(interviewIds: string[]) {
+    return this.repository.listDashboardReviews(interviewIds)
+  }
 
   async getApplicationView(applicationId: string): Promise<ApplicationQuestionSheetsView> {
     const { sheets, reviews } = await this.repository.listForApplication(applicationId)
@@ -175,30 +172,25 @@ export class QuestionSheetService {
     return sheet
   }
 
-  /** 生成或重新生成某张表：置为 generating，由后台轮询真正执行。 */
+  /** 创建岗位通用人工考察点评分表。 */
   async requestGeneration(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType, actorId: string): Promise<ApplicationQuestionSheetsView> {
     if (!STAGE_SHEET_TYPES[stage].includes(sheetType)) throw new QuestionSheetGenerationError('INVALID_INPUT', `${stage} 阶段不支持该面试表类型：${sheetType}`)
-    if ((await this.repository.find(applicationId, stage, sheetType))?.status === 'generating') return this.getApplicationView(applicationId)
-    const env = this.dependencies.resolveAiEnv ? await this.dependencies.resolveAiEnv(applicationId) : process.env
-    const model = env.OPENAI_MODEL?.trim() || 'unconfigured'
-    await this.repository.markGenerating(applicationId, stage, sheetType, actorId, model, QUESTION_SHEET_PROMPT_VERSION)
+    const existing = await this.repository.find(applicationId, stage, sheetType)
+    if (existing?.status === 'generating') return this.getApplicationView(applicationId)
+    await this.repository.loadAssessmentRubric(applicationId, stage, sheetType, actorId, this.buildQuestions(stage, sheetType), ASSESSMENT_RUBRIC_VERSION)
     return this.getApplicationView(applicationId)
   }
 
   /**
-   * 面试结束时按本轮题库与实际提问创建评价表；没有回答的题不评分。
+   * 面试结束后准备对应角色的人工考察点，不依赖面试问答。
    */
   async requestAutomaticGeneration(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType, actorId: string): Promise<{ queued: boolean; reason?: string }> {
     if (!STAGE_SHEET_TYPES[stage].includes(sheetType)) throw new QuestionSheetGenerationError('INVALID_INPUT', `${stage} 阶段不支持该面试表类型：${sheetType}`)
-    const pairs = await this.repository.listSheetQaPairs(applicationId, stage, sheetType)
-    if (!pairs.some((pair) => pair.question.trim())) {
-      return { queued: false, reason: '没有找到该阶段的已保存题库或提问记录，本次未生成逐题评价。' }
-    }
     const existing = await this.repository.find(applicationId, stage, sheetType)
     if (existing && (existing.status === 'generating' || existing.status === 'scoring' || existing.status === 'submitted' || existing.status === 'locked' || existing.questions.length > 0)) {
-      return { queued: existing.status === 'generating', reason: existing.status === 'generating' ? '逐题评分正在生成中。' : '已保留该阶段已有的逐题评价，未覆盖原内容。' }
+      return { queued: existing.status === 'generating', reason: existing.status === 'generating' ? '考察点评分表正在载入中。' : '已保留该阶段已有的考察点评分，未覆盖原内容。' }
     }
-    await this.requestGeneration(applicationId, stage, sheetType, actorId)
+    await this.repository.markGenerating(applicationId, stage, sheetType, actorId, 'manual-rubric', ASSESSMENT_RUBRIC_VERSION)
     return { queued: true }
   }
 
@@ -221,20 +213,16 @@ export class QuestionSheetService {
   }
 
   /**
-   * 领取并处理一张待生成的问题表。
-   * 未配置模型时降级：仍按问答生成题目与三级区间，但不写任何 AI 分，并把原因记进 generation_notice。
+   * 领取并处理一张待生成的通用考察点评分表。
    */
   async processPendingGeneration(): Promise<PendingGenerationResult> {
     const claimed = await this.repository.claimPendingGeneration()
     if (!claimed) return { processed: false }
     const { sheetId, applicationId, stage } = claimed
     try {
-      const pairs = await this.repository.listSheetQaPairs(applicationId, stage, claimed.sheetType)
-      if (!pairs.length) throw new QuestionSheetGenerationError('INVALID_INPUT', '该阶段还没有问答记录，无法生成面试表。')
-      const context = await this.repository.getApplicationJobContext(applicationId)
-      const built = await this.buildQuestions(pairs, context, stage, applicationId, claimed.sheetType)
-      await this.repository.replaceQuestions(sheetId, built.questions, { model: built.model, promptVersion: QUESTION_SHEET_PROMPT_VERSION })
-      if (built.notice) await this.repository.markGenerationNotice(sheetId, built.notice)
+      const built = this.buildQuestions(stage, claimed.sheetType)
+      await this.repository.replaceQuestions(sheetId, built, { model: 'manual-rubric', promptVersion: ASSESSMENT_RUBRIC_VERSION })
+      await this.repository.markGenerationNotice(sheetId, '已载入岗位通用考察点，请面试官依据评分标准人工评分。')
       return { processed: true, applicationId }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
@@ -379,85 +367,23 @@ export class QuestionSheetService {
     return { review, breakdown }
   }
 
-  private async buildQuestions(
-    pairs: Awaited<ReturnType<QuestionSheetRepository['listSheetQaPairs']>>,
-    context: Awaited<ReturnType<QuestionSheetRepository['getApplicationJobContext']>>,
-    stage: InterviewStage,
-    applicationId: string,
-    sheetType: QuestionSheetType,
-  ): Promise<{ questions: QuestionWriteInput[]; model: string; notice?: string }> {
-    const base = (generated: GeneratedSheetQuestion | undefined, index: number): Omit<QuestionWriteInput, 'seq'> => ({
-      question: pairs[index]!.question,
-      dimension: pairs[index]!.dimension ?? generated?.dimension ?? '综合能力',
-      category: pairs[index]!.category ?? generated?.category ?? (stage === 'initial' ? 'experience' : 'job_specific'),
-      difficulty: pairs[index]!.difficulty ?? generated?.difficulty ?? 'medium',
-      source: pairs[index]!.source ?? (pairs[index]!.questionEventId ? 'live_question' : 'ai_generated'),
-      questionEventId: pairs[index]!.questionEventId,
-      answerSegmentIds: pairs[index]!.answerSegmentIds,
-      answerText: pairs[index]!.answerText || null,
-      tiers: generated?.tiers ?? DEFAULT_QUESTION_TIERS.map((tier) => ({ ...tier })),
-      aiTier: pairs[index]!.answerText.trim() ? generated?.aiTier ?? null : null,
-      aiScore: pairs[index]!.answerText.trim() ? generated?.aiScore ?? null : null,
-      aiRationale: pairs[index]!.answerText.trim() ? generated?.aiRationale ?? null : null,
-      aiEvidence: pairs[index]!.answerText.trim() ? generated?.aiEvidence ?? [] : [],
-    })
-
-    if (pairs.every(pair => !pair.answerText.trim())) {
-      return { questions: pairs.map((_pair, index) => ({ seq: index + 1, ...base(undefined, index) })), model: 'not-required', notice: '已整理本阶段题库与实际提问；未采集到可用回答，所有 AI 分数留空，可人工补充评价。' }
-    }
-
-    let config: QuestionSheetGeneratorConfig
-    try {
-      config = loadQuestionSheetGeneratorConfig(this.dependencies.resolveAiEnv ? await this.dependencies.resolveAiEnv(applicationId) : process.env)
-    } catch (error: unknown) {
-      if (!(error instanceof QuestionSheetGenerationError) || error.code !== 'AI_NOT_CONFIGURED') throw error
-      return {
-        questions: pairs.map((_pair, index) => ({ seq: index + 1, ...base(undefined, index) })),
-        model: 'unconfigured',
-        notice: '未配置 AI 模型：已按该阶段问答生成题目与三级区间，但没有 AI 默认分。',
-      }
-    }
-
-    const input: QuestionSheetGenerationInput = {
-      stage,
-      sheetType,
-      interviewTitle: context?.jobTitle ?? '',
-      jobTitle: context?.jobTitle ?? '',
-      requirements: context?.requirements ?? [],
-      skills: context?.skills ?? [],
-      pairs: pairs.map((pair) => ({ question: pair.question, answerText: pair.answerText })),
-    }
-    const generator = this.dependencies.createGenerator
-      ? this.dependencies.createGenerator(config)
-      : createQuestionSheetGenerator(config, this.dependencies.fetchImpl ?? fetch)
-    const generated: Array<GeneratedSheetQuestion | undefined> = new Array(pairs.length)
-    const failedBatches: Array<{ start: number; end: number; message: string }> = []
-    const batches = Array.from({ length: Math.ceil(pairs.length / GENERATION_BATCH_SIZE) }, (_, index) => index * GENERATION_BATCH_SIZE)
-    let nextBatch = 0
-    // Bound model output size and concurrency; a failed batch must not discard the real interview record.
-    const runBatch = async (): Promise<void> => {
-      while (nextBatch < batches.length) {
-        const start = batches[nextBatch++]!
-        const batchPairs = input.pairs.slice(start, start + GENERATION_BATCH_SIZE)
-        try {
-          const result = await generator.generate({ ...input, pairs: batchPairs })
-          if (result.length !== batchPairs.length) throw new QuestionSheetGenerationError('MODEL_RESPONSE_INVALID', '模型返回的题目数量与本批题目不一致。')
-          result.forEach((question, index) => { generated[start + index] = question })
-        } catch (error) {
-          if (!(error instanceof QuestionSheetGenerationError) || !['MODEL_HTTP_ERROR', 'MODEL_REQUEST_FAILED', 'MODEL_RESPONSE_INVALID'].includes(error.code)) throw error
-          failedBatches.push({ start: start + 1, end: start + batchPairs.length, message: error.message })
-        }
-      }
-    }
-    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(GENERATION_CONCURRENCY, batches.length) }, runBatch))
-    const rejected = outcomes.find((result) => result.status === 'rejected')
-    if (rejected?.status === 'rejected') throw rejected.reason
-    failedBatches.sort((a, b) => a.start - b.start)
-    const failedCount = failedBatches.reduce((sum, batch) => sum + batch.end - batch.start + 1, 0)
-    const notice = failedCount
-      ? `已保留全部 ${pairs.length} 道题目；其中 ${failedCount} 道未获得 AI 评价（题号 ${failedBatches.map((batch) => `${batch.start}-${batch.end}`).join('、')}），未填入 AI 分数，可人工评分。原因：${failedBatches[0]!.message}`
-      : undefined
-    return { questions: pairs.map((_pair, index) => ({ seq: index + 1, ...base(generated[index], index) })), model: config.model, ...(notice ? { notice } : {}) }
+  private buildQuestions(stage: InterviewStage, sheetType: QuestionSheetType): QuestionWriteInput[] {
+    const group = rubricTypeForSheet(stage, sheetType)
+    return ASSESSMENT_RUBRICS[group].map((criterion, index) => ({
+      seq: index + 1,
+      question: criterion.title,
+      dimension: criterion.title,
+      category: `rubric:${group}:${criterion.id}`,
+      source: 'manual',
+      questionEventId: null,
+      answerSegmentIds: [],
+      answerText: null,
+      tiers: tiersForCriterion(group, criterion),
+      aiTier: null,
+      aiScore: null,
+      aiRationale: null,
+      aiEvidence: [],
+    }))
   }
 }
 

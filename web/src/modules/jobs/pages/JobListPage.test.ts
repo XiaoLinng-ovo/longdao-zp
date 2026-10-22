@@ -45,6 +45,8 @@ describe('JobListPage', () => {
     app.use(router)
     app.mount(root)
     await flush()
+    expect(root.querySelector('.page-header h2')?.textContent).toBe('岗位管理')
+    expect(root.querySelector('.page-header p')).toBeNull()
     expect(root.querySelector('[role="status"]')?.textContent).toContain('需求申请审批已停用')
     expect(root.querySelector('[role="status"]')?.textContent).toContain('录用审批与 Offer 仍正常保留')
     expect(mockedGetJson).not.toHaveBeenCalled()

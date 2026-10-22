@@ -11,6 +11,7 @@ import {
   lockFeedback,
   RECOMMENDATION_LABEL,
   submitFeedback,
+  updateInterviewSchedule,
   type ApiApplication,
   type FeedbackRecommendation,
   type InterviewScheduleData,
@@ -20,7 +21,6 @@ import {
   type ScheduleCandidate,
   type ScheduleJob,
 } from '../api'
-import { createApplication } from '../../candidates/api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { normalizeSearchText } from '../../../shared/utils/search'
 import PageHeader from '../../../shared/components/PageHeader.vue'
@@ -74,6 +74,7 @@ const candidateSearch = ref('')
 const router = useRouter()
 const route = useRoute()
 const arrangingApplicationId = ref('')
+const arrangingInterviewId = ref('')
 const scheduleLoading = ref(false)
 const scheduleError = ref('')
 let scheduleVersion = 0
@@ -103,6 +104,7 @@ const feedbackForm = ref({
   notes: '',
 })
 const showConclude = ref(false)
+const concludeError = ref('')
 const concludeTarget = ref<InterviewView | null>(null)
 const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
 
@@ -121,7 +123,13 @@ const selectedCandidate = computed(() => candidates.value.find((candidate) => ca
 const selectedJob = computed(() => jobs.value.find((job) => job.id === arrangeForm.value.jobId))
 const existingApplication = computed(() => applications.value.find((application) => arrangingApplicationId.value
   ? application.id === arrangingApplicationId.value
-  : application.candidateId === arrangeForm.value.candidateId && application.jobId === arrangeForm.value.jobId))
+  : false))
+const pendingFinalInterviews = computed(() => rows.value.filter((row) => {
+  const isFinal = row.stage === 'final' || (!row.stage && Number.parseInt(row.round, 10) >= 2)
+  const missingStart = row.scheduledStartAt === undefined ? row.scheduledAt === '待安排' : !row.scheduledStartAt
+  return isFinal && row.status === 'scheduled' && missingStart
+}))
+const selectedFinalInterview = computed(() => pendingFinalInterviews.value.find((row) => row.entityId === arrangingInterviewId.value) ?? null)
 
 function clearFlags() { error.value = ''; feedback.value = '' }
 
@@ -139,12 +147,13 @@ async function refresh() {
   }
 }
 
-async function openArrange(applicationId = '') {
+async function openArrange(applicationId = '', interviewId = '') {
   if (acting.value) return
   const version = ++scheduleVersion
   clearFlags()
   scheduleError.value = ''
   arrangingApplicationId.value = applicationId
+  arrangingInterviewId.value = ''
   invitationMode.value = 'online'
   candidateSearch.value = ''
   arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerId: '' }
@@ -157,7 +166,7 @@ async function openArrange(applicationId = '') {
     jobs.value = options.jobs
     applications.value = options.applications
     interviewers.value = options.interviewers
-    if (applicationId) {
+    if (route.query.stage === 'initial' && applicationId && !interviewId) {
       const application = applications.value.find((item) => item.id === applicationId)
       if (!application) throw new Error('未找到该申请或无权访问，请返回简历库刷新后重试。')
       const candidate = candidates.value.find((item) => item.id === application.candidateId)
@@ -168,6 +177,16 @@ async function openArrange(applicationId = '') {
       arrangeForm.value.jobId = application.jobId
       candidateSearch.value = candidateLabel(candidate)
       if (initialInvitation.value) arrangeForm.value.title = '初试'
+    } else {
+      const pending = pendingFinalInterviews.value
+      const target = interviewId
+        ? pending.find((row) => row.entityId === interviewId && (!applicationId || row.applicationId === applicationId))
+        : applicationId
+          ? pending.find((row) => row.applicationId === applicationId)
+          : pending[0]
+      if (!target && (interviewId || applicationId)) throw new Error('未找到该候选人待安排的复试，请刷新面试列表确认最新状态。')
+      arrangingInterviewId.value = target?.entityId ?? ''
+      syncFinalInterviewSelection()
     }
   } catch (cause) {
     if (version === scheduleVersion) scheduleError.value = describeApiFailure(cause, '读取申请失败').message
@@ -182,6 +201,7 @@ function closeArrange() {
   scheduleLoading.value = false
   showArrange.value = false
   arrangingApplicationId.value = ''
+  arrangingInterviewId.value = ''
   clearApplicationQuery()
 }
 
@@ -197,50 +217,81 @@ function syncCandidateFromSearch() {
   if (!selected) arrangeForm.value.jobId = ''
 }
 
+function syncFinalInterviewSelection() {
+  const existingInterviewerId = selectedFinalInterview.value?.interviewerIds[0]
+  arrangeForm.value.interviewerId = interviewers.value.some((item) => item.id === existingInterviewerId) ? existingInterviewerId! : ''
+  arrangeForm.value.scheduledAt = ''
+  arrangeForm.value.location = ''
+  arrangeForm.value.meetingUrl = ''
+  invitationMode.value = 'online'
+}
+
 async function submitArrange() {
   if (acting.value || scheduleLoading.value || scheduleError.value) return
   const form = arrangeForm.value
-  if (!form.candidateId.trim()) { error.value = '请选择候选人'; return }
-  if (!form.jobId.trim()) { error.value = '请选择岗位'; return }
+  const wasInitialInvitation = initialInvitation.value
+  const finalInterview = selectedFinalInterview.value
+  if (initialInvitation.value && !form.candidateId.trim()) { error.value = '未找到简历库中的候选人'; return }
+  if (initialInvitation.value && !form.jobId.trim()) { error.value = '未找到该候选人申请的岗位'; return }
   if (initialInvitation.value) {
     if (!form.scheduledAt) { error.value = '请选择初试开始时间'; return }
     if (invitationMode.value === 'online' && !form.meetingUrl.trim()) { error.value = '请填写线上初试会议链接'; return }
     if (invitationMode.value === 'offline' && !form.location.trim()) { error.value = '请填写线下初试地点'; return }
+  } else {
+    if (!finalInterview) { error.value = '请选择一条通过初试、待安排的复试记录'; return }
+    if (!form.scheduledAt) { error.value = '请选择复试开始时间'; return }
+    if (invitationMode.value === 'online' && !form.meetingUrl.trim()) { error.value = '请填写线上复试会议链接'; return }
+    if (invitationMode.value === 'offline' && !form.location.trim()) { error.value = '请填写线下复试地点'; return }
   }
-  if (!form.title.trim()) form.title = initialInvitation.value ? '初试' : '面试'
+  if (initialInvitation.value && !form.title.trim()) form.title = '初试'
   const interviewer = interviewers.value.find((item) => item.id === form.interviewerId)
   if (!interviewer) { error.value = '请选择系统面试官'; return }
 
   acting.value = true
   clearFlags()
   try {
-    const scheduledStartAt = form.scheduledAt ? new Date(form.scheduledAt).toISOString() : undefined
-    if (arrangingApplicationId.value && (!existingApplication.value || existingApplication.value.status !== 'interviewing')) {
-      throw new Error('原申请已不可安排面试，请返回简历库刷新后重试。')
-    }
-    const application = existingApplication.value ?? await createApplication({ candidateId: form.candidateId, jobId: form.jobId })
-    if (!applications.value.some((item) => item.id === application.id)) applications.value = [...applications.value, application]
-    await createInterview({
-      applicationId: application.id,
-      type: form.type,
-      title: form.title.trim(),
-      scheduledStartAt,
-      location: form.location.trim() || undefined,
-      meetingUrl: form.meetingUrl.trim() || undefined,
-      participants: [{
+    const scheduledStartAt = new Date(form.scheduledAt).toISOString()
+    if (initialInvitation.value) {
+      if (!existingApplication.value || existingApplication.value.status !== 'interviewing') {
+        throw new Error('原申请已不可安排面试，请返回简历库刷新后重试。')
+      }
+      await createInterview({
+        applicationId: existingApplication.value.id,
+        round: 1,
+        type: form.type,
+        title: form.title.trim(),
+        scheduledStartAt,
+        location: form.location.trim() || undefined,
+        meetingUrl: form.meetingUrl.trim() || undefined,
+        participants: [{
+          userId: interviewer.id,
+          name: interviewer.displayName,
+          role: 'interviewer',
+          required: true,
+        }],
+      })
+    } else {
+      const supportParticipants = (finalInterview!.participants ?? []).filter((person) => (person.role ?? 'interviewer') !== 'interviewer')
+      await updateInterviewSchedule(finalInterview!.entityId, {
+        scheduledStartAt,
+        location: invitationMode.value === 'offline' ? form.location.trim() : null,
+        meetingUrl: invitationMode.value === 'online' ? form.meetingUrl.trim() : null,
+        participants: [...supportParticipants, {
         userId: interviewer.id,
         name: interviewer.displayName,
         role: 'interviewer',
         required: true,
-      }],
-    })
+        }],
+      })
+    }
     showArrange.value = false
     arrangingApplicationId.value = ''
+    arrangingInterviewId.value = ''
     clearApplicationQuery()
     candidateSearch.value = ''
     arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerId: '' }
     await refresh()
-    feedback.value = '面试已创建'
+    feedback.value = wasInitialInvitation ? '初试邀约已创建' : '复试已安排'
   } catch (cause) {
     error.value = describeApiFailure(cause, '安排面试失败').message
   } finally {
@@ -297,7 +348,9 @@ async function submitFeedbackForm() {
 }
 
 function openConclude(row: InterviewView) {
+  if (acting.value) return
   clearFlags()
+  concludeError.value = ''
   concludeTarget.value = row
   concludeOutcome.value = 'continue'
   showConclude.value = true
@@ -332,16 +385,21 @@ async function removeInterview(row: InterviewView) {
 async function submitConclude() {
   if (acting.value || !concludeTarget.value) return
   const target = concludeTarget.value
+  const outcome = concludeOutcome.value
   acting.value = true
   clearFlags()
+  concludeError.value = ''
   try {
-    await concludeInterview(target.entityId, concludeOutcome.value)
-    const outcomeLabel = concludeOutcome.value === 'offer' ? '通过，进入 Offer 阶段' : concludeOutcome.value === 'reject' ? '未通过' : '进入下一轮'
-    feedback.value = `${target.candidate} 面试已完成：${outcomeLabel}`
+    await concludeInterview(target.entityId, outcome)
+    const outcomeLabel = outcome === 'offer' ? '通过，进入 Offer 阶段' : outcome === 'reject' ? '未通过' : '进入下一轮'
     showConclude.value = false
     await refresh()
+    feedback.value = `${target.candidate} 面试已完成：${outcomeLabel}`
   } catch (cause) {
-    error.value = describeApiFailure(cause, '完成面试失败').message
+    const failure = describeApiFailure(cause, '完成面试失败，请稍后重试')
+    concludeError.value = failure.code === 'INTERVIEW_FEEDBACK_INCOMPLETE'
+      ? '请先填写并锁定所有面试官的综合反馈，再确认完成面试。可取消此窗口，前往“填写反馈”处理。'
+      : failure.message
   } finally {
     acting.value = false
   }
@@ -351,13 +409,13 @@ onMounted(async () => {
   await refresh()
   if (typeof route.query.applicationId === 'string') await openArrange(route.query.applicationId)
 })
-watch(() => route.query.applicationId, (applicationId) => {
+watch(() => [route.query.applicationId, route.query.stage], ([applicationId]) => {
   if (typeof applicationId === 'string') void openArrange(applicationId)
 })
 </script>
 
 <template>
-  <PageHeader title="面试中心" description="安排面试、收集并锁定面试官反馈，确认面试结论">
+  <PageHeader title="面试中心">
     <div class="inline-actions">
       <button class="btn btn-primary" type="button" @click="openArrange()">安排面试</button>
       <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
@@ -422,6 +480,7 @@ watch(() => route.query.applicationId, (applicationId) => {
     :empty-message="hasFilters ? '没有符合条件的面试，请调整搜索关键词或清除筛选' : undefined"
     :confirming-delete-id="confirmingDeleteId"
     :deleting-interview-id="deletingInterviewId"
+    @arrange="openArrange($event.applicationId, $event.entityId)"
     @feedback="openFeedback"
     @conclude="openConclude"
     @detail="router.push(`/interviews/${$event.entityId}`)"
@@ -432,13 +491,13 @@ watch(() => route.query.applicationId, (applicationId) => {
 
   <div v-if="showArrange" class="overlay" role="presentation" @click.self="closeArrange">
     <div class="dialog arrange-dialog" role="dialog" aria-modal="true">
-      <h3>{{ initialInvitation ? '初试邀约' : '安排面试' }}</h3>
-      <p v-if="arrangingApplicationId" class="muted">正在使用简历筛选通过的原申请，请补充面试信息，不会重新创建申请或重置评分。</p>
+      <h3>{{ initialInvitation ? '初试邀约' : '安排复试' }}</h3>
+      <p v-if="initialInvitation" class="muted">正在使用简历筛选通过的原申请，请补充面试信息，不会重新创建申请或重置评分。</p>
       <div v-if="scheduleLoading" role="status">正在读取申请与面试官…</div>
-      <div v-if="scheduleError" class="error-note" role="alert">{{ scheduleError }} <button class="btn btn-ghost" type="button" @click="openArrange(arrangingApplicationId)">重试</button></div>
+      <div v-if="scheduleError" class="error-note" role="alert">{{ scheduleError }} <button class="btn btn-ghost" type="button" @click="openArrange(arrangingApplicationId, arrangingInterviewId)">重试</button></div>
       <div v-if="error" class="error-note" role="alert">{{ error }}</div>
       <div class="form-grid">
-        <div class="form-field candidate-search-field">
+        <div v-if="initialInvitation" class="form-field candidate-search-field">
           <label>候选人（简历库）</label>
           <input v-model="candidateSearch" :disabled="!!arrangingApplicationId || scheduleLoading" list="schedule-candidate-options" placeholder="输入候选人姓名或编号搜索" @input="syncCandidateFromSearch" />
           <datalist id="schedule-candidate-options">
@@ -446,27 +505,34 @@ watch(() => route.query.applicationId, (applicationId) => {
           </datalist>
           <small v-if="!filteredCandidates.length">没有匹配的简历库候选人</small>
         </div>
-        <div class="form-field">
+        <div v-else class="form-field">
+          <label for="final-interview-select">待安排的复试</label>
+          <select id="final-interview-select" v-model="arrangingInterviewId" :disabled="scheduleLoading || !pendingFinalInterviews.length" @change="syncFinalInterviewSelection">
+            <option value="" disabled>选择已通过初试的候选人</option>
+            <option v-for="row in pendingFinalInterviews" :key="row.entityId" :value="row.entityId">{{ row.candidate }} · {{ row.job }} · {{ row.round }}</option>
+          </select>
+          <small v-if="!pendingFinalInterviews.length && !scheduleLoading">暂无通过初试且待安排复试的候选人</small>
+        </div>
+        <div v-if="initialInvitation" class="form-field">
           <label>岗位</label>
           <select v-model="arrangeForm.jobId" aria-label="岗位" :disabled="!arrangeForm.candidateId || !!arrangingApplicationId || scheduleLoading">
             <option value="" disabled>选择岗位</option>
             <option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.title }}（{{ job.code }}）</option>
           </select>
           <small v-if="selectedJob && existingApplication">该候选人已有此岗位申请，将复用现有申请。</small>
-          <small v-else-if="selectedJob">该候选人尚未投递此岗位，创建面试时会自动创建职位申请。</small>
         </div>
-        <div class="form-field"><label>面试标题</label><input v-model="arrangeForm.title" placeholder="例如：技术一面" /></div>
-        <div class="form-field">
+        <div v-if="initialInvitation" class="form-field"><label>面试标题</label><input v-model="arrangeForm.title" placeholder="初试" /></div>
+        <div v-if="initialInvitation" class="form-field">
           <label>面试类型</label>
           <select v-model="arrangeForm.type"><option v-for="t in interviewTypes" :key="t.value" :value="t.value">{{ t.label }}</option></select>
         </div>
         <div class="form-field"><label>开始时间</label><input v-model="arrangeForm.scheduledAt" type="datetime-local" /></div>
-        <div v-if="initialInvitation" class="form-field"><label>初试方式</label><select v-model="invitationMode" aria-label="初试方式"><option value="online">线上面试</option><option value="offline">线下面试</option></select></div>
-        <div v-if="!initialInvitation || invitationMode === 'offline'" class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
-        <div v-if="!initialInvitation || invitationMode === 'online'" class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
+        <div class="form-field"><label>{{ initialInvitation ? '初试方式' : '复试方式' }}</label><select v-model="invitationMode" :aria-label="initialInvitation ? '初试方式' : '复试方式'"><option value="online">线上面试</option><option value="offline">线下面试</option></select></div>
+        <div v-if="invitationMode === 'offline'" class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
+        <div v-if="invitationMode === 'online'" class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
         <div class="form-field">
           <label>面试官</label>
-          <select v-model="arrangeForm.interviewerId" aria-label="面试官">
+          <select v-model="arrangeForm.interviewerId" aria-label="面试官" :disabled="scheduleLoading || (!initialInvitation && !selectedFinalInterview)">
             <option value="" disabled>选择系统用户</option>
             <option v-for="interviewer in interviewers" :key="interviewer.id" :value="interviewer.id">{{ interviewer.displayName }}{{ interviewer.email ? `（${interviewer.email}）` : '' }}</option>
           </select>
@@ -475,7 +541,7 @@ watch(() => route.query.applicationId, (applicationId) => {
       </div>
       <div class="dialog-buttons">
         <button class="btn btn-ghost" type="button" :disabled="acting" @click="closeArrange">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="acting || scheduleLoading || !!scheduleError" @click="submitArrange">{{ acting ? '提交中...' : '创建面试' }}</button>
+        <button class="btn btn-primary" type="button" :disabled="acting || scheduleLoading || !!scheduleError || (!initialInvitation && !selectedFinalInterview)" @click="submitArrange">{{ acting ? '提交中...' : initialInvitation ? '创建初试邀约' : '确认安排复试' }}</button>
       </div>
     </div>
   </div>
@@ -509,13 +575,14 @@ watch(() => route.query.applicationId, (applicationId) => {
     </div>
   </div>
 
-  <div v-if="showConclude && concludeTarget" class="overlay" role="presentation" @click.self="showConclude = false">
-    <div class="dialog" role="dialog" aria-modal="true">
-      <h3>完成面试</h3>
+  <div v-if="showConclude && concludeTarget" class="overlay" role="presentation" @click.self="!acting && (showConclude = false)">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conclude-dialog-title" :aria-busy="acting">
+      <h3 id="conclude-dialog-title">完成面试</h3>
       <p>{{ concludeTarget.candidate }} · {{ concludeTarget.job }} · {{ concludeTarget.round }}</p>
+      <div v-if="concludeError" class="error-note" role="alert">{{ concludeError }}</div>
       <div class="form-field">
-        <label>面试结论</label>
-        <select v-model="concludeOutcome">
+        <label for="conclude-outcome">面试结论</label>
+        <select id="conclude-outcome" v-model="concludeOutcome" :disabled="acting">
           <option value="continue">进入下一轮</option>
           <option value="offer">通过，进入 Offer</option>
           <option value="reject">未通过</option>

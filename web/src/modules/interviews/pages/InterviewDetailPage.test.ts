@@ -93,7 +93,7 @@ describe('InterviewDetailPage', () => {
 
     expect(vi.mocked(loadWorkflowEvents)).toHaveBeenCalledWith(undefined, 500, 'candidate-1')
     expect(root.querySelector('.interview-summary')).not.toBeNull()
-    expect(root.textContent).toContain('逐题评价与 AI 评分')
+    expect(root.textContent).toContain('考察点评分')
     expect(root.textContent).toContain('填写综合反馈')
     expect(root.textContent).toContain('技术面试')
     expect(root.textContent).toContain('面试官甲')

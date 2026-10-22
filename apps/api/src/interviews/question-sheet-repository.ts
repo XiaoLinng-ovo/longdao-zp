@@ -3,6 +3,7 @@ import { buildActualDialogue, reliableCandidateTurns } from './interview-summary
 import type { LiveSegment } from './live-session-repository.js'
 import type { Pool, PoolClient } from 'pg'
 import { mergeSheetQuestionSources, normalizeSheetQuestion, type SheetQuestionBank } from './question-sheet-input.js'
+import { assessmentCriterion, questionMaximum } from './question-sheet-rubrics.js'
 
 export type QuestionSheetStatus = 'draft' | 'generating' | 'scoring' | 'submitted' | 'locked'
 export type QuestionTierName = 'excellent' | 'pass' | 'below'
@@ -10,6 +11,14 @@ export type QuestionSource = 'live_question' | 'ai_generated' | 'manual'
 export type InterviewStage = 'initial' | 'final'
 export type QuestionSheetType = 'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'
 export type StageDecision = 'advanced' | 'rejected' | 'hired' | 'hold'
+
+export interface DashboardInterviewReview {
+  interviewId: string
+  stage: InterviewStage
+  hasCompletedLive: boolean
+  decision: StageDecision | null
+  sheets: Array<{ sheetType: QuestionSheetType; status: QuestionSheetStatus; totalQuestions: number; scoredQuestions: number }>
+}
 
 /** 阶段综合分的权重：各表 + 录音，和为 1（缺失项在计算时按剩余权重归一）。 */
 export interface StageWeights { sheets: Record<string, number>; recording: number }
@@ -22,6 +31,7 @@ export interface InterviewQuestionRecord {
   question: string
   dimension: string | null
   category: string | null
+  assessmentFocus?: string | null
   difficulty: string | null
   source: QuestionSource
   questionEventId: string | null
@@ -174,12 +184,14 @@ function mapSheetRow(row: Record<string, unknown>): Omit<InterviewQuestionSheetR
 }
 
 function mapQuestionRow(row: Record<string, unknown>): InterviewQuestionRecord {
+  const category = (row.category as string | null) ?? null
   return {
     id: String(row.id),
     seq: Number(row.seq),
     question: String(row.question),
     dimension: (row.dimension as string | null) ?? null,
-    category: (row.category as string | null) ?? null,
+    category,
+    assessmentFocus: assessmentCriterion(category)?.focus ?? null,
     difficulty: (row.difficulty as string | null) ?? null,
     source: String(row.source) as QuestionSource,
     questionEventId: (row.question_event_id as string | null) ?? null,
@@ -260,6 +272,37 @@ export class QuestionSheetNotFoundError extends Error {
 export class QuestionSheetRepository {
   constructor(private readonly pool: Pool) {}
 
+  // IDs must come from the caller's tenant- and department-scoped interview list.
+  async listDashboardReviews(interviewIds: string[]): Promise<DashboardInterviewReview[]> {
+    if (!interviewIds.length) return []
+    const result = await this.pool.query(
+      `SELECT i.id AS interview_id, i.stage, review.decision,
+         EXISTS (SELECT 1 FROM interview_live_sessions live
+           WHERE live.interview_id = i.id AND live.status = 'completed') AS has_completed_live,
+         COALESCE(sheets.items, '[]'::jsonb) AS sheets
+       FROM interviews i
+       JOIN applications app ON app.id = i.application_id AND app.organization_id = i.organization_id
+       LEFT JOIN interview_stage_reviews review ON review.application_id = app.id AND review.stage = i.stage
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object('sheetType', s.sheet_type, 'status', s.status,
+           'totalQuestions', q.total, 'scoredQuestions', q.scored)) AS items
+         FROM interview_question_sheets s
+         CROSS JOIN LATERAL (
+           SELECT COUNT(*)::integer AS total, COUNT(final_score)::integer AS scored
+           FROM interview_questions WHERE sheet_id = s.id
+         ) q
+         WHERE s.application_id = app.id AND s.stage = i.stage
+       ) sheets ON true
+       WHERE i.id = ANY($1::uuid[]) AND i.status <> 'cancelled'`,
+      [interviewIds],
+    )
+    return result.rows.map((row) => ({
+      interviewId: String(row.interview_id), stage: row.stage as InterviewStage,
+      hasCompletedLive: row.has_completed_live === true, decision: row.decision ?? null,
+      sheets: row.sheets as DashboardInterviewReview['sheets'],
+    }))
+  }
+
   /** 读取某应聘某阶段某类型的问题表；不存在时返回 null（是否创建由调用方决定）。 */
   async find(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType): Promise<InterviewQuestionSheetRecord | null> {
     const sheet = await this.pool.query(
@@ -320,19 +363,27 @@ export class QuestionSheetRepository {
     return sheet
   }
 
-  /** 标记为待生成：locked 状态不允许重新生成。 */
+  /** 标记为待生成：未录入人工结果的可编辑表允许重建，已评分或已提交的表不可覆盖。 */
   async markGenerating(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType, actorId: string, model: string, promptVersion: string): Promise<InterviewQuestionSheetRecord> {
-    await this.ensure(applicationId, stage, sheetType)
-    const updated = await this.pool.query(
-      `UPDATE interview_question_sheets
-          SET status = 'generating', source = 'ai', generation_model = $4, prompt_version = $5,
-              generation_error = NULL, generation_notice = NULL, generated_by = $6::uuid, updated_at = now()
-        WHERE application_id = $1::uuid AND stage = $2 AND sheet_type = $3 AND status <> 'locked'
-        RETURNING ${SHEET_COLUMNS}`,
-      [applicationId, stage, sheetType, model, promptVersion, actorId],
-    )
-    if (!updated.rows[0]) throw new QuestionSheetConflictError('问题表已锁定，不能重新生成')
-    return this.ensure(applicationId, stage, sheetType)
+    const existing = await this.ensure(applicationId, stage, sheetType)
+    return this.transaction(async (client) => {
+      // Serialize reloads with manual scoring before checking for saved results.
+      const sheet = await this.lockSheet(client, existing.id)
+      if (sheet.status === 'generating') return this.loadWithExecutor(client, existing.id)
+      const updated = await client.query(
+        `UPDATE interview_question_sheets
+            SET status = 'generating', source = 'manual', generation_model = $4, prompt_version = $5,
+                generation_error = NULL, generation_notice = NULL, generated_by = $6::uuid, updated_at = now()
+          WHERE application_id = $1::uuid AND stage = $2 AND sheet_type = $3
+            AND status NOT IN ('locked', 'submitted')
+            AND NOT EXISTS (SELECT 1 FROM interview_questions q WHERE q.sheet_id = interview_question_sheets.id
+              AND (q.final_score IS NOT NULL OR q.comment IS NOT NULL))
+          RETURNING ${SHEET_COLUMNS}`,
+        [applicationId, stage, sheetType, model, promptVersion, actorId],
+      )
+      if (!updated.rows[0]) throw new QuestionSheetConflictError('已有评分、评语或已提交的面试表不可重新生成')
+      return this.loadWithExecutor(client, existing.id)
+    })
   }
 
   /**
@@ -355,9 +406,34 @@ export class QuestionSheetRepository {
     return row ? { sheetId: String(row.id), applicationId: String(row.application_id), stage: String(row.stage) as InterviewStage, sheetType: String(row.sheet_type) as QuestionSheetType } : null
   }
 
-  /** 写入生成结果：整体替换题目，状态进入 scoring。 */
+  /** Fixed templates are loaded atomically, without waiting for a background job. */
+  async loadAssessmentRubric(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType, actorId: string,
+    questions: QuestionWriteInput[], promptVersion: string): Promise<void> {
+    const existing = await this.ensure(applicationId, stage, sheetType)
+    await this.transaction(async (client) => {
+      await this.lockSheet(client, existing.id)
+      const sheet = await this.loadWithExecutor(client, existing.id)
+      if (sheet.status === 'generating') return
+      if (sheet.status === 'submitted' || sheet.status === 'locked' || sheet.questions.some(question => question.finalScore !== null || question.comment !== null)) {
+        throw new QuestionSheetConflictError('已有评分、评语或已提交的面试表不可重新载入考察点')
+      }
+      await client.query('DELETE FROM interview_questions WHERE sheet_id = $1::uuid', [existing.id])
+      for (const question of questions) await this.insertQuestion(client, existing.id, question)
+      await client.query(`UPDATE interview_question_sheets SET status = 'scoring', source = 'manual',
+        generation_model = 'manual-rubric', prompt_version = $2, generated_by = $3::uuid,
+        generation_error = NULL, generation_notice = NULL, generated_at = now(), updated_at = now()
+        WHERE id = $1::uuid`, [existing.id, promptVersion, actorId])
+    })
+  }
+
+  /** 生成模板：只有未评分、未提交的记录可以替换。 */
   async replaceQuestions(sheetId: string, questions: QuestionWriteInput[], meta: { model: string; promptVersion: string }): Promise<void> {
     await this.transaction(async (client) => {
+      await this.lockSheet(client, sheetId)
+      const sheet = await this.loadWithExecutor(client, sheetId)
+      if (!sheet || sheet.status !== 'generating' || sheet.questions.some(question => question.finalScore !== null || question.comment !== null)) {
+        throw new QuestionSheetConflictError('面试表已存在人工评分或不处于生成状态，未覆盖任何记录')
+      }
       await client.query(`DELETE FROM interview_questions WHERE sheet_id = $1::uuid`, [sheetId])
       for (const question of questions) await this.insertQuestion(client, sheetId, question)
       await client.query(
@@ -394,7 +470,15 @@ export class QuestionSheetRepository {
       const values: unknown[] = [questionId]
       const add = (column: string, value: unknown) => assignments.push(`${column} = $${values.push(value)}`)
       if (patch.finalTier !== undefined) add('final_tier', patch.finalTier)
-      if (patch.finalScore !== undefined) add('final_score', patch.finalScore)
+      if (patch.finalScore !== undefined) {
+        const existing = await client.query(`SELECT category, tiers FROM interview_questions WHERE id = $1::uuid AND sheet_id = $2::uuid`, [questionId, sheetId])
+        if (!existing.rows[0]) throw new QuestionSheetNotFoundError('未找到该考察点')
+        const category = existing.rows[0].category as string | null
+        const tiers = tierArray(existing.rows[0].tiers)
+        const max = category?.startsWith('rubric:') ? Math.max(1, ...tiers.map(tier => tier.max)) : 100
+        if (patch.finalScore !== null && (!Number.isFinite(patch.finalScore) || patch.finalScore < 0 || patch.finalScore > max)) throw new QuestionSheetConflictError(`该考察点得分必须在 0–${max} 分之间`)
+        add('final_score', patch.finalScore)
+      }
       if (patch.comment !== undefined) add('comment', patch.comment)
       assignments.push('scored_by = $' + values.push(actorId) + '::uuid', 'scored_at = now()', 'updated_at = now()')
       const updated = await client.query(
@@ -410,7 +494,8 @@ export class QuestionSheetRepository {
   async addManualQuestion(sheetId: string, input: { question: string; dimension?: string | null; answerText?: string | null; tiers?: QuestionTier[] }): Promise<InterviewQuestionRecord> {
     return this.transaction(async (client) => {
       const sheet = await this.lockSheet(client, sheetId)
-      if (sheet.status === 'locked' || sheet.status === 'generating') throw new QuestionSheetConflictError(`当前状态（${sheet.status}）不能新增题目`)
+      const fixedRubric = await client.query(`SELECT EXISTS (SELECT 1 FROM interview_questions WHERE sheet_id = $1::uuid AND category LIKE 'rubric:%') AS value`, [sheetId])
+      if (sheet.status === 'locked' || sheet.status === 'generating' || fixedRubric.rows[0]?.value === true) throw new QuestionSheetConflictError('固定考察点评分表不能新增题目')
       const next = await client.query<{ next: number }>(`SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM interview_questions WHERE sheet_id = $1::uuid`, [sheetId])
       return this.insertQuestion(client, sheetId, {
         seq: Number(next.rows[0]?.next ?? 1),
@@ -426,7 +511,8 @@ export class QuestionSheetRepository {
   async deleteQuestion(sheetId: string, questionId: string): Promise<void> {
     await this.transaction(async (client) => {
       const sheet = await this.lockSheet(client, sheetId)
-      if (sheet.status === 'locked' || sheet.status === 'generating') throw new QuestionSheetConflictError(`当前状态（${sheet.status}）不能删除题目`)
+      const fixedRubric = await client.query(`SELECT EXISTS (SELECT 1 FROM interview_questions WHERE sheet_id = $1::uuid AND category LIKE 'rubric:%') AS value`, [sheetId])
+      if (sheet.status === 'locked' || sheet.status === 'generating' || fixedRubric.rows[0]?.value === true) throw new QuestionSheetConflictError('固定考察点评分表不能删除考察点')
       await client.query(`DELETE FROM interview_questions WHERE id = $1::uuid AND sheet_id = $2::uuid`, [questionId, sheetId])
     })
   }

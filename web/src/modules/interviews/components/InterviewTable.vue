@@ -10,6 +10,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  arrange: [row: InterviewView]
   feedback: [row: InterviewView]
   conclude: [row: InterviewView]
   detail: [row: InterviewView]
@@ -20,6 +21,12 @@ const emit = defineEmits<{
 
 function rowId(row: InterviewView): string {
   return row.entityId || row.id
+}
+
+function needsFinalSchedule(row: InterviewView): boolean {
+  const isFinal = row.stage === 'final' || (!row.stage && Number.parseInt(row.round, 10) >= 2)
+  const missingStart = row.scheduledStartAt === undefined ? row.scheduledAt === '待安排' : !row.scheduledStartAt
+  return isFinal && row.status === 'scheduled' && missingStart
 }
 </script>
 
@@ -49,7 +56,15 @@ function rowId(row: InterviewView): string {
             <div class="inline-actions">
               <button class="btn btn-ghost" type="button" @click="emit('detail', row)">详情</button>
               <button
-                v-if="row.interviewerOptions.length"
+                v-if="needsFinalSchedule(row)"
+                class="btn btn-primary"
+                type="button"
+                @click="emit('arrange', row)"
+              >
+                安排复试
+              </button>
+              <button
+                v-else-if="row.interviewerOptions.length"
                 class="btn btn-ghost"
                 type="button"
                 @click="emit('feedback', row)"
@@ -58,7 +73,7 @@ function rowId(row: InterviewView): string {
               </button>
               <span v-else class="list-muted">需重排面试官</span>
               <button
-                v-if="row.status === 'scheduled'"
+                v-if="row.status === 'scheduled' && !needsFinalSchedule(row)"
                 class="btn btn-primary"
                 type="button"
                 @click="emit('conclude', row)"

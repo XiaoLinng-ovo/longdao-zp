@@ -58,6 +58,33 @@ describe('actual interview dialogue', () => {
 })
 
 describe('evidence grounded semantic summary', () => {
+  for (const outcome of ['advance', 'reject', 'hold'] as const) {
+    it(`preserves evidenced strengths, concerns and ${outcome} advice without changing the application result`, () => {
+      const evidence = [{ pairId: 'project-q', quote: '独立完成需求访谈和接口开发' }]
+      const strengths = [{ text: '自述具备独立开发经验。', evidence }]
+      const concerns = [{ text: '项目描述缺少量化成果。', evidence }]
+      const recommendation = { outcome, text: '根据岗位要求进一步评估项目经验。', evidence }
+      const result = parseInterviewSummary({ ...output(), strengths, concerns, recommendation }, base())
+      assert.deepEqual(result.strengths, strengths)
+      assert.deepEqual(result.concerns, concerns)
+      assert.deepEqual(result.recommendation, recommendation)
+      assert.deepEqual(result.pairs, parseInterviewSummary(output(), base()).pairs)
+      assert.equal(result.advisoryOnly, true)
+      assert.equal(result.applicationStatusMutation, 'none')
+    })
+  }
+  it('allows an evidence-insufficient hold but rejects unsupported advance or rejection advice', () => {
+    const value = { ...output(), dimensions: [], recommendation: { outcome: 'hold', text: '证据不足，建议补充面试。', evidence: [] } }
+    assert.equal(parseInterviewSummary(value, base()).recommendation?.outcome, 'hold')
+    for (const outcome of ['advance', 'reject']) {
+      assert.throws(() => parseInterviewSummary({ ...value, recommendation: { ...value.recommendation, outcome } }, base()))
+    }
+  })
+  it('rejects invented recommendation evidence', () => {
+    assert.throws(() => parseInterviewSummary({ ...output(), recommendation: {
+      outcome: 'advance', text: '建议推进。', evidence: [{ pairId: 'project-q', quote: '带领百人团队' }],
+    } }, base()))
+  })
   it('accepts semantic dimension names but computes overall from evidenced dimensions, not model overall', () => {
     const result = parseInterviewSummary(output(), base())
     assert.equal(result.overallScore, 75)
@@ -180,6 +207,17 @@ describe('summary request resilience and compact classifications', () => {
       assert.notEqual(signals[0], signals[1])
     })
   }
+  it('retries once when the model response fails evidence validation', async () => {
+    let attempts = 0
+    const invalid = compact()
+    invalid.dimensions[0]!.evidence = []
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      attempts++
+      return reply(attempts === 1 ? invalid : compact())
+    }).generate(base(), job)
+    assert.equal(attempts, 2)
+    assert.equal(result.overallScore, 75)
+  })
   it('bounds repeated timeouts to two attempts with a useful error', async () => {
     let attempts = 0
     await assert.rejects(createInterviewSummaryGenerator(config, async () => {
@@ -204,10 +242,10 @@ describe('summary request resilience and compact classifications', () => {
 })
 
 describe('summary background processing', () => {
-  function fixture(rows = segments(), fetcher: typeof fetch = async () => reply(output()), failRead = false) {
+  function fixture(rows = segments(), fetcher: typeof fetch = async () => reply(output()), failRead = false, previousReport: ReturnType<typeof base> | null = null) {
     const saved: Array<{ report: ReturnType<typeof base>; error: string | null }> = []
     let resolved = 0
-    const job = { sessionId: 'session', applicationId: 'app', revision: 3, claim: 'claim' }
+    const job = { sessionId: 'session', applicationId: 'app', revision: 3, claim: 'claim', previousReport }
     const repository = { claim: async () => job, save: async (_job: unknown, report: ReturnType<typeof base>, error: string | null) => { saved.push({ report, error }); return true }, latest: async () => null, request: async () => { throw new Error('unused') } }
     const service = new InterviewSummaryService(repository, { get: async () => { if (failRead) throw new Error('读取转写暂时失败'); return { session: {} as never, segments: rows } } },
       { getApplicationJobContext: async () => ({ candidateName: '测试候选人', jobTitle: '人事', requirements: [], skills: [] }) },
@@ -243,6 +281,14 @@ describe('summary background processing', () => {
     assert.equal(f.saved[0]!.report.overallScore, null)
     assert.deepEqual(f.saved[0]!.report.transcript, base().transcript)
     assert.equal(f.saved[0]!.report.pairs.length, 2)
+  })
+  it('preserves an existing evidenced report when regeneration fails', async () => {
+    const previous = { ...base(), summary: '之前已经生成的面试结论。', overallScore: 86 }
+    const f = fixture(segments(), async () => new Response('upstream down', { status: 503 }), false, previous)
+    await f.service.processPending()
+    assert.ok(f.saved[0]!.error)
+    assert.equal(f.saved[0]!.report.summary, previous.summary)
+    assert.equal(f.saved[0]!.report.overallScore, 86)
   })
   it('evaluates candidate-only substantive speech instead of requiring a paired question', async () => {
     const rows = [segment('intro', 'candidate', '我独立完成项目开发。', 0)]

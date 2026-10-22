@@ -4,7 +4,7 @@ import LiveQuestionBank from './LiveQuestionBank.vue'
 import type { GeneratedInterviewQuestion } from '../api'
 
 const props = defineProps<{
-  group: 'ai' | 'hr' | 'department'
+  group: 'ai' | 'hr' | 'department' | 'boss'
   candidate: string
   job: string
   questions: GeneratedInterviewQuestion[]
@@ -15,7 +15,7 @@ const props = defineProps<{
   disabled: boolean
 }>()
 const emit = defineEmits<{ close: []; select: [question: string, source: 'manual' | 'ai_adopted'] }>()
-const title = computed(() => ({ ai: 'AI简历题', hr: 'HR面试表', department: '用人部门面试表' })[props.group])
+const title = computed(() => ({ ai: 'AI简历题', hr: 'HR面试表', department: '用人部门面试表', boss: 'BOSS面试表' })[props.group])
 const dialog = ref<HTMLElement>()
 const closeButton = ref<HTMLButtonElement>()
 const previousFocus = document.activeElement as HTMLElement | null

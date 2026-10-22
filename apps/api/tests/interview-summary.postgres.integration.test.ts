@@ -50,6 +50,13 @@ test('summary migration, queue, corrections and score preference work in isolate
     assert.deepEqual(await sheets.listCompletedLiveRecordingScores(app), [{ stage: 'initial', score: 72 }])
     await summaries.request(interview, actor)
     assert.equal((await summaries.latest(interview))!.report!.overallScore, 72, 'regeneration preserves the previous report while pending')
+    const failedRegeneration = await summaries.claim(); assert.ok(failedRegeneration)
+    assert.equal(await summaries.save(failedRegeneration, createUnscoredSummary([]), '模型证据校验失败'), true)
+    const afterFailedRegeneration = (await summaries.latest(interview))!
+    assert.equal(afterFailedRegeneration.status, 'ready')
+    assert.equal(afterFailedRegeneration.report!.overallScore, 72, 'failed regeneration preserves the previous scored report')
+    assert.match(afterFailedRegeneration.error!, /证据校验失败/)
+    await summaries.request(interview, actor)
     const outdated = await summaries.claim(); assert.ok(outdated)
     await client.query("UPDATE interview_live_segments SET role='interviewer',role_confidence=1 WHERE id=$1", [segment])
     const corrected = (await summaries.latest(interview))!

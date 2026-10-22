@@ -3,6 +3,7 @@ import { apiClient } from '../../../shared/api'
 export interface SummaryEvidence { pairId?: string; turnId?: string; quote: string }
 export interface SummaryFinding { text: string; evidence: SummaryEvidence[] }
 export interface SummaryDimension extends SummaryFinding { name: string; score: number }
+export interface SummaryRecommendation extends SummaryFinding { outcome: 'advance' | 'reject' | 'hold' }
 export interface ActualInterviewPair {
   id: string; question: string; answer: string; questionSegmentIds: string[]; answerSegmentIds: string[]
   startMs: number; endMs: number; kind: 'assessment' | 'logistics' | 'unreviewed'
@@ -11,6 +12,7 @@ export interface TranscriptTurn { id: string; segmentIds: string[]; role: 'inter
 export interface InterviewSummaryReport {
   version: 'actual-dialogue-v1' | 'whole-dialogue-v2'; generatedAt: string; model: string | null; overallScore: number | null; summary: string
   dimensions: SummaryDimension[]; strengths: SummaryFinding[]; concerns: SummaryFinding[]; unassessed: string[]; warnings: string[]
+  recommendation?: SummaryRecommendation | null
   pairs: ActualInterviewPair[]; transcript: TranscriptTurn[]; advisoryOnly: true; applicationStatusMutation: 'none'
 }
 export interface InterviewSummaryView {

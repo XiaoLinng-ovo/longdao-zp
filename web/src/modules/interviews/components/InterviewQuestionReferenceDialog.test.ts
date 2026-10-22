@@ -34,4 +34,17 @@ describe('reference dialog lifecycle', () => {
     expect(closes).toBe(1)
     root.querySelector<HTMLElement>('.reference-overlay')!.click(); expect(closes).toBe(2)
   })
+
+  it('supports the BOSS interview sheet reference label', async () => {
+    app?.unmount()
+    app = createApp(InterviewQuestionReferenceDialog, {
+      group: 'boss', candidate: '测试候选人', job: '人事专员', questions: [], currentQuestion: '', round: 2,
+      engine: '', followUps: [], disabled: false, onClose: () => { closes++ },
+    })
+    app.mount(root)
+    await nextTick()
+    expect(root.querySelector('[role="dialog"]')?.textContent).toContain('BOSS面试表')
+    expect(root.querySelector('[data-group="boss"]')).not.toBeNull()
+    expect(root.querySelector('[data-group="department"]')).toBeNull()
+  })
 })

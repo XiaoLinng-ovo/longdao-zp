@@ -35,15 +35,17 @@ try{
  check('anonymous access denied',await request(prefix,null),401)
  check('ordinary member denied',await request(prefix,member),403,'WORKSPACE_ADMIN_REQUIRED')
  check('stale workspace denied',await request(prefix,owner,'GET',undefined,undefined,other),409,'WORKSPACE_CONTEXT_CHANGED')
- check('enterprise admin has catalog without platform grants',await request(),200)
- const key=randomUUID(),input={productCode:'team_test_v1',channel:'mock_wechat',expectedVersion:1}
+ const catalog=await request();check('enterprise admin has catalog without platform grants',catalog,200)
+ assert.deepEqual(catalog.body.data.catalog.map(p=>[p.amountFen,p.durationMonths,p.allModules]),[[250000,12,true],[130000,6,true],[25800,1,true]])
+ const key=randomUUID(),input={productCode:'all_modules_year_v1',channel:'mock_wechat',expectedVersion:1}
  check('bad origin blocked',await request(prefix+'/orders',owner,'POST',input,key,org,{origin:'http://untrusted.invalid'}),403,'CSRF_ORIGIN_MISMATCH')
  check('bad CSRF blocked',await request(prefix+'/orders',owner,'POST',input,key,org,{'x-csrf-token':'wrong'}),403,'CSRF_TOKEN_INVALID')
  check('client price rejected',await request(prefix+'/orders',owner,'POST',{...input,amountFen:1},key),400,'INVALID_ORDER')
  check('real payment channel blocked',await request(prefix+'/orders',owner,'POST',{...input,channel:'wechat'},key),400,'LIVE_PAYMENT_DISABLED')
  const created=await request(prefix+'/orders',owner,'POST',input,key);check('create immutable simulation order',created,200);const id=created.body.data.id
+ assert.equal(created.body.data.amountFen,250000);assert.equal(created.body.data.durationMonths,12);assert.equal(created.body.data.durationDays,null);assert.equal(created.body.data.allModules,true)
  const replay=await request(prefix+'/orders',owner,'POST',input,key);check('durable order replay',replay,200);assert.equal(replay.body.data.id,id)
- check('key input conflict',await request(prefix+'/orders',owner,'POST',{...input,productCode:'growth_test_v1'},key),409,'ORDER_KEY_CONFLICT')
+ check('key input conflict',await request(prefix+'/orders',owner,'POST',{...input,productCode:'all_modules_half_year_v1'},key),409,'ORDER_KEY_CONFLICT')
  const action=prefix+'/orders/'+id+'/simulate'
  check('foreign enterprise cannot act on order',await request(action,outsider,'POST',{kind:'success'},undefined,other),404,'ORDER_NOT_FOUND')
  check('invalid simulation action rejected',await request(action,owner,'POST',{kind:'fake'}),400,'INVALID_ACTION')

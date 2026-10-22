@@ -15,10 +15,12 @@ export interface ActualInterviewPair {
 export interface SummaryEvidence { pairId?: string; turnId?: string; quote: string }
 export interface SummaryFinding { text: string; evidence: SummaryEvidence[] }
 export interface SummaryDimension extends SummaryFinding { name: string; score: number }
+export interface SummaryRecommendation extends SummaryFinding { outcome: 'advance' | 'reject' | 'hold' }
 export interface InterviewSummaryReport {
   version: 'actual-dialogue-v1' | 'whole-dialogue-v2'; generatedAt: string; model: string | null
   overallScore: number | null; summary: string; dimensions: SummaryDimension[]
   strengths: SummaryFinding[]; concerns: SummaryFinding[]; unassessed: string[]; warnings: string[]
+  recommendation?: SummaryRecommendation | null
   pairs: ActualInterviewPair[]; transcript: TranscriptTurn[]
   advisoryOnly: true; applicationStatusMutation: 'none'
 }
@@ -125,8 +127,16 @@ export function parseInterviewSummary(value: unknown, base: InterviewSummaryRepo
   })
   if (new Set(dimensions.map(row => row.name)).size !== dimensions.length) invalid('总结包含重复评分维度。')
   const overallScore = dimensions.length ? Math.round(dimensions.reduce((sum, row) => sum + row.score, 0) / dimensions.length) : null
+  let recommendation: SummaryRecommendation | null = null
+  if (value.recommendation != null) {
+    const row = value.recommendation
+    if (!record(row) || !['advance', 'reject', 'hold'].includes(String(row.outcome)) || !text(row.text)) return invalid('面试推荐建议格式无效。')
+    const evidence = row.outcome === 'hold' && Array.isArray(row.evidence) && !row.evidence.length ? [] : evidenceOf(row.evidence)
+    if (row.outcome !== 'hold' && !dimensions.length) return invalid('缺少有效考察依据，不能给出推进或淘汰建议。')
+    recommendation = { outcome: row.outcome as SummaryRecommendation['outcome'], text: row.text.trim(), evidence }
+  }
   return { ...base, transcript, pairs, overallScore, summary: value.summary.trim(), dimensions, strengths: findings(value.strengths),
-    concerns: findings(value.concerns), unassessed: strings(value.unassessed) }
+    concerns: findings(value.concerns), unassessed: strings(value.unassessed), recommendation }
 }
 
 class SummaryRequestError extends QuestionSheetGenerationError {
@@ -173,7 +183,8 @@ function expandSummaryResponse(value: unknown, turnIds: Map<string, string>, pai
     }) : row.evidence,
   })) : rows
   return { ...value, turns: expand(value.turnKinds, turns), pairs: expand(value.pairKinds, pairs),
-    dimensions: findings(value.dimensions), strengths: findings(value.strengths), concerns: findings(value.concerns) }
+    dimensions: findings(value.dimensions), strengths: findings(value.strengths), concerns: findings(value.concerns),
+    recommendation: value.recommendation == null ? null : (findings([value.recommendation]) as unknown[])[0] }
 }
 
 export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorConfig, fetchImpl: typeof fetch = fetch,
@@ -181,7 +192,7 @@ export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorCo
   return { async generate(base: InterviewSummaryReport, job: { jobTitle: string; requirements: string[]; skills: string[] }): Promise<InterviewSummaryReport> {
     const { input, turnIds, pairIds } = summaryModelInput(base, job)
     if (input.length > 160000) throw new QuestionSheetGenerationError('INVALID_INPUT', '本场实际问答超出模型安全处理长度，已保留完整转写；请分场核实，未截断或生成片面评分。')
-    const attempt = async (): Promise<InterviewSummaryReport> => {
+    const attempt = async (correction?: string): Promise<InterviewSummaryReport> => {
       let response: Response
       let envelope: any
       const signal = AbortSignal.timeout(config.timeoutMs)
@@ -196,9 +207,11 @@ export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorCo
               '逐段阅读完整转写，在turnKinds中按assessment/logistics/unreviewed分组列出每段id，每个id必须恰好出现一次；pairKinds同样分类全部问答id。pairs通过questionTurnIds/answerTurnIds引用完整转写。候选人的主动介绍、临时追问、跨题补充和未与提问机械配对的发言均按整场语义理解，不要求问题或顺序与面试表一致，不得因未配对而忽略。流程安排中顺带提供的岗位能力证据应按其实际语义分类。',
               '先形成整场总结，再跨多轮对话综合实际已考察的岗位相关维度总体评价（每维0-100），不是逐题分数平均。所有生成的面试表、题库与标准答案仅供人工参考，不是必答清单。不按参考表覆盖率评分，不问的内容记unassessed，不按0分、不扣分，也不视为具备。',
               '只允许引用evidenceTurnIds内且分类为assessment的候选人转写原文作为评分、优势和风险依据。每条evidence包含turnId及该段中逐字连续的quote，不能拼接、改写引用或引用面试官和待确认说话人的话。候选人自述只表述为自述，不视为已经核验的事实。',
-              '如果回答没有实质内容或证据不足，dimensions/strengths/concerns可以为空，不要凑分。不要给录用淘汰决策，不要输出overallScore（由服务端对有证据的维度等权计算）。',
-              '使用输入的短id，不要复述全部转写。仅返回JSON：{"summary":"中文整场总结","turnKinds":{"assessment":["t1"],"logistics":[],"unreviewed":[]},"pairKinds":{"assessment":["p1"],"logistics":[],"unreviewed":[]},"dimensions":[{"name":"维度","score":80,"text":"整场综合评价理由","evidence":[{"turnId":"t2","quote":"候选人发言原文"}]}],"strengths":[{"text":"优势","evidence":[{"turnId":"t2","quote":"发言原文"}]}],"concerns":[{"text":"风险","evidence":[{"turnId":"t2","quote":"发言原文"}]}],"unassessed":["尚未考察或待核实事项"]}。',
-            ].join('\n') }, { role: 'user', content: input },
+              'summary应总结岗位匹配度、实际工作深度和沟通表现，不要逐题复述问答。strengths总结应聘者已体现的优势；concerns总结有原文依据的劣势与待提升项，不能把未考察内容直接当成劣势，也不能根据受保护个人特征作评价。',
+              'recommendation只给供人工参考的下一步建议：advance（建议推进）、reject（不建议推进）、hold（待补充评估），text解释与岗位要求相关的理由，evidence引用候选人原文。证据不足时必须hold，允许evidence为空。不要仅按分数阈值给建议，不作正式录用淘汰决策或改变状态。',
+              '如果回答没有实质内容或证据不足，dimensions/strengths/concerns可以为空，不要凑分。不要输出overallScore（由服务端对有证据的维度等权计算）。',
+              '使用输入的短id，不要复述全部转写。仅返回JSON：{"summary":"中文整场总结","turnKinds":{"assessment":["t1"],"logistics":[],"unreviewed":[]},"pairKinds":{"assessment":["p1"],"logistics":[],"unreviewed":[]},"dimensions":[{"name":"维度","score":80,"text":"整场综合评价理由","evidence":[{"turnId":"t2","quote":"候选人发言原文"}]}],"strengths":[{"text":"优势","evidence":[{"turnId":"t2","quote":"发言原文"}]}],"concerns":[{"text":"劣势与待提升项","evidence":[{"turnId":"t2","quote":"发言原文"}]}],"recommendation":{"outcome":"hold","text":"建议补充评估的理由","evidence":[]},"unassessed":["尚未考察或待核实事项"]}。',
+            ].join('\n') + (correction ? `\n上次输出未通过校验：${correction}。请重新检查分类和证据引用；只引用允许的候选人考察发言原文，不能确认的评价留空，并确保完整分类所有转写及提问。` : '') }, { role: 'user', content: input },
           ] }),
         })
         if (!response.ok) throw new SummaryRequestError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, '面试总结模型'),
@@ -222,9 +235,16 @@ export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorCo
         throw new QuestionSheetGenerationError('MODEL_RESPONSE_INVALID', '面试总结不是有效且完整的JSON。', error)
       }
     }
+    let validationRetries = 0
+    let correction: string | undefined
     for (let index = 0; ; index++) {
-      try { return await attempt() }
+      try { return await attempt(correction) }
       catch (error) {
+        if (error instanceof QuestionSheetGenerationError && error.code === 'MODEL_RESPONSE_INVALID' && validationRetries < 1) {
+          validationRetries++
+          correction = error.message
+          continue
+        }
         if (!(error instanceof SummaryRequestError) || !error.retryable || index >= 1) throw error
         await wait(1000)
       }
@@ -236,5 +256,5 @@ export function createUnscoredSummary(segments: LiveSegment[], model: string | n
   const dialogue = buildActualDialogue(segments)
   return { version: 'whole-dialogue-v2', generatedAt: new Date().toISOString(), model, overallScore: null,
     summary: '已整理完整转写和实际问答，尚未形成有原文证据的总体评分。', dimensions: [], strengths: [], concerns: [],
-    unassessed: [], ...dialogue, advisoryOnly: true, applicationStatusMutation: 'none' }
+    unassessed: [], recommendation: null, ...dialogue, advisoryOnly: true, applicationStatusMutation: 'none' }
 }

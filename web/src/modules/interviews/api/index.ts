@@ -61,13 +61,16 @@ export interface SubmitFeedbackInput {
 export interface InterviewView {
   id: string
   entityId: string
+  stage?: 'initial' | 'final'
   candidate: string
   job: string
   round: string
   scheduledAt: string
+  scheduledStartAt?: string
   interviewers: string[]
   interviewerIds: string[]
   interviewerOptions: InterviewerParticipantOption[]
+  participants?: ApiInterview['participants']
   feedbackStatus: Interview['feedbackStatus'] | 'submitted'
   status: string
   applicationId: string
@@ -105,13 +108,16 @@ function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: M
   return {
     id: row.code || row.id,
     entityId: row.id,
+    stage: row.stage ?? (row.round >= 2 ? 'final' : 'initial'),
     candidate: candidates.get(app.candidateId) || app.candidateId,
     job: jobs.get(app.jobId) || app.jobId,
     round: `${row.round} 轮`,
     scheduledAt: row.scheduledStartAt ? new Date(row.scheduledStartAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '待安排',
+    scheduledStartAt: row.scheduledStartAt,
     interviewers: row.participants.map((p) => p.name || p.userId),
     interviewerIds: interviewerOptions.map((participant) => participant.id),
     interviewerOptions,
+    participants: row.participants,
     feedbackStatus: row.feedbackStatus === 'locked' || row.status === 'completed' ? 'completed' : row.feedbackStatus === 'submitted' ? 'submitted' : 'scheduled',
     status: row.status,
     applicationId: row.applicationId,
@@ -182,9 +188,10 @@ export interface InterviewScheduleUpdate {
   scheduledEndAt?: string | null
   location?: string | null
   meetingUrl?: string | null
+  participants?: ApiInterview['participants']
 }
 
-export async function updateInterviewSchedule(id: string, input: InterviewScheduleUpdate): Promise<Pick<ApiInterview, 'scheduledStartAt' | 'scheduledEndAt' | 'location' | 'meetingUrl' | 'updatedAt'>> {
+export async function updateInterviewSchedule(id: string, input: InterviewScheduleUpdate): Promise<Pick<ApiInterview, 'scheduledStartAt' | 'scheduledEndAt' | 'location' | 'meetingUrl' | 'updatedAt'> & { participants?: ApiInterview['participants'] }> {
   return (await apiClient.patchJson<ApiInterview>(`/interviews/${id}`, input)).data
 }
 

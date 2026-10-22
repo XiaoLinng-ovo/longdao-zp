@@ -5,9 +5,10 @@ export interface InterviewScheduleUpdate {
   scheduledEndAt?: string | null
   location?: string | null
   meetingUrl?: string | null
+  participants?: Array<{ userId: string; name?: string; role: 'interviewer' | 'coordinator' | 'observer'; required: boolean }>
 }
 
-const fields = ['scheduledStartAt', 'scheduledEndAt', 'location', 'meetingUrl'] as const
+const fields = ['scheduledStartAt', 'scheduledEndAt', 'location', 'meetingUrl', 'participants'] as const
 
 function invalid(message: string): never {
   throw new RecruitingWorkflowError('VALIDATION_ERROR', message, 400)
@@ -21,7 +22,7 @@ function timestamp(value: string, label: string): string {
   return new Date(value).toISOString()
 }
 
-export function prepareInterviewScheduleUpdate(current: { status: string; scheduledStartAt?: string | null; scheduledEndAt?: string | null; location?: string | null; meetingUrl?: string | null }, input: unknown): InterviewScheduleUpdate {
+export function prepareInterviewScheduleUpdate(current: { status: string; scheduledStartAt?: string | null; scheduledEndAt?: string | null; location?: string | null; meetingUrl?: string | null; participants?: Array<{ userId: string; name?: string; role: string; required: boolean }> }, input: unknown): InterviewScheduleUpdate {
   if (current.status !== 'scheduled') throw new RecruitingWorkflowError('INTERVIEW_NOT_EDITABLE', '已完成或已取消的面试不能修改安排')
   if (!input || typeof input !== 'object' || Array.isArray(input)) invalid('面试安排必须是对象')
   if (Object.keys(input).some((key) => !fields.includes(key as typeof fields[number]))) invalid('只允许修改面试时间、地点和会议链接')
@@ -29,6 +30,24 @@ export function prepareInterviewScheduleUpdate(current: { status: string; schedu
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(input, field)) continue
     const value = (input as Record<string, unknown>)[field]
+    if (field === 'participants') {
+      if (!Array.isArray(value) || !value.length) invalid('至少需要一名面试官')
+      const participants = value.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) invalid('面试官信息无效')
+        const candidate = item as Record<string, unknown>
+        if (Object.keys(candidate).some((key) => !['userId', 'name', 'role', 'required'].includes(key))) invalid('面试官信息无效')
+        const userId = typeof candidate.userId === 'string' ? candidate.userId.trim() : ''
+        const role = candidate.role ?? 'interviewer'
+        if (!userId || !['interviewer', 'coordinator', 'observer'].includes(String(role))) invalid('面试官信息无效')
+        if (candidate.name !== undefined && typeof candidate.name !== 'string') invalid('面试官姓名必须是文本')
+        if (candidate.required !== undefined && typeof candidate.required !== 'boolean') invalid('面试官必需状态无效')
+        const name = typeof candidate.name === 'string' ? candidate.name.trim() : ''
+        return { userId, ...(name ? { name } : {}), role: role as 'interviewer' | 'coordinator' | 'observer', required: candidate.required !== false }
+      })
+      if (!participants.some((participant) => participant.role === 'interviewer')) invalid('至少需要一名面试官')
+      if (JSON.stringify(participants) !== JSON.stringify(current.participants ?? [])) patch.participants = participants
+      continue
+    }
     if (value !== null && typeof value !== 'string') invalid('面试安排字段必须是文本或空值')
     const text = value?.trim() || null
     if (field === 'scheduledStartAt') {

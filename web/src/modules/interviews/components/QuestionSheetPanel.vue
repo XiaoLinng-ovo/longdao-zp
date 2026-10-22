@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import StageScoreFormula from './StageScoreFormula.vue'
+import AssessmentCriterionRow from './AssessmentCriterionRow.vue'
 import {
   STAGE_DECISION_LABEL,
   STAGE_RECOMMENDATION_LABEL,
@@ -155,10 +156,13 @@ async function generate(sheetType: QuestionSheetType): Promise<void> {
   busy.value = `generate:${sheetType}`
   clearFlags()
   try {
-    applyView(await generateQuestionSheet(props.applicationId, stage.value, sheetType))
-    notice.value = `${SHEET_TYPE_LABEL[sheetType]}已提交生成，正在整理本阶段题库与实际问答，完成后自动刷新。`
+    const requestedStage = stage.value
+    const next = await generateQuestionSheet(props.applicationId, requestedStage, sheetType)
+    applyView(next)
+    const pending = next.sheets.some(sheet => sheet.stage === requestedStage && sheet.sheetType === sheetType && sheet.status === 'generating')
+    notice.value = pending ? '正在载入通用考察点与评分标准。' : `${SHEET_TYPE_LABEL[sheetType]}考察点已载入，可以开始人工评分。`
   } catch (cause) {
-    error.value = describeApiFailure(cause, '生成面试表失败').message
+    error.value = describeApiFailure(cause, '载入考察点评分表失败').message
   } finally {
     busy.value = ''
   }
@@ -186,6 +190,26 @@ function tierOf(question: ApiInterviewQuestion): QuestionTier[] {
 
 function editable(sheet: ApiQuestionSheet): boolean {
   return sheet.status === 'scoring'
+}
+
+function isRubric(question: ApiInterviewQuestion): boolean {
+  return question.category?.startsWith('rubric:') ?? false
+}
+
+function rubricTotal(sheet: ApiQuestionSheet): number {
+  return sheet.questions.reduce((sum, question) => sum + Math.max(1, ...tierOf(question).map(tier => tier.max)), 0)
+}
+
+function rubricScore(sheet: ApiQuestionSheet): number {
+  return sheet.questions.reduce((sum, question) => sum + (question.finalScore ?? 0), 0)
+}
+
+function canRegenerate(sheet: ApiQuestionSheet | null): boolean {
+  if (!sheet) return true
+  if (['generating', 'submitted', 'locked'].includes(sheet.status)) return false
+  return !sheet.questions.some(
+    (question) => question.finalScore !== null || question.comment !== null,
+  )
 }
 
 function scoreValue(question: ApiInterviewQuestion): number | '' {
@@ -231,8 +255,9 @@ async function commitScore(sheet: ApiQuestionSheet, question: ApiInterviewQuesti
   const raw = scoreInputs.value[question.id]
   if (raw === undefined) return
   const next = raw === '' ? null : Number(raw)
-  if (next !== null && (!Number.isFinite(next) || next < 0 || next > 100)) {
-    error.value = '分数需在 0-100 之间'
+  const maxScore = Math.max(1, ...tierOf(question).map(tier => tier.max))
+  if (next !== null && (!Number.isFinite(next) || next < 0 || next > maxScore)) {
+    error.value = `分数需在 0-${maxScore} 之间`
     return
   }
   if (next === question.finalScore) return
@@ -416,7 +441,7 @@ onUnmounted(stopPolling)
   <section class="form-panel sheet-panel">
     <div class="sheet-panel-head">
       <p class="list-muted sheet-panel-hint">
-        所有生成的面试表和题目仅供人工参考；录音 AI 分依据整场实际对话的语义与证据，未问到的参考题不扣分。
+        按面试角色展示通用考察点与评分区间，由面试官依据交流表现人工评分；面试室内 AI 生成的面试表保持不变。
       </p>
       <div class="inline-actions">
         <button
@@ -433,7 +458,7 @@ onUnmounted(stopPolling)
       </div>
     </div>
 
-    <div v-if="loading" class="loading-note">正在加载面试问题表...</div>
+    <div v-if="loading" class="loading-note">正在加载考察点评分表...</div>
     <div v-else-if="error" class="error-note">{{ error }}</div>
     <template v-else-if="view">
       <div v-if="notice" class="success-note">{{ notice }}</div>
@@ -471,17 +496,18 @@ onUnmounted(stopPolling)
           </div>
           <div class="sheet-card-metrics">
             <span v-if="slot.sheet">已打分 {{ slot.sheet.aggregate.scoredCount }}/{{ slot.sheet.aggregate.totalCount }}</span>
-            <span v-if="slot.sheet && slot.sheet.aggregate.score !== null">表内平均 <strong>{{ slot.sheet.aggregate.score }}</strong></span>
+            <span v-if="slot.sheet && slot.sheet.questions.length && slot.sheet.questions.every(isRubric)">原始得分 <strong>{{ rubricScore(slot.sheet) }}</strong> / {{ rubricTotal(slot.sheet) }}<template v-if="slot.sheet.aggregate.scoredCount < slot.sheet.aggregate.totalCount">（已评分项小计）</template></span>
+            <span v-if="slot.sheet && slot.sheet.aggregate.score !== null">标准化得分 <strong>{{ slot.sheet.aggregate.score }}</strong> / 100</span>
             <span v-else-if="slot.sheet && slot.sheet.aggregate.totalCount">暂无打分</span>
           </div>
           <div class="inline-actions">
             <button
               class="btn btn-ghost"
               type="button"
-              :disabled="Boolean(busy) || slot.sheet?.status === 'locked' || slot.sheet?.status === 'generating'"
+              :disabled="Boolean(busy) || !canRegenerate(slot.sheet)"
               @click="generate(slot.sheetType)"
             >
-              {{ slot.sheet?.status === 'generating' ? '生成中' : slot.sheet && slot.sheet.status !== 'draft' ? '重新生成' : '生成面试表' }}
+              {{ slot.sheet?.status === 'generating' ? '正在载入…' : slot.sheet && slot.sheet.status !== 'draft' ? '重新载入考察点' : '载入考察点' }}
             </button>
             <button
               v-if="slot.sheet && slot.sheet.status === 'submitted'"
@@ -532,24 +558,30 @@ onUnmounted(stopPolling)
         <p v-else-if="slot.sheet?.generationNotice" class="loading-note">{{ slot.sheet.generationNotice }}</p>
 
         <p v-if="slot.sheet?.status === 'generating'" class="loading-note">
-          AI 正在按该阶段的问答生成题目与默认打分，页面每 3 秒自动刷新...
+          正在载入对应角色的通用考察点与评分标准，页面每 3 秒自动刷新…
         </p>
         <p v-else-if="!slot.sheet" class="empty-note">
-          <span>这张表还没有生成。先完成该阶段面试（或手工补录题目），再点「生成面试表」。</span>
+          <span>这张表还没有生成考察点评分表，可以载入对应角色的通用考察点。</span>
         </p>
         <p v-else-if="!slot.sheet.questions.length" class="empty-note">
-          <span>表内暂无题目，可重新生成或手工补录。</span>
+          <span>表内暂无考察点，可重新载入角色模板。</span>
         </p>
 
         <ul v-if="slot.sheet && slot.sheet.questions.length" class="question-list">
-          <li v-for="question in slot.sheet.questions" :key="question.id" class="question-row">
+          <li v-for="question in slot.sheet.questions" :key="question.id" class="question-row" :class="{ 'rubric-row': isRubric(question) }">
+            <AssessmentCriterionRow v-if="isRubric(question)" :question="question" :disabled="!editable(slot.sheet!) || Boolean(busy)"
+              :score="scoreValue(question)" :comment="commentValue(question)"
+              @tier="pickTier(slot.sheet!, question, $event)" @score-input="onScoreInput(question, $event)"
+              @score-commit="commitScore(slot.sheet!, question)" @comment-input="onCommentInput(question, $event)"
+              @comment-commit="commitComment(slot.sheet!, question)" />
+            <template v-else>
             <div class="question-seq">{{ question.seq }}</div>
             <div class="question-main">
               <section class="question-block question-block-prompt">
-                <div class="question-block-label">面试问题</div>
+                <div class="question-block-label">考察点</div>
                 <p class="question-text">{{ question.question }}</p>
               </section>
-              <div class="question-meta">
+              <div v-if="!question.category?.startsWith('rubric:')" class="question-meta">
                 <span>考察维度：{{ question.dimension || '综合能力' }}</span>
                 <span v-if="question.source === 'manual'">手工补录</span>
                 <span v-else-if="question.source === 'ai_generated' && !question.questionEventId">面试室题库 · 未记录提问</span>
@@ -557,11 +589,15 @@ onUnmounted(stopPolling)
                 <span v-if="question.aiScore !== null">AI 参考 {{ question.aiScore }} 分<template v-if="question.aiTier">（{{ TIER_LABEL[question.aiTier] }}）</template></span>
                 <span v-else class="muted-warn">{{ question.answerText?.trim() ? 'AI 评价暂不可用，未给默认分' : '缺少可用回答，AI 未给默认分' }}</span>
               </div>
-              <section class="question-block question-block-answer">
+              <section v-if="!question.category?.startsWith('rubric:')" class="question-block question-block-answer">
                 <div class="question-block-label">候选人回答</div>
                 <p class="question-answer">{{ question.answerText || '暂无转写回答（线下面试可手工补录）' }}</p>
               </section>
-              <section v-if="question.aiRationale" class="question-block question-block-ai">
+              <section v-if="question.assessmentFocus" class="question-block question-block-ai rubric-focus">
+                <div class="question-block-label">重点关注</div>
+                <p class="question-ai">{{ question.assessmentFocus }}</p>
+              </section>
+              <section v-if="question.aiRationale && !question.category?.startsWith('rubric:')" class="question-block question-block-ai">
                 <div class="question-block-label">AI 评分依据</div>
                 <p class="question-ai">{{ question.aiRationale }}</p>
               </section>
@@ -577,24 +613,25 @@ onUnmounted(stopPolling)
                   :title="tier.description"
                   @click="pickTier(slot.sheet!, question, tier.tier)"
                 >
-                  <strong>{{ TIER_LABEL[tier.tier] }}</strong>
-                  <span>{{ tier.min }}-{{ tier.max }}</span>
+                  <strong>{{ question.category?.startsWith('rubric:') && tier.tier === 'below' ? '淘汰信号' : TIER_LABEL[tier.tier] }}</strong>
+                  <span>{{ tier.min }}-{{ tier.max }} 分</span>
+                  <small v-if="question.category?.startsWith('rubric:')">{{ tier.description }}</small>
                 </button>
                 <label class="score-input">
                   <input
                     type="number"
                     min="0"
-                    max="100"
+                    :max="Math.max(1, ...tierOf(question).map(tier => tier.max))"
                     :value="scoreValue(question)"
                     :disabled="!editable(slot.sheet!) || Boolean(busy)"
-                    :aria-label="`第 ${question.seq} 题得分`"
+                    :aria-label="`${question.question}得分`"
                     @input="onScoreInput(question, ($event.target as HTMLInputElement).value)"
                     @change="commitScore(slot.sheet!, question)"
                   />
                   <span>分</span>
                 </label>
                 <button
-                  v-if="question.aiScore !== null"
+                  v-if="question.aiScore !== null && !question.category?.startsWith('rubric:')"
                   class="btn btn-ghost btn-inline ai-score-btn"
                   type="button"
                   :disabled="!editable(slot.sheet!) || Boolean(busy)"
@@ -613,12 +650,12 @@ onUnmounted(stopPolling)
                   @blur="commitComment(slot.sheet!, question)"
                 />
               </div>
-              <ul v-if="question.aiEvidence.length" class="question-evidence">
+              <ul v-if="question.aiEvidence.length && !question.category?.startsWith('rubric:')" class="question-evidence">
                 <li v-for="(evidence, index) in question.aiEvidence.slice(0, 3)" :key="index">引用：{{ evidence }}</li>
               </ul>
             </div>
             <button
-              v-if="editable(slot.sheet!)"
+              v-if="editable(slot.sheet!) && !question.category?.startsWith('rubric:')"
               class="btn btn-danger question-delete"
               type="button"
               :disabled="Boolean(busy)"
@@ -626,10 +663,11 @@ onUnmounted(stopPolling)
             >
               删除
             </button>
+            </template>
           </li>
         </ul>
 
-        <div v-if="slot.sheet && editable(slot.sheet)" class="sheet-card-foot">
+        <div v-if="slot.sheet && editable(slot.sheet) && !slot.sheet.questions.some(question => question.category?.startsWith('rubric:'))" class="sheet-card-foot">
           <button class="btn btn-ghost" type="button" @click="manualOpen = !manualOpen">手工补录题目</button>
           <div v-if="manualOpen" class="manual-form">
             <div class="form-field form-wide">
@@ -787,6 +825,7 @@ onUnmounted(stopPolling)
 
 .sheet-card-metrics {
   display: flex;
+  flex-wrap: wrap;
   gap: 14px;
   color: var(--muted);
   font-size: 12px;
@@ -794,6 +833,16 @@ onUnmounted(stopPolling)
 
 .sheet-card-metrics strong {
   color: var(--teal);
+}
+
+@media (max-width: 900px) {
+  .sheet-panel-head {
+    position: static;
+  }
+
+  .sheet-submit-bar {
+    top: 0;
+  }
 }
 
 .empty-note {
@@ -812,6 +861,15 @@ onUnmounted(stopPolling)
   gap: 12px;
   padding: 14px 0;
   border-top: 1px solid #edf2f7;
+}
+
+.question-row.rubric-row {
+  padding: 24px 0;
+}
+
+.question-row.rubric-row:first-child {
+  border-top: 0;
+  padding-top: 8px;
 }
 
 .question-seq {

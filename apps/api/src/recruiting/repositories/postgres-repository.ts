@@ -1072,11 +1072,17 @@ export class NormalizedRecruitingRepository {
       // Lock the current schedule so validation, changes and audit are committed together.
       const current = mapInterview(await queryOne<InterviewRow>(client, `${INTERVIEW_SELECT} ${where} FOR UPDATE OF i`, scopeValues))
       const patch = prepareInterviewScheduleUpdate(current, input)
+      if (patch.participants) {
+        patch.participants = await Promise.all(patch.participants.map(async (participant) => ({
+          ...participant,
+          userId: await resolveActorId(client, participant.userId, { required: true, allowDisplayName: true, organizationId: this.organizationId }) as string,
+        })))
+      }
       const keys = Object.keys(patch) as Array<keyof typeof patch>
       if (!keys.length) return current
-      const columns = { scheduledStartAt: 'scheduled_start_at', scheduledEndAt: 'scheduled_end_at', location: 'location', meetingUrl: 'meeting_url' }
-      const values: unknown[] = keys.map((key) => patch[key])
-      const assignments = keys.map((key, index) => `${columns[key]} = $${index + 1}${key.startsWith('scheduled') ? '::timestamptz' : ''}`)
+      const columns = { scheduledStartAt: 'scheduled_start_at', scheduledEndAt: 'scheduled_end_at', location: 'location', meetingUrl: 'meeting_url', participants: 'participants' }
+      const values: unknown[] = keys.map((key) => key === 'participants' ? JSON.stringify(patch.participants) : patch[key])
+      const assignments = keys.map((key, index) => `${columns[key]} = $${index + 1}${key.startsWith('scheduled') ? '::timestamptz' : key === 'participants' ? '::jsonb' : ''}`)
       values.push(current.id)
       const updateWhere = this.interviewWhere(values, [`i.id = $${values.length}::uuid`])
       const updated = mapInterview(await queryOne<InterviewRow>(client,

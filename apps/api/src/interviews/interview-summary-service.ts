@@ -18,7 +18,8 @@ export class InterviewSummaryService {
   async processPending(): Promise<boolean> {
     const job = await this.repository.claim()
     if (!job) return false
-    let report = createUnscoredSummary([])
+    const previousReport = job.previousReport
+    let report = previousReport ?? createUnscoredSummary([])
     try {
       const { segments } = await this.sessions.get(job.sessionId)
       report = createUnscoredSummary(segments)
@@ -40,7 +41,8 @@ export class InterviewSummaryService {
       await this.repository.save(job, report, null)
     } catch (error) {
       // A model failure must leave the complete transcript and all actual questions available.
-      await this.repository.save(job, report, error instanceof Error ? error.message : String(error))
+      // Never replace an already evidenced report with an empty placeholder after regeneration fails.
+      await this.repository.save(job, previousReport ?? report, error instanceof Error ? error.message : String(error))
     }
     return true
   }

@@ -34,7 +34,8 @@ const status = ref<'idle' | 'starting' | 'recording' | 'paused' | 'manual' | 'st
 const segments = ref<LiveInterviewSegment[]>([])
 const currentQuestion = ref('请先做一下自我介绍，并重点说明与你应聘岗位相关的经历。')
 const generatedQuestions = ref<GeneratedInterviewQuestion[]>([])
-const referenceGroup = ref<'ai' | 'hr' | 'department' | null>(null)
+type ReferenceGroup = 'ai' | 'hr' | 'department' | 'boss'
+const referenceGroup = ref<ReferenceGroup | null>(null)
 const audioDialogOpen = ref(false)
 const audioPlaybackSession = ref('')
 const audioPlaybackStartMs = ref(0)
@@ -261,6 +262,17 @@ function onMicrophoneDeviceChange(){void refreshMicrophoneState(false)}
 function normalizeQuestion(value: string): string { return value.replace(/\s+/g, ' ').trim() }
 watch(currentQuestion, () => { questionRevision++ }, { flush: 'sync' })
 const isFinalRound = computed(() => detail.value?.stage === 'final' || (detail.value?.round ?? 1) >= 2)
+const referenceEntries = computed<Array<{ id: ReferenceGroup; label: string }>>(() => isFinalRound.value
+  ? [
+      { id: 'department', label: '业务面试表' },
+      { id: 'hr', label: 'HR面试表' },
+      { id: 'boss', label: 'BOSS面试表' },
+    ]
+  : [
+      { id: 'ai', label: 'AI简历题' },
+      { id: 'hr', label: 'HR面试表' },
+      { id: 'department', label: '用人部门面试表' },
+    ])
 const bankDescription = computed(() => isFinalRound.value ? '10 道简历题、5 道 HR 题、5 道业务题、5 道 BOSS 题' : '10 道简历题、5 道 HR 题、5 道用人部门题')
 function isCompleteQuestionBank(questions: GeneratedInterviewQuestion[]): boolean {
   return questions.length === (isFinalRound.value ? 25 : 20)
@@ -719,7 +731,7 @@ onUnmounted(() => {
       <template #center>
         <nav v-if="!loading && detail" class="reference-actions" aria-label="面试参考表">
           <button class="btn btn-ghost btn-sm audio-recordings-button" type="button" aria-haspopup="dialog" :aria-expanded="audioDialogOpen" @click="openAudio()">查看原音频</button>
-          <button v-for="entry in ([{ id: 'ai', label: 'AI简历题' }, { id: 'hr', label: 'HR面试表' }, { id: 'department', label: '用人部门面试表' }] as const)" :key="entry.id" class="btn btn-ghost btn-sm" type="button" :data-reference="entry.id" aria-haspopup="dialog" :aria-expanded="referenceGroup === entry.id" @click="referenceGroup = entry.id">{{ entry.label }}</button>
+          <button v-for="entry in referenceEntries" :key="entry.id" class="btn btn-ghost btn-sm" type="button" :data-reference="entry.id" aria-haspopup="dialog" :aria-expanded="referenceGroup === entry.id" @click="referenceGroup = entry.id">{{ entry.label }}</button>
         </nav>
       </template>
       <template #default>

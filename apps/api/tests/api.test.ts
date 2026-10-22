@@ -557,11 +557,18 @@ describe('Phase 1 API', { concurrency: false }, () => {
       ...(['hr', 'department'] as const).flatMap(group => COMMON_CAPABILITY_DIMENSIONS[group].map(dimension => ({ ...baseQuestion, group, dimension: dimension.id, question: `${group}情境考核 ${dimension.id}`, scoringRubric: [{ criterion: dimension.focus, points: dimension.points }] }))),
     ];
     const originalFetch = globalThis.fetch;
+    const requestGroups: string[] = [];
+    let rateLimitedHr = false;
     try {
       globalThis.fetch = async (_url, init) => {
         assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer tenant-only-key');
         const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
         assert.equal(input.questionCount, 10); assert.equal(input.includeCommonQuestions, true);
+        requestGroups.push(input.requestedGroup);
+        if (input.requestedGroup === 'hr' && !rateLimitedHr) {
+          rateLimitedHr = true;
+          return new Response('busy', { status: 429, headers: { 'Retry-After': '0' } });
+        }
         return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: questions.filter(question => question.group === input.requestedGroup) }) } }] }), { status: 200 });
       };
       const path = `/api/v1/interviews/${interview.id}/questions`;
@@ -569,6 +576,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
       const response = await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: true });
       assert.equal(response.status, 200, JSON.stringify(response.body));
       assert.equal(response.body.data.engine, 'llm'); assert.deepEqual(response.body.data.questions, questions);
+      assert.deepEqual(requestGroups, ['ai', 'hr', 'hr', 'department']);
       const saved = await get(path); assert.equal(saved.status, 200); assert.deepEqual(saved.body.data.questions, questions); assert.ok(saved.body.data.updatedAt);
       globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"questions":[]}' } }] }), { status: 200 });
       const fallback = await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: true });

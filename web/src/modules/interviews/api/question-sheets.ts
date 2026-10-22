@@ -15,6 +15,7 @@ export interface ApiInterviewQuestion {
   question: string
   dimension: string | null
   category: string | null
+  assessmentFocus?: string | null
   difficulty: string | null
   source: 'live_question' | 'ai_generated' | 'manual'
   questionEventId: string | null
@@ -102,7 +103,7 @@ export const SHEET_TYPE_LABEL: Record<QuestionSheetType, string> = {
 
 export const SHEET_STATUS_LABEL: Record<QuestionSheetStatus, string> = {
   draft: '待生成',
-  generating: 'AI 生成中',
+  generating: '载入中',
   scoring: '待打分',
   submitted: '已提交',
   locked: '已锁定',

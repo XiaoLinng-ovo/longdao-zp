@@ -172,7 +172,7 @@ describe('QuestionSheetPanel', () => {
 
     expect(mockedScore).toHaveBeenCalledWith('app-1', 'initial', 'hr_screen', 'hr-1', { finalTier: 'excellent', finalScore: 95 })
     expect(buttonByText(firstQuestion, '优秀').classList.contains('tier-active')).toBe(true)
-    expect(element.querySelector('.sheet-card')?.textContent).toContain('表内平均')
+    expect(element.querySelector('.sheet-card')?.textContent).toContain('标准化得分')
     expect(element.querySelector('.sheet-card')?.textContent).toContain('95')
   })
 
@@ -248,7 +248,7 @@ describe('QuestionSheetPanel', () => {
     const element = await mount(view)
 
     expect(element.textContent).toContain('这张表还没有生成')
-    const generate = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '生成面试表')
+    const generate = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '载入考察点')
     expect(generate.disabled).toBe(false)
   })
 })
@@ -317,34 +317,185 @@ describe('复试阶段流转', () => {
   })
 })
 
-describe('面试表生成状态', () => {
-  it('区分题库未记录提问和实际回答，题库题不显示虚构AI评分', async () => {
+describe('角色通用考察点评分模板', () => {
+  function rubricCriterion(): ApiInterviewQuestion {
+    return question({
+      id: 'hr-rubric-motivation',
+      seq: 1,
+      question: '职业动机与职业规划',
+      dimension: '职业动机与职业规划',
+      category: 'rubric:hr:motivation',
+      assessmentFocus: '跳槽合理性、职业规划清晰度、长期稳定性',
+      source: 'manual',
+      questionEventId: null,
+      answerSegmentIds: [],
+      answerText: null,
+      tiers: [
+        { tier: 'excellent', min: 8, max: 8, description: '动机清晰，规划合理' },
+        { tier: 'pass', min: 6, max: 7, description: '动机基本合理' },
+        { tier: 'below', min: 0, max: 5, description: '稳定性存疑' },
+      ],
+      aiTier: null,
+      aiScore: null,
+      aiRationale: null,
+      aiEvidence: [],
+      finalTier: null,
+      finalScore: null,
+    })
+  }
+
+  it('展示考察点、关注内容和各评分区间，不显示面试问答或 AI 逐题评分', async () => {
     const view = buildView('scoring')
-    view.sheets[0]!.questions = [question({ source: 'ai_generated', questionEventId: null, answerText: null, aiScore: null, aiTier: null, aiRationale: null, aiEvidence: [], finalScore: null })]
+    view.sheets = [sheet('hr_screen', [rubricCriterion()], { status: 'scoring' })]
     const element = await mount(view)
-    expect(element.textContent).toContain('面试室题库 · 未记录提问')
-    expect(element.textContent).toContain('缺少可用回答，AI 未给默认分')
-    expect(element.querySelectorAll('.question-row').length).toBeGreaterThan(1)
+
+    expect(element.textContent).toContain('职业动机与职业规划')
+    expect(element.textContent).toContain('跳槽合理性、职业规划清晰度、长期稳定性')
+    expect(element.textContent).toContain('优秀')
+    expect(element.textContent).toContain('合格')
+    expect(element.textContent).toContain('淘汰信号')
+    expect(element.textContent).toContain('8 分')
+    expect(element.textContent).toContain('动机清晰，规划合理')
+    expect(element.textContent).toContain('动机基本合理')
+    expect(element.textContent).toContain('稳定性存疑')
+    expect(element.textContent).toContain('6-7 分')
+    expect(element.textContent).toContain('0-5 分')
+    expect(element.querySelector('.question-block-answer')).toBeNull()
+    expect(element.querySelector('.ai-score-btn')).toBeNull()
+    expect(element.querySelector('.question-evidence')).toBeNull()
+
+    const input = element.querySelector<HTMLInputElement>('.score-input input')!
+    expect(input.max).toBe('8')
+    mockedScore.mockResolvedValue({ ...rubricCriterion(), finalScore: 7, finalTier: 'pass' })
+    setInput(input, '7')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flush()
+    expect(mockedScore).toHaveBeenCalledWith('app-1', 'initial', 'hr_screen', 'hr-rubric-motivation', { finalScore: 7, finalTier: 'pass' })
   })
-  it('生成中的表禁用重复生成，其他待生成表仍可操作', async () => {
+
+  it.each([
+    ['initial', 'hr_screen', 8, 8, 6, 7],
+    ['initial', 'hiring_department', 12, 8, 6, 7],
+    ['final', 'business', 12, 8, 6, 7],
+    ['final', 'hr', 8, 8, 6, 7],
+    ['final', 'boss', 20, 17, 12, 16],
+  ] as const)('%s/%s：按角色上限人工评分、保存档位和评语，展示原始分与百分制', async (stage, type, max, excellentMin, passMin, passMax) => {
+    const criterion = rubricCriterion()
+    criterion.tiers = [
+      { tier: 'excellent', min: excellentMin, max, description: '优秀表现描述' },
+      { tier: 'pass', min: passMin, max: passMax, description: '合格表现描述' },
+      { tier: 'below', min: 0, max: passMin - 1, description: '需警惕的表现描述' },
+    ]
+    const questions = Array.from({ length: 5 }, (_, index) => ({ ...criterion, id: 'criterion-' + index, seq: index + 1 }))
+    const view = buildView('scoring')
+    view.sheets = [sheet(type, questions, { stage, status: 'scoring' })]
+    const element = await mount(view)
+    if (stage === 'final') { buttonByText(element, '复试（').click(); await flush() }
+    const card = [...element.querySelectorAll<HTMLElement>('.sheet-card')].find(item => item.querySelector('.rubric-row'))!
+    const row = card.querySelector<HTMLElement>('.rubric-row')!
+    const input = row.querySelector<HTMLInputElement>('.score-input input')!
+    expect(input.max).toBe(String(max))
+    expect(card.textContent).toContain('/ ' + max * 5)
+    expect(row.querySelectorAll('.criterion-tier')).toHaveLength(3)
+    expect(row.querySelector('.criterion-description')?.textContent).toContain('优秀表现描述')
+    expect(card.querySelector('.question-delete')).toBeNull()
+    expect(card.textContent).not.toContain('手工补录题目')
+
+    const scored = { ...questions[0]!, finalScore: max, finalTier: 'excellent' as const }
+    mockedScore.mockResolvedValueOnce(scored)
+    setInput(input, String(max))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flush()
+    expect(mockedScore).toHaveBeenLastCalledWith('app-1', stage, type, 'criterion-0', { finalScore: max, finalTier: 'excellent' })
+    expect(row.querySelector('.criterion-excellent')?.getAttribute('aria-pressed')).toBe('true')
+    expect(row.textContent).toContain('已保存')
+    expect(card.textContent).toContain('标准化得分 100 / 100')
+
+    mockedScore.mockResolvedValueOnce({ ...scored, finalTier: 'pass', finalScore: Math.round((passMin + passMax) / 2) })
+    buttonByText(row, '合格').click()
+    await flush()
+    expect(mockedScore).toHaveBeenLastCalledWith('app-1', stage, type, 'criterion-0', { finalTier: 'pass', finalScore: Math.round((passMin + passMax) / 2) })
+
+    const savedComment = '已按本项观察人工评估'
+    mockedScore.mockResolvedValueOnce({ ...scored, comment: savedComment })
+    const comment = row.querySelector<HTMLInputElement>('.criterion-comment input')!
+    setInput(comment, savedComment)
+    comment.dispatchEvent(new Event('blur', { bubbles: true }))
+    await flush()
+    expect(mockedScore).toHaveBeenLastCalledWith('app-1', stage, type, 'criterion-0', { comment: savedComment })
+  })
+
+  it('人工分数超出角色上限时明确提示，不写入错误分数', async () => {
+    const view = buildView('scoring')
+    view.sheets = [sheet('hr_screen', [rubricCriterion()], { status: 'scoring' })]
+    const element = await mount(view)
+    const input = element.querySelector<HTMLInputElement>('.score-input input')!
+    setInput(input, '9')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flush()
+    expect(element.textContent).toContain('分数需在 0-8 之间')
+    expect(mockedScore).not.toHaveBeenCalled()
+  })
+
+  it.each(['submitted', 'locked'] as const)('%s 状态禁止重新载入考察点', async (status) => {
+    const view = buildView(status)
+    view.sheets = [sheet('hr_screen', [rubricCriterion()], { status })]
+    const element = await mount(view)
+    const reload = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '重新载入考察点')
+    expect(reload.disabled).toBe(true)
+    reload.click()
+    expect(generateQuestionSheet).not.toHaveBeenCalled()
+  })
+
+  it('待打分但尚无人工评分时可重新载入考察点', async () => {
+    const view = buildView('scoring')
+    view.sheets = [sheet('hr_screen', [rubricCriterion()], { status: 'scoring' })]
+    const element = await mount(view)
+    const refreshed = structuredClone(view)
+    vi.mocked(generateQuestionSheet).mockResolvedValueOnce(refreshed)
+
+    const reload = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '重新载入考察点')
+    expect(reload.disabled).toBe(false)
+    reload.click()
+    await flush()
+
+    expect(generateQuestionSheet).toHaveBeenCalledWith('app-1', 'initial', 'hr_screen')
+    expect(element.textContent).toContain('人事面试表考察点已载入，可以开始人工评分')
+  })
+
+  it('待打分表已有人工评分或评语时禁止重新载入', async () => {
+    const view = buildView('scoring')
+    view.sheets = [sheet('hr_screen', [{ ...rubricCriterion(), finalScore: 7 }], { status: 'scoring' })]
+    const element = await mount(view)
+    const reload = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '重新载入考察点')
+
+    expect(reload.disabled).toBe(true)
+    reload.click()
+    expect(generateQuestionSheet).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { finalScore: 7 },
+    { comment: '已记录人工评价' },
+  ])('已有评分或评语时禁止覆盖模板：%j', async (saved) => {
+    const view = buildView('draft')
+    view.sheets = [sheet('hr_screen', [{ ...rubricCriterion(), ...saved }], { status: 'draft' })]
+    const element = await mount(view)
+    const reload = buttonByText(element.querySelector('.sheet-card') as HTMLElement, '载入考察点')
+    expect(reload.disabled).toBe(true)
+    reload.click()
+    expect(generateQuestionSheet).not.toHaveBeenCalled()
+  })
+
+  it('生成中的表禁用重复载入，其他待生成表仍可载入', async () => {
     const view = buildView('draft')
     view.sheets[0]!.status = 'generating'
     view.sheets.forEach(item => { item.questions = [] })
     const element = await mount(view)
     const cards = element.querySelectorAll<HTMLElement>('.sheet-card')
-    expect(buttonByText(cards[0]!, '生成中').disabled).toBe(true)
-    expect(buttonByText(cards[1]!, '生成面试表').disabled).toBe(false)
-    buttonByText(cards[0]!, '生成中').click()
+    expect(buttonByText(cards[0]!, '正在载入').disabled).toBe(true)
+    expect(buttonByText(cards[1]!, '载入考察点').disabled).toBe(false)
+    buttonByText(cards[0]!, '正在载入').click()
     expect(generateQuestionSheet).not.toHaveBeenCalled()
-  })
-  it('模型部分失败时展示可评分问答和未获得 AI 评分的提示', async () => {
-    const view = buildView('scoring')
-    view.sheets[0]!.questions[0]!.aiScore = null
-    view.sheets[0]!.generationNotice = '已保留全部 43 道实际问答；其中 5 道未获得 AI 评价，未填入 AI 分数，可人工评分。'
-    const element = await mount(view)
-    expect(element.textContent).toContain('未获得 AI 评价')
-    expect(element.textContent).toContain('AI 评价暂不可用，未给默认分')
-    expect(element.textContent).toContain('讲一个你主导的跨部门项目')
-    expect(element.querySelectorAll('.question-row').length).toBeGreaterThan(0)
   })
 })

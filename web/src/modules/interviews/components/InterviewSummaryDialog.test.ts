@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from 'vue'
 import InterviewSummaryDialog from './InterviewSummaryDialog.vue'
 import { loadInterviewSummary, requestInterviewSummary, type InterviewSummaryView } from '../api/summary'
+import { loadQuestionSheets, type ApiApplicationQuestionSheets, type ApiStageReview, type InterviewStage } from '../api/question-sheets'
 
 vi.mock('../api/summary', () => ({ loadInterviewSummary: vi.fn(), requestInterviewSummary: vi.fn() }))
+vi.mock('../api/question-sheets', async importOriginal => ({ ...await importOriginal<typeof import('../api/question-sheets')>(), loadQuestionSheets: vi.fn() }))
 const load = vi.mocked(loadInterviewSummary), request = vi.mocked(requestInterviewSummary)
 let app: App | undefined, root: HTMLDivElement | undefined, open: Ref<boolean>
 const ready = (): InterviewSummaryView => ({ sessionId: 's', status: 'ready', revision: 1, error: null, report: {
@@ -17,36 +19,70 @@ const ready = (): InterviewSummaryView => ({ sessionId: 's', status: 'ready', re
   advisoryOnly: true, applicationStatusMutation: 'none',
 } })
 async function flush() { for (let i = 0; i < 15; i++) { await Promise.resolve(); await nextTick() } }
-async function mount(initial = true) {
+async function mount(initial = true, props: { applicationId?: string; stage?: InterviewStage; candidateName?: string; jobTitle?: string; interviewDate?: string } = {}) {
   open = ref(initial); root = document.createElement('div'); document.body.appendChild(root)
-  app = createApp(defineComponent({ setup: () => () => h(InterviewSummaryDialog, { open: open.value, interviewId: 'i', onClose: () => { open.value = false } }) }))
+  app = createApp(defineComponent({ setup: () => () => h(InterviewSummaryDialog, { ...props, open: open.value, interviewId: 'i', onClose: () => { open.value = false } }) }))
   app.mount(root); await flush(); return root
 }
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); vi.useRealTimers(); vi.resetAllMocks(); document.body.style.overflow = '' })
 
 describe('InterviewSummaryDialog', () => {
-  it('shows overall score, actual Q&A, evidence and the complete uncertain transcript', async () => {
+  it('presents candidate information, advantages, improvement areas and AI recommendation as separate report sections', async () => {
+    const data = ready()
+    data.report!.strengths = [{ text: '候选人自述具备项目交付经验。', evidence: [{ pairId: 'q', quote: '我完成招聘项目' }] }]
+    data.report!.concerns = [{ text: '项目成果量化表达不足。', evidence: [{ pairId: 'q', quote: '我完成招聘项目' }] }]
+    data.report!.recommendation = { outcome: 'hold', text: '建议补充核实项目成果。', evidence: [] }
+    load.mockResolvedValue(data)
+    const el = await mount(true, { candidateName: '张三', jobTitle: '招聘专员', interviewDate: '2026-10-22T02:00:00Z' })
+    expect(el.querySelector('.report-info')?.textContent).toContain('张三')
+    expect(el.querySelector('.report-info')?.textContent).toContain('招聘专员')
+    expect(el.querySelector('.report-info')?.textContent).toContain('2026')
+    expect(el.querySelector('[aria-label="优势分析"]')?.textContent).toContain('具备项目交付经验')
+    expect(el.querySelector('[aria-label="劣势与待提升"]')?.textContent).toContain('项目成果量化表达不足')
+    expect(el.querySelector('[aria-label="推荐建议"]')?.textContent).toContain('建议补充评估')
+    expect(el.querySelector('[aria-label="推荐建议"]')?.textContent).toContain('建议补充核实项目成果')
+    expect(el.querySelector('.human-result')?.textContent).toContain('待人工确认')
+    expect(request).not.toHaveBeenCalled()
+  })
+  it.each(['advance', 'reject'] as const)('does not turn the AI %s advice into the human interview decision', async outcome => {
+    const data = ready()
+    data.report!.recommendation = { outcome, text: '基于已考察能力给出建议。', evidence: [{ pairId: 'q', quote: '我完成招聘项目' }] }
+    load.mockResolvedValue(data)
+    vi.mocked(loadQuestionSheets).mockResolvedValue({ reviews: [] } as unknown as ApiApplicationQuestionSheets)
+    const el = await mount(true, { applicationId: 'app', stage: 'initial' })
+    expect(el.querySelector('.recommendation-value')?.textContent).toBe(outcome === 'advance' ? '建议推进后续流程' : '不建议推进后续流程')
+    expect(el.querySelector('.result-value')?.textContent).toBe('待人工确认')
+  })
+  it('shows the matching stage decision separately from AI advice', async () => {
+    load.mockResolvedValue(ready())
+    vi.mocked(loadQuestionSheets).mockResolvedValue({ reviews: [
+      { stage: 'initial', decision: 'advanced' },
+      { stage: 'final', decision: 'hired', decidedAt: '2026-10-22T02:00:00Z' },
+    ] as ApiStageReview[] } as ApiApplicationQuestionSheets)
+    const el = await mount(true, { applicationId: 'app', stage: 'final' })
+    expect(loadQuestionSheets).toHaveBeenCalledWith('app')
+    expect(el.querySelector('.report-info')?.textContent).toContain('复试')
+    expect(el.querySelector('.human-result')?.textContent).toContain('人工确认')
+    expect(el.querySelector('.result-value')?.textContent).toBe('录用')
+  })
+  it('does not disguise a result read failure as a pending human decision', async () => {
+    load.mockResolvedValue(ready()); vi.mocked(loadQuestionSheets).mockRejectedValue(new Error('网络中断'))
+    const el = await mount(true, { applicationId: 'app', stage: 'initial' })
+    expect(el.querySelector('.result-value')?.textContent).toBe('暂时无法读取')
+    expect(el.querySelector('.human-result')?.textContent).not.toContain('待人工确认')
+  })
+  it('shows strengths, risks and result without exposing actual Q&A or transcript', async () => {
     load.mockResolvedValue(ready()); const el = await mount()
     expect(el.querySelector('.report-score')?.textContent).toContain('82')
-    expect(el.querySelectorAll('.report-pair')).toHaveLength(2)
-    expect(el.textContent).toContain('介绍项目？'); expect(el.textContent).toContain('何时到岗？')
-    expect(el.textContent).toContain('完整保留的混合发言。'); expect(el.textContent).toContain('管理经验未考察')
-    expect(el.querySelector('blockquote a')?.getAttribute('href')).toBe('#pair-q')
-  })
-  it('opens complete transcript and locates the original candidate turn for whole-dialogue evidence', async () => {
-    const view = ready()
-    view.report!.version = 'whole-dialogue-v2'
-    view.report!.dimensions[0]!.evidence = [{ turnId: 'a', quote: '我完成招聘项目' }]
-    view.report!.transcript.push({ id: 'a', segmentIds: ['a'], role: 'candidate', text: '我完成招聘项目。', startMs: 2000, endMs: 5000, kind: 'assessment' })
-    load.mockResolvedValue(view)
-    const el = await mount()
-    const details = el.querySelector('details')!
-    expect(details.open).toBe(false)
-    const link = el.querySelector<HTMLAnchorElement>('blockquote a')!
-    expect(link.getAttribute('href')).toBe('#turn-a')
-    link.click(); await flush()
-    expect(details.open).toBe(true)
-    expect(el.querySelector('#turn-a')?.textContent).toContain('我完成招聘项目')
+    expect(el.querySelectorAll('.report-pair')).toHaveLength(0)
+    expect(el.querySelector('details')).toBeNull()
+    expect(el.textContent).not.toContain('介绍项目？'); expect(el.textContent).not.toContain('何时到岗？')
+    expect(el.textContent).not.toContain('完整保留的混合发言。')
+    expect(el.querySelector('[aria-label="优势分析"]')?.textContent).toContain('暂无有充分原文依据的评价')
+    expect(el.querySelector('[aria-label="推荐建议"]')?.textContent).toContain('暂无有充分依据的推荐建议')
+    expect(el.textContent).toContain('管理经验未考察')
+    expect(el.textContent).toContain('面试结果')
+    expect(el.textContent).toContain('待人工确认')
   })
   it('does not load when closed or disturb a scroll lock owned by another dialog', async () => {
     document.body.style.overflow = 'hidden'; await mount(false)
@@ -62,10 +98,10 @@ describe('InterviewSummaryDialog', () => {
     await vi.advanceTimersByTimeAsync(10000); expect(load).toHaveBeenCalledTimes(2)
     expect(document.body.style.overflow).toBe('')
   })
-  it('preserves the transcript after AI failure and permits retry without stale scores', async () => {
+  it('keeps summary context after AI failure and permits retry without stale scores', async () => {
     vi.useFakeTimers(); load.mockResolvedValue({ ...ready(), status: 'failed', error: '模型超时' })
     request.mockResolvedValue({ ...ready(), status: 'pending', report: null })
-    const el = await mount(); expect(el.textContent).toContain('模型超时'); expect(el.textContent).toContain('完整保留的混合发言。')
+    const el = await mount(); expect(el.textContent).toContain('模型超时'); expect(el.textContent).toContain('项目经验')
     expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
     const button = [...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!
     button.click(); await flush(); expect(request).toHaveBeenCalledWith('i')
@@ -86,12 +122,12 @@ describe('InterviewSummaryDialog', () => {
     expect(el.querySelector('.report-score')?.textContent).toContain('82')
     expect(el.textContent).not.toContain('正在自动重试')
   })
-  it('continues polling through a transient read error without losing saved transcript', async () => {
+  it('continues polling through a transient read error without losing the saved report', async () => {
     vi.useFakeTimers()
     load.mockResolvedValueOnce({ ...ready(), status: 'generating' }).mockRejectedValueOnce(new Error('暂时不可用')).mockResolvedValue(ready())
     const el = await mount()
     await vi.advanceTimersByTimeAsync(2500); await flush()
-    expect(el.textContent).toContain('完整保留的混合发言。'); expect(el.textContent).toContain('正在自动重试')
+    expect(el.textContent).toContain('项目经验'); expect(el.textContent).toContain('正在自动重试')
     await vi.advanceTimersByTimeAsync(2500); await flush()
     expect(load).toHaveBeenCalledTimes(3); expect(el.querySelector('.report-score')?.textContent).toContain('82')
   })
@@ -99,7 +135,7 @@ describe('InterviewSummaryDialog', () => {
     vi.useFakeTimers(); load.mockResolvedValue(ready()); request.mockResolvedValue({ ...ready(), status: 'pending' })
     const el = await mount()
     ;[...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!.click(); await flush()
-    expect(el.textContent).toContain('完整保留的混合发言。')
+    expect(el.textContent).toContain('项目经验')
     expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
     expect(el.textContent).toContain('稍后查看结果')
   })

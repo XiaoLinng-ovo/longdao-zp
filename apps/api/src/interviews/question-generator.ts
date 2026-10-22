@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises'
 import { describeModelHttpFailure } from '../ai/model-http-error.js'
 
 export type InterviewQuestionCategory = 'technical' | 'behavioral' | 'experience' | 'job_specific'
@@ -63,6 +64,20 @@ export class InterviewQuestionGenerationError extends Error {
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+
+class ModelRateLimitError extends InterviewQuestionGenerationError {
+  constructor(public readonly retryAfterMs: number | undefined) {
+    super('MODEL_HTTP_ERROR', '模型服务当前请求繁忙（HTTP 429），自动重试后仍被限流，请稍后重新生成题库。')
+  }
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get('retry-after')?.trim()
+  if (!value) return undefined
+  const seconds = Number(value)
+  const milliseconds = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now()
+  return Number.isFinite(milliseconds) && milliseconds >= 0 ? Math.min(milliseconds, 120_000) : undefined
+}
 
 const CATEGORIES = new Set<InterviewQuestionCategory>(['technical', 'behavioral', 'experience', 'job_specific'])
 const DIFFICULTIES = new Set<InterviewQuestionDifficulty>(['easy', 'medium', 'hard'])
@@ -271,6 +286,10 @@ export function createInterviewQuestionGenerator(config: InterviewQuestionGenera
       throw new InterviewQuestionGenerationError('MODEL_REQUEST_FAILED', '无法连接面试题生成模型，请检查模型接口连接后重试。', error)
     }
     if (!response.ok) {
+      if (response.status === 429) {
+        await response.body?.cancel().catch(() => {})
+        throw new ModelRateLimitError(retryAfterMs(response))
+      }
       throw new InterviewQuestionGenerationError('MODEL_HTTP_ERROR', await describeModelHttpFailure(response, config.apiKey, 'Interview question model'))
     }
     let envelope: unknown
@@ -308,28 +327,43 @@ export function createInterviewQuestionGenerator(config: InterviewQuestionGenera
       controller.signal.addEventListener('abort', onAbort, { once: true })
       if (controller.signal.aborted) onAbort()
       const generateGroup = async (group?: InterviewQuestionGroup): Promise<InterviewQuestionSet> => {
-        for (let attempt = 0; ; attempt++) {
+        let formatRetries = 0
+        let rateLimitRetries = 0
+        for (;;) {
           controller.signal.throwIfAborted()
           try { return await requestOnce(input, controller.signal, group) }
           catch (error) {
             controller.signal.throwIfAborted()
-            if (attempt >= 1 || !(error instanceof InterviewQuestionGenerationError) || error.code !== 'MODEL_RESPONSE_INVALID') throw error
+            if (error instanceof ModelRateLimitError && rateLimitRetries < 3) {
+              const waitMs = error.retryAfterMs ?? 1000 * 2 ** rateLimitRetries
+              rateLimitRetries++
+              await delay(waitMs, undefined, { signal: controller.signal })
+              continue
+            }
+            if (formatRetries >= 1 || !(error instanceof InterviewQuestionGenerationError) || error.code !== 'MODEL_RESPONSE_INVALID') throw error
+            formatRetries++
           }
         }
       }
       try {
-        const work = input.includeCommonQuestions
-          ? Promise.all((['ai', ...capabilityGroups(input)] as InterviewQuestionGroup[]).map(generateGroup)).then(groups => ({
-            questions: parseModelContent(JSON.stringify({ questions: groups.flatMap(group => group.questions) }), input),
-            advisoryOnly: true as const, applicationStatusMutation: 'none' as const,
-          }))
-          : generateGroup()
-        return await Promise.race([work, aborted])
+        const work = async (): Promise<InterviewQuestionSet> => {
+          if (!input.includeCommonQuestions) return generateGroup()
+          const questions: GeneratedInterviewQuestion[] = []
+          // Some providers allow only one concurrent request per key.
+          for (const group of ['ai', ...capabilityGroups(input)] as InterviewQuestionGroup[]) {
+            questions.push(...(await generateGroup(group)).questions)
+          }
+          return {
+            questions: parseModelContent(JSON.stringify({ questions }), input),
+            advisoryOnly: true, applicationStatusMutation: 'none',
+          }
+        }
+        return await Promise.race([work(), aborted])
       } finally {
         clearTimeout(timeout)
         externalSignal?.removeEventListener('abort', cancel)
         controller.signal.removeEventListener('abort', onAbort)
-        // Stop sibling requests if one group failed; never leave model calls running after return.
+        // Stop active requests and retry waits when the shared operation ends.
         controller.abort()
       }
     },

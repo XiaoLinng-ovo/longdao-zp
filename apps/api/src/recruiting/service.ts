@@ -15,6 +15,8 @@ import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pr
 import { buildRuleBasedReport, buildJobAnalysisContext, buildJobRequirements as normalizeJobRequirements, isResumePlaceholderName, isResumeNameWithAppendedFields, normalizeResumeCandidateName } from '@smartrecruit-pro/resume-intelligence'
 import { initialResumeScanStatus } from './resume-scan-policy.js'
 import { latestAnalysisByKey } from './latest-analysis.js'
+import { buildDashboardTodos, type DashboardTodo } from './dashboard-todos.js'
+import type { DashboardInterviewReview } from '../interviews/question-sheet-repository.js'
 import { interviewProgressByApplication } from './interview-progress.js'
 import { prepareInterviewScheduleUpdate } from './interview-schedule.js'
 import { applyResumeReview, resumeScoreSummary, type ResumeReviewInput } from './resume-scoring.js'
@@ -51,6 +53,7 @@ type ReviewAnalysisResultInput = {
 export interface RecruitingReport { generatedAt: string; summary: Array<{ label: string; value: number; detail: string }>; funnel: Array<{ stage: string; count: number; conversionRate: number | null }>; statusStats: Array<{ entity: string; status: string; count: number }>; jobFilling: Array<{ jobId: string; code: string; title: string; headcount: number; filledCount: number; openCount: number; fillRate: number }>; channels: Array<{ channel: string; applications: number; screened: number; interviewed: number; offers: number; hired: number; conversionRate: number }>; recruitmentCycle: { averageDaysToHire: number | null; medianDaysToHire: number | null; hiredCount: number }; feedbackCompletion: { expected: number; locked: number; completionRate: number | null }; offerAcceptance: { sent: number; accepted: number; acceptanceRate: number | null } }
 export interface DashboardSummary {
   generatedAt: string
+  todos: DashboardTodo[]
   metrics: Array<{ label: string; value: number; detail: string }>
   funnel: Array<{ stage: string; count: number; conversionRate: number | null }>
   pendingApprovals: RecruitmentRequestRecord[]
@@ -587,7 +590,7 @@ export class RecruitingService {
   }
 
   private mapRepositoryInterview(item: RepositoryInterview): InterviewRecord {
-    return { id: item.id, code: item.businessId, applicationId: item.applicationId, round: item.round, type: item.type as InterviewType, title: item.title, status: item.status as InterviewRecord['status'], ...(item.scheduledStartAt ? { scheduledStartAt: item.scheduledStartAt } : {}), ...(item.scheduledEndAt ? { scheduledEndAt: item.scheduledEndAt } : {}), ...(item.timezone ? { timezone: item.timezone } : {}), ...(item.location ? { location: item.location } : {}), ...(item.meetingUrl ? { meetingUrl: item.meetingUrl } : {}), participants: item.participants.map((participant) => ({ userId: participant.userId, ...(participant.name ? { name: participant.name } : {}), role: (participant.role || 'interviewer') as InterviewParticipant['role'], required: participant.required ?? true })), createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, code: item.businessId, applicationId: item.applicationId, round: item.round, stage: item.stage, type: item.type as InterviewType, title: item.title, status: item.status as InterviewRecord['status'], ...(item.scheduledStartAt ? { scheduledStartAt: item.scheduledStartAt } : {}), ...(item.scheduledEndAt ? { scheduledEndAt: item.scheduledEndAt } : {}), ...(item.timezone ? { timezone: item.timezone } : {}), ...(item.location ? { location: item.location } : {}), ...(item.meetingUrl ? { meetingUrl: item.meetingUrl } : {}), participants: item.participants.map((participant) => ({ userId: participant.userId, ...(participant.name ? { name: participant.name } : {}), role: (participant.role || 'interviewer') as InterviewParticipant['role'], required: participant.required ?? true })), createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   private mapRepositoryFeedback(item: RepositoryInterviewFeedback): InterviewFeedbackRecord {
@@ -1272,11 +1275,20 @@ export class RecruitingService {
       const patch = prepareInterviewScheduleUpdate(current, input)
       if (!Object.keys(patch).length) return current
       const before = Object.fromEntries(Object.keys(patch).map((key) => [key, current[key as keyof typeof patch] ?? null]))
-      for (const key of Object.keys(patch) as Array<keyof typeof patch>) {
-        const value = patch[key]
-        if (value === null) delete current[key]
-        else if (value !== undefined) current[key] = value
+      if (patch.scheduledStartAt !== undefined) current.scheduledStartAt = patch.scheduledStartAt
+      if (patch.scheduledEndAt !== undefined) {
+        if (patch.scheduledEndAt === null) delete current.scheduledEndAt
+        else current.scheduledEndAt = patch.scheduledEndAt
       }
+      if (patch.location !== undefined) {
+        if (patch.location === null) delete current.location
+        else current.location = patch.location
+      }
+      if (patch.meetingUrl !== undefined) {
+        if (patch.meetingUrl === null) delete current.meetingUrl
+        else current.meetingUrl = patch.meetingUrl
+      }
+      if (patch.participants !== undefined) current.participants = patch.participants
       current.updatedAt = LocalRecruitingStore.timestamp()
       addEvent(state, { subjectType: 'interview', subjectId: current.id, action: 'update', actorId, reason: '修改面试安排', metadata: { before, after: patch } })
       return current
@@ -1357,8 +1369,10 @@ export class RecruitingService {
     }
     return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const application = applicationOrThrow(state, interview.applicationId); const feedback = state.interviewFeedback.filter((x) => x.interviewId === id); if (!feedback.length || feedback.some((x) => x.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试'); interview.status = 'completed'; interview.updatedAt = LocalRecruitingStore.timestamp(); application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'; if (outcome === 'reject') application.rejectionReason = '面试未通过'; application.updatedAt = interview.updatedAt; addEvent(state, { subjectType: 'interview', subjectId: id, action: 'conclude', fromStatus: 'scheduled', toStatus: 'completed', actorId, metadata: { outcome } }); return interview }) }
 
-  async getDashboardSummary(departmentId?: string): Promise<DashboardSummary> {
+  async getDashboardSummary(departmentId?: string, loadReviews?: (interviewIds: string[]) => Promise<DashboardInterviewReview[]>): Promise<DashboardSummary> {
     const state = await this.stateView(departmentId)
+    const reviews = loadReviews ? await loadReviews(state.interviews.filter(row => row.status !== 'cancelled').map(row => row.id)) : []
+    const todos = buildDashboardTodos(state, reviews)
     const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
     const counts = [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
@@ -1377,19 +1391,20 @@ export class RecruitingService {
       .filter((interview) => interview.status === 'scheduled' || interview.status === 'completed')
       .map((interview) => {
         const feedback = state.interviewFeedback.filter((item) => item.interviewId === interview.id)
-        const feedbackStatus: InterviewFeedbackRecord['status'] | 'pending' = feedback.length && feedback.every((item) => item.status === 'locked') ? 'locked' : feedback.length ? feedback[0]!.status : 'pending'
+        const missingRequired = interview.participants.some(person => person.required && person.role === 'interviewer' && !feedback.some(item => item.interviewerId === person.userId && item.status === 'locked'))
+        const feedbackStatus: InterviewFeedbackRecord['status'] | 'pending' = feedback.find(item => item.status !== 'locked')?.status ?? (feedback.length && !missingRequired ? 'locked' : 'pending')
         const application = state.applications.find((item) => item.id === interview.applicationId)
         const candidate = application ? state.candidates.find((item) => item.id === application.candidateId) : undefined
         const job = application ? state.jobs.find((item) => item.id === application.jobId) : undefined
         return { ...interview, application: application!, feedbackStatus, candidateName: candidate?.fullName || '未知候选人', jobTitle: job?.title || '未知岗位' }
       })
-      .filter((interview) => interview.feedbackStatus !== 'locked')
+      .filter((interview) => interview.feedbackStatus !== 'locked' && todos.some(todo => todo.id === `feedback-${interview.id}`))
       .sort((a, b) => (a.scheduledStartAt ?? a.updatedAt).localeCompare(b.scheduledStartAt ?? b.updatedAt))
     const failedTasks = state.analysisTasks
-      .filter((task) => task.status === 'failed')
+      .filter((task) => task.status === 'failed' && todos.some(todo => todo.id === `analysis-${task.id}`))
       .slice()
       .sort((a, b) => b.availableAt.localeCompare(a.availableAt))
-    return { generatedAt: LocalRecruitingStore.timestamp(), metrics, funnel, pendingApprovals, pendingFeedback, failedTasks }
+    return { generatedAt: LocalRecruitingStore.timestamp(), todos, metrics, funnel, pendingApprovals, pendingFeedback, failedTasks }
   }
 
   async getReports(departmentId?: string): Promise<RecruitingReport> {

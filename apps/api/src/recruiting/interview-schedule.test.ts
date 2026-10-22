@@ -13,6 +13,15 @@ describe('interview schedule validation', () => {
     })
   })
 
+  it('normalizes a replacement interviewer and requires at least one interviewer', () => {
+    assert.deepEqual(prepareInterviewScheduleUpdate(current, { participants: [{ userId: ' user-2 ', name: ' 林晓 ', role: 'interviewer' }] }), {
+      participants: [{ userId: 'user-2', name: '林晓', role: 'interviewer', required: true }],
+    })
+    for (const participants of [[], [{ userId: 'user-2', role: 'observer' }], [{ userId: '', role: 'interviewer' }]]) {
+      assert.throws(() => prepareInterviewScheduleUpdate(current, { participants }), (error: any) => error.code === 'VALIDATION_ERROR' && error.status === 400)
+    }
+  })
+
   for (const input of [null, [], 123, { status: 'completed' }, { applicationId: 'other' }, { participants: [] }, { location: 1 }, { scheduledStartAt: null }, { scheduledStartAt: '' }, { scheduledStartAt: 'invalid' }, { scheduledStartAt: '2026-10-16T10:00' }, { scheduledStartAt: '2026-02-30T10:00:00Z' }, { scheduledStartAt: '2026-10-17T00:00:00Z' }, { scheduledEndAt: '2026-10-16T02:00:00Z' }, { meetingUrl: 'ftp://meeting.example' }, { meetingUrl: 'not a url' }, { location: 'x'.repeat(1001) }]) {
     it(`rejects invalid schedule ${JSON.stringify(input).slice(0, 100)}`, () => {
       assert.throws(() => prepareInterviewScheduleUpdate(current, input), (error: any) => error.code === 'VALIDATION_ERROR' && error.status === 400)
@@ -27,6 +36,23 @@ describe('interview schedule validation', () => {
 })
 
 describe('interview rescheduling persistence', () => {
+  it('updates the interviewers on an existing schedule without creating another interview', async () => {
+    process.env.NODE_ENV = 'test'
+    const store = new LocalRecruitingStore()
+    const service = new RecruitingService(store)
+    const interview = await service.createInterview({ applicationId: 'application-8821', title: '第二轮复试', ...current,
+      participants: [{ userId: 'user-demo', name: '初试面试官', role: 'interviewer' }] })
+
+    const changed = await service.updateInterviewSchedule(interview.id, {
+      scheduledStartAt: '2026-10-17T06:00:00Z',
+      scheduledEndAt: null,
+      participants: [{ userId: 'user-next', name: '复试面试官', role: 'interviewer', required: true }],
+    }, 'editor')
+
+    assert.deepEqual(changed.participants, [{ userId: 'user-next', name: '复试面试官', role: 'interviewer', required: true }])
+    assert.equal((await store.read()).interviews.length, 1)
+  })
+
   it('updates the original interview by code without losing feedback, participants or application state', async () => {
     process.env.NODE_ENV = 'test'
     const store = new LocalRecruitingStore()

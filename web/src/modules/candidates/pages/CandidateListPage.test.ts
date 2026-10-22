@@ -81,6 +81,8 @@ describe('CandidateListPage resume upload', () => {
     app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
     app.mount(root)
     await flush()
+    expect(root.querySelector('.page-header h2')?.textContent).toBe('简历库 · AI 评分')
+    expect(root.querySelector('.page-header p')).toBeNull()
 
     const openButton = [...root.querySelectorAll('button')].find((button) => button.textContent === '上传简历并建档')
     openButton!.click()

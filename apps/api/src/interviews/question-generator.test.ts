@@ -182,7 +182,7 @@ describe('AI capability question bank', () => {
       const questions = generatedBank(); mutate(questions)
       const requests: RequestInit[] = []
       await assert.rejects(bankGenerator(questions, requests).generate(bankInput), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_RESPONSE_INVALID')
-      assert.ok(requests.length >= 3)
+      assert.ok(requests.length >= 2)
     }
   })
   it('keeps legacy single-group callers compatible and rejects invalid includeCommonQuestions', async () => {
@@ -236,23 +236,26 @@ describe('第二轮复试题库', () => {
 })
 
 
-describe('题库生成并行与超时保护', () => {
+describe('题库串行生成、限流重试与超时保护', () => {
   const config = { baseUrl: 'https://llm.example/v1', apiKey: 'test-key', model: 'mock', timeoutMs: 2000 }
   const groupOf = (init?: RequestInit): string => JSON.parse(JSON.parse(String(init?.body)).messages[1].content).requestedGroup
   const responseFor = (group: string) => responseWith(JSON.stringify({ questions: generatedBank(true).filter(q => q.group === group) }))
-  it('四组请求同时开始，全部通过校验后再合并', async () => {
-    const releases: Array<() => void> = []
+  it('四组依次请求，全部通过校验后再合并', async () => {
+    let release!: () => void
+    const groups: string[] = []
     const signals: AbortSignal[] = []
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       signals.push(init!.signal! as AbortSignal)
-      await new Promise<void>(resolve => releases.push(resolve))
+      groups.push(groupOf(init))
+      if (groups.length === 1) await new Promise<void>(resolve => { release = resolve })
       return responseFor(groupOf(init))
     })
     const pending = generator.generate({ ...bankInput, stage: 'final' })
-    assert.equal(releases.length, 4)
-    assert.equal(new Set(signals).size, 1)
-    releases.forEach(release => release())
+    assert.deepEqual(groups, ['ai'])
+    release()
     assert.equal((await pending).questions.length, 25)
+    assert.deepEqual(groups, ['ai', 'hr', 'department', 'boss'])
+    assert.equal(new Set(signals).size, 1)
     assert.ok(signals.every(signal => signal.aborted))
   })
   it('只重试格式失败的组，已成功的组不重复调用', async () => {
@@ -274,7 +277,7 @@ describe('题库生成并行与超时保护', () => {
       return response
     })
     await assert.rejects(generator.generate({ ...bankInput, stage: 'final' }), (error: unknown) => error instanceof InterviewQuestionGenerationError && /超时/.test(error.message))
-    assert.equal(signals.length, 4)
+    assert.equal(signals.length, 1)
     assert.ok(signals.every(signal => signal.aborted))
   })
   it('格式重试沿用同一个总超时，不能重新开始计时', async () => {
@@ -289,7 +292,7 @@ describe('题库生成并行与超时保护', () => {
     assert.equal(signals[0], signals[1])
     assert.ok(signals[1]!.aborted)
   })
-  it('外部取消终止四组，预先取消时不启动请求', async () => {
+  it('外部取消终止当前组且不启动后续组，预先取消时不启动请求', async () => {
     const signals: AbortSignal[] = []
     const controller = new AbortController()
     const generator = createInterviewQuestionGenerator(config, async (_, init) => { signals.push(init!.signal! as AbortSignal); return new Promise<never>(() => {}) })
@@ -297,23 +300,106 @@ describe('题库生成并行与超时保护', () => {
     const rejected = assert.rejects(pending, /已取消/)
     controller.abort()
     await rejected
-    assert.equal(signals.length, 4)
+    assert.equal(signals.length, 1)
     assert.ok(signals.every(signal => signal.aborted))
     await assert.rejects(generator.generate(bankInput, controller.signal), /已取消/)
-    assert.equal(signals.length, 4)
+    assert.equal(signals.length, 1)
   })
-  it('某组失败时中止其他挂起组，不等待其结束', async () => {
+  it('某组遇到不可重试HTTP错误时停止，不请求后续组', async () => {
     const signals: AbortSignal[] = []
+    const groups: string[] = []
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       signals.push(init!.signal! as AbortSignal)
-      return groupOf(init) === 'hr' ? responseWith('{}', 503) : new Promise<never>(() => {})
+      groups.push(groupOf(init))
+      return groupOf(init) === 'hr' ? responseWith('{}', 503) : responseFor(groupOf(init))
     })
     await assert.rejects(generator.generate({ ...bankInput, stage: 'final' }), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_HTTP_ERROR')
+    assert.deepEqual(groups, ['ai', 'hr'])
     assert.ok(signals.every(signal => signal.aborted))
   })
   it('单组均合格时仍拒绝跨组重复问题', async () => {
     const questions = generatedBank(true)
     questions[10]!.question = questions[0]!.question
     await assert.rejects(bankGenerator(questions).generate({ ...bankInput, stage: 'final' }), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_RESPONSE_INVALID')
+  })
+
+  const limited = (retryAfter?: string) => new Response('provider-secret', {
+    status: 429, headers: retryAfter === undefined ? {} : { 'Retry-After': retryAfter },
+  })
+  it('限流后仅重试当前组，不重复已成功组，最终生成完整复试题库', async () => {
+    const calls: Record<string, number> = {}
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      const group = groupOf(init)
+      calls[group] = (calls[group] ?? 0) + 1
+      return group === 'hr' && calls[group] === 1 ? limited('0') : responseFor(group)
+    })
+    assert.equal((await generator.generate({ ...bankInput, stage: 'final' })).questions.length, 25)
+    assert.deepEqual(calls, { ai: 1, hr: 2, department: 1, boss: 1 })
+  })
+  it('持续限流最多重试三次，给出友好错误而不暴露服务端信息', async () => {
+    let calls = 0
+    const generator = createInterviewQuestionGenerator(config, async () => { calls++; return limited('0') })
+    await assert.rejects(generator.generate(bankInput), (error: unknown) => {
+      assert.ok(error instanceof InterviewQuestionGenerationError)
+      assert.equal(error.code, 'MODEL_HTTP_ERROR')
+      assert.match(error.message, /429.*重试/)
+      assert.doesNotMatch(error.message, /provider-secret/)
+      return true
+    })
+    assert.equal(calls, 4)
+  })
+  it('遵守Retry-After等待时长', async () => {
+    const times: number[] = []
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      times.push(performance.now())
+      return times.length === 1 ? limited('0.05') : responseFor(groupOf(init))
+    })
+    assert.equal((await generator.generate(bankInput)).questions.length, 20)
+    assert.ok(times[1]! - times[0]! >= 45)
+  })
+  for (const retryAfter of [undefined, 'invalid']) {
+    it('Retry-After为' + String(retryAfter) + '时使用默认退避', async () => {
+      const times: number[] = []
+      const generator = createInterviewQuestionGenerator({ ...config, timeoutMs: 5000 }, async (_, init) => {
+        times.push(performance.now())
+        return times.length === 1 ? limited(retryAfter) : responseFor(groupOf(init))
+      })
+      assert.equal((await generator.generate(bankInput)).questions.length, 20)
+      assert.ok(times[1]! - times[0]! >= 950)
+    })
+  }
+  for (const retryAfter of ['60', new Date(Date.now() + 60_000).toUTCString()]) {
+    it('Retry-After为' + retryAfter + '时仍遵守共享总超时', async () => {
+      let calls = 0
+      const generator = createInterviewQuestionGenerator({ ...config, timeoutMs: 30 }, async () => { calls++; return limited(retryAfter) })
+      await assert.rejects(generator.generate(bankInput), /超时/)
+      assert.equal(calls, 1)
+    })
+  }
+  it('取消退避等待后不再重试或请求后续组', async () => {
+    let calls = 0
+    let waiting!: () => void
+    const started = new Promise<void>(resolve => { waiting = resolve })
+    const controller = new AbortController()
+    const generator = createInterviewQuestionGenerator(config, async () => { calls++; waiting(); return limited('60') })
+    const pending = generator.generate(bankInput, controller.signal)
+    const rejected = assert.rejects(pending, /已取消/)
+    await started
+    await new Promise(resolve => setTimeout(resolve, 10))
+    controller.abort()
+    await rejected
+    assert.equal(calls, 1)
+  })
+  it('格式重试与限流重试分别计数', async () => {
+    const calls: Record<string, number> = {}
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      const group = groupOf(init)
+      calls[group] = (calls[group] ?? 0) + 1
+      if (group === 'ai' && calls[group] <= 3) return limited('0')
+      if (group === 'ai' && calls[group] === 4) return responseWith('{}')
+      return responseFor(group)
+    })
+    assert.equal((await generator.generate(bankInput)).questions.length, 20)
+    assert.deepEqual(calls, { ai: 5, hr: 1, department: 1 })
   })
 })

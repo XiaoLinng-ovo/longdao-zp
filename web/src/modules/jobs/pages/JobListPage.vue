@@ -145,7 +145,7 @@ onMounted(async () => {
   <p v-if="route.query.notice === 'recruitment-requests-disabled'" class="muted" role="status">
     需求申请审批已停用，已为你打开岗位管理。可直接新建岗位；录用审批与 Offer 仍正常保留。
   </p>
-  <PageHeader title="岗位管理" :description="externalJobPublishingEnabled ? '维护职位说明、JD 与发布状态' : '维护岗位信息、职位说明书与 JD'">
+  <PageHeader title="岗位管理">
     <div class="inline-actions">
       <button class="btn btn-primary" type="button" :disabled="Boolean(actingId)" @click="openCreateJob">新建岗位</button>
       <button class="btn btn-ghost" type="button" :disabled="Boolean(actingId) || loading" @click="refresh">刷新</button>

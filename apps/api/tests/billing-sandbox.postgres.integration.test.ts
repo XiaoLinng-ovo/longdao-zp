@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
-import {randomUUID} from 'node:crypto'
+import {createHash,randomUUID} from 'node:crypto'
 import {createPostgresHealthPool} from '../src/recruiting/db-health.js'
 import {BillingSandboxService} from '../src/platform/billing-sandbox.js'
 import {MockPaymentAdapter,type SimulationPaymentEvent} from '../src/platform/mock-payment.js'
@@ -8,8 +8,8 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
  assert.equal(process.env.PGPORT,'15433');assert.equal(process.env.PGDATABASE,'smartrecruit_test')
  const pool=createPostgresHealthPool(),adapter=new MockPaymentAdapter(),service=new BillingSandboxService(pool,adapter)
  const org=randomUUID(),other=randomUUID(),owner=randomUUID(),member=randomUUID(),outsider=randomUUID(),users=[owner,member,outsider]
- const create=(key=randomUUID(),productCode='team_test_v1',version=1,channel='mock_alipay')=>service.create(owner,org,{productCode,channel,expectedVersion:version},key)
- const event=(id:string,kind:SimulationPaymentEvent['kind']='success'):SimulationPaymentEvent=>({eventId:'sandbox:'+id+':'+kind,orderId:id,organizationId:org,channel:'mock_alipay',kind,transactionId:'sandbox-tx:'+id,amountFen:100,currency:'CNY',merchant:'smartrecruit-sandbox',reason:kind==='refund'?'测试退款':''})
+ const create=(key=randomUUID(),productCode='all_modules_year_v1',version=1,channel='mock_alipay')=>service.create(owner,org,{productCode,channel,expectedVersion:version},key)
+ const event=(id:string,kind:SimulationPaymentEvent['kind']='success'):SimulationPaymentEvent=>({eventId:'sandbox:'+id+':'+kind,orderId:id,organizationId:org,channel:'mock_alipay',kind,transactionId:'sandbox-tx:'+id,amountFen:250000,currency:'CNY',merchant:'smartrecruit-sandbox',reason:kind==='refund'?'测试退款':''})
  const receive=(e:SimulationPaymentEvent)=>{const signed=adapter.sign(e);return service.acceptNotification(owner,org,signed.body,signed.signature)}
  let first:any,second:any,newer:any
  try {
@@ -18,16 +18,21 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
   await pool.query("INSERT INTO organization_members(organization_id,user_id,role,business_role) VALUES($1,$2,'owner','recruiter'),($1,$3,'member','recruiter'),($4,$5,'owner','recruiter')",[org,owner,member,other,outsider])
   const baseline=(await pool.query('SELECT plan_version_id,entitlement_version,seat_usage,job_usage,service_status,service_version FROM organizations WHERE id=$1',[org])).rows[0]
   await t.test('tenant admin catalog, strict amounts, live channel rejection and page bounds',async()=>{
-   assert.equal((await service.read(owner,org)).livePaymentEnabled,false)
+   const report=await service.read(owner,org)
+   assert.equal(report.livePaymentEnabled,false)
+   assert.deepEqual(report.catalog.map(p=>[p.amountFen,p.durationMonths,p.durationDays,p.allModules]),[[250000,12,null,true],[130000,6,null,true],[25800,1,null,true]])
+   assert.equal(new Set(report.catalog.map(p=>p.planVersionId)).size,1)
    await assert.rejects(service.read(member,org),{code:'WORKSPACE_ADMIN_REQUIRED'})
    await assert.rejects(service.read(outsider,org),{status:403})
    await assert.rejects(service.read(owner,org,0),{code:'INVALID_PAGE'})
-   await assert.rejects(service.create(owner,org,{productCode:'team_test_v1',channel:'alipay',expectedVersion:1},randomUUID()),{code:'LIVE_PAYMENT_DISABLED'})
-   await assert.rejects(service.create(owner,org,{productCode:'team_test_v1',channel:'mock_alipay',expectedVersion:1,amountFen:1},randomUUID()),{code:'INVALID_ORDER'})
+   await assert.rejects(service.create(owner,org,{productCode:'all_modules_year_v1',channel:'alipay',expectedVersion:1},randomUUID()),{code:'LIVE_PAYMENT_DISABLED'})
+   await assert.rejects(service.create(owner,org,{productCode:'all_modules_year_v1',channel:'mock_alipay',expectedVersion:1,amountFen:1},randomUUID()),{code:'INVALID_ORDER'})
+   await assert.rejects(create(randomUUID(),'team_test_v1'),{code:'INVALID_ORDER'})
   })
   await t.test('concurrent same-key creation persists once and input conflict fails',async()=>{
-   const key=randomUUID(),orders=await Promise.all([create(key),create(key)]);first=orders[0];assert.equal(first.id,orders[1]!.id);assert.equal(first.amountFen,100)
-   await assert.rejects(create(key,'growth_test_v1'),{code:'ORDER_KEY_CONFLICT'})
+   const key=randomUUID(),orders=await Promise.all([create(key),create(key)]);first=orders[0];assert.equal(first.id,orders[1]!.id);assert.equal(first.amountFen,250000)
+   assert.equal(first.durationMonths,12);assert.equal(first.durationDays,null);assert.equal(first.allModules,true)
+   await assert.rejects(create(key,'all_modules_half_year_v1'),{code:'ORDER_KEY_CONFLICT'})
    assert.equal((await service.read(owner,org)).total,1)
    await assert.rejects(service.simulate(outsider,other,first.id,'success'),{code:'ORDER_NOT_FOUND'})
   })
@@ -49,7 +54,7 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
    assert.equal((await service.read(owner,org)).entitlement.activeOrderId,first.id)
   })
   await t.test('new purchase followed by refund of old purchase preserves newer rights',async()=>{
-   newer=await create(randomUUID(),'growth_test_v1',2,'mock_wechat');await service.simulate(owner,org,newer.id,'success')
+   newer=await create(randomUUID(),'all_modules_half_year_v1',2,'mock_wechat');await service.simulate(owner,org,newer.id,'success')
    assert.equal((await service.read(owner,org)).entitlement.version,3)
    await service.simulate(owner,org,first.id,'refund','测试旧订单退款')
    const current=await service.read(owner,org);assert.equal(current.entitlement.activeOrderId,newer.id);assert.equal(current.entitlement.version,3)
@@ -64,11 +69,11 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
   })
   await t.test('failed payment can succeed; stale version cannot create a new order',async()=>{
    await assert.rejects(create(),{code:'VERSION_CONFLICT'})
-   const order=await create(randomUUID(),'team_test_v1',4);await service.simulate(owner,org,order.id,'failure')
+   const order=await create(randomUUID(),'all_modules_year_v1',4);await service.simulate(owner,org,order.id,'failure')
    assert.equal((await service.simulate(owner,org,order.id,'success')).order.status,'fulfilled')
   })
   await t.test('expiration and cancellation followed by success record review without granting',async()=>{
-   const expired=await create(randomUUID(),'team_test_v1',5),cancelled=await create(randomUUID(),'team_test_v1',5)
+   const expired=await create(randomUUID(),'all_modules_year_v1',5),cancelled=await create(randomUUID(),'all_modules_year_v1',5)
    await assert.rejects(service.simulate(owner,org,expired.id,'expire'),{code:'ORDER_NOT_EXPIRED'})
    await pool.query("UPDATE billing_sandbox_orders SET expires_at=now()-interval '1 minute' WHERE id=$1",[expired.id])
    assert.equal((await service.simulate(owner,org,expired.id,'expire')).order.status,'expired')
@@ -77,7 +82,7 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
    await service.simulate(owner,org,cancelled.id,'refund','测试撤销退款');assert.equal((await service.read(owner,org)).entitlement.version,5)
   })
   await t.test('event write failure rolls back paid state and shadow grant, then recovery succeeds',async()=>{
-   const order=await create(randomUUID(),'team_test_v1',5),db=await pool.connect()
+   const order=await create(randomUUID(),'all_modules_year_v1',5),db=await pool.connect()
    // A transaction-local trigger is unnecessary: use a targeted CHECK, removed in finally.
    const constraint='sandbox_fault_'+randomUUID().replaceAll('-','')
    try {
@@ -98,9 +103,32 @@ test('simulation orders persist atomically in isolated PostgreSQL without changi
    await pool.query("UPDATE organization_members SET role='owner' WHERE organization_id=$1 AND user_id=$2",[org,owner])
   })
   await t.test('pagination and all real rights remain intact',async()=>{
-   for(let i=0;i<15;i++)await create(randomUUID(),'team_test_v1',6)
+   for(let i=0;i<15;i++)await create(randomUUID(),'all_modules_year_v1',6)
    const p1=await service.read(owner,org),p2=await service.read(owner,org,2);assert.equal(p1.orders.length,20);assert.ok(p2.orders.length>0)
    assert.ok(p2.orders.every(o=>!p1.orders.some(x=>x.id===o.id)))
+   assert.deepEqual((await pool.query('SELECT plan_version_id,entitlement_version,seat_usage,job_usage,service_status,service_version FROM organizations WHERE id=$1',[org])).rows[0],baseline)
+  })
+  await t.test('all three offers grant calendar-month terms and identical module scope',async()=>{
+   for(const [productCode,months,amount] of [['all_modules_year_v1',12,250000],['all_modules_half_year_v1',6,130000],['all_modules_month_v1',1,25800]] as const){
+    const version=(await service.read(owner,org)).entitlement.version
+    const order=await create(randomUUID(),productCode,version)
+    await service.simulate(owner,org,order.id,'success')
+    const report=await service.read(owner,org)
+    assert.equal(order.amountFen,amount);assert.equal(report.entitlement.allModules,true)
+    const row=(await pool.query("SELECT e.expires_at,((o.paid_at AT TIME ZONE 'Asia/Shanghai') + make_interval(months => $2::integer)) AT TIME ZONE 'Asia/Shanghai' AS expected FROM billing_sandbox_entitlements e JOIN billing_sandbox_orders o ON o.id=e.active_order_id WHERE e.organization_id=$1",[org,months])).rows[0]
+    assert.equal(new Date(row.expires_at).getTime(),new Date(row.expected).getTime())
+   }
+  })
+  await t.test('retired day-based orders preserve snapshots, retries and payment duration',async()=>{
+   const version=(await service.read(owner,org)).entitlement.version,key=randomUUID(),id=randomUUID()
+   const fingerprint=createHash('sha256').update(JSON.stringify(['team_test_v1','mock_alipay',version])).digest('hex')
+   await pool.query("INSERT INTO billing_sandbox_orders(id,organization_id,actor_id,idempotency_key,fingerprint,product_code,plan_version_id,product_name,seat_limit,job_limit,amount_fen,currency,duration_days,channel,expected_version) VALUES($1,$2,$3,$4,$5,'team_test_v1','00000000-0000-4000-8000-000000000053','Legacy team',20,200,100,'CNY',30,'mock_alipay',$6)",[id,org,owner,key,fingerprint,version])
+   const old=await create(key,'team_test_v1',version)
+   assert.equal(old.id,id);assert.equal(old.name,'Legacy team');assert.equal(old.amountFen,100);assert.equal(old.durationDays,30);assert.equal(old.durationMonths,null);assert.equal(old.allModules,false)
+   await service.simulate(owner,org,id,'success')
+   const row=(await pool.query("SELECT e.expires_at,o.paid_at + interval '30 days' AS expected FROM billing_sandbox_entitlements e JOIN billing_sandbox_orders o ON o.id=e.active_order_id WHERE e.organization_id=$1",[org])).rows[0]
+   assert.equal(new Date(row.expires_at).getTime(),new Date(row.expected).getTime())
+   assert.equal((await service.read(owner,org)).entitlement.allModules,false)
    assert.deepEqual((await pool.query('SELECT plan_version_id,entitlement_version,seat_usage,job_usage,service_status,service_version FROM organizations WHERE id=$1',[org])).rows[0],baseline)
   })
  } finally {

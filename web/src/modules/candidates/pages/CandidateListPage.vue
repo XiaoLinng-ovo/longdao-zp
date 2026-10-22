@@ -421,7 +421,7 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
       </div>
     </div>
   </div>
-  <PageHeader title="简历库 · AI 评分" description="跟踪候选人评估、面试和申请状态">
+  <PageHeader title="简历库 · AI 评分">
     <div class="inline-actions">
       <button class="btn btn-ghost" type="button" @click="refresh()">刷新</button>
       <button class="btn btn-primary" type="button" :disabled="creatingCandidate" @click="showCreateApplication = false; openResumeUpload()">上传简历并建档</button>

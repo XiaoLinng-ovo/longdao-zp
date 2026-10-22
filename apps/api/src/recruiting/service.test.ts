@@ -347,6 +347,27 @@ describe('interview enterprise access', () => {
 
 
 describe('dashboard resume count', () => {
+  it('only loads review status for scoped non-cancelled interviews and includes unscored online sessions', async () => {
+    process.env.NODE_ENV = 'test'
+    const store = new LocalRecruitingStore()
+    const service = new RecruitingService(store)
+    await store.transaction(state => {
+      const base = { code: 'IV', round: 1, stage: 'initial' as const, type: 'technical' as const,
+        title: '初试', status: 'completed' as const, participants: [], createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z' }
+      state.interviews.push({ ...base, id: 'tech', applicationId: 'application-8821' },
+        { ...base, id: 'other', applicationId: 'application-8814' },
+        { ...base, id: 'cancelled', applicationId: 'application-8821', status: 'cancelled' })
+      state.interviewFeedback.push({ id: 'feedback', interviewId: 'tech', interviewerId: 'hr', status: 'locked', ratings: {}, strengths: [], concerns: [] })
+    })
+    const dashboard = await service.getDashboardSummary('dept-tech', async ids => {
+      assert.deepEqual(ids, ['tech'])
+      return [{ interviewId: 'tech', stage: 'initial', hasCompletedLive: true, decision: null, sheets: [] }]
+    })
+    assert.ok(dashboard.todos.some(row => row.id === 'sheets-application-8821-initial'))
+    assert.ok(!dashboard.todos.some(row => row.id === 'feedback-tech'))
+    assert.equal(dashboard.pendingFeedback.length, 0)
+    assert.ok(!dashboard.todos.some(row => row.description.includes('赵雨欣')))
+  })
   it('counts uploaded resumes rather than applications, including multiple resumes and resumes without an application', async () => {
     const { service, store, created } = await createLocalFixture()
     await store.transaction(state => {

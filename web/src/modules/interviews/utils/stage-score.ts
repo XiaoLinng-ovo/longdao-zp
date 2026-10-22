@@ -30,15 +30,16 @@ export function isScoreableSheet(status: string): boolean {
 /** 表内得分 = 已打分题目的算术平均；未打分的题不参与，也不按 0 计。 */
 export function aggregateQuestions(questions: ApiInterviewQuestion[]): QuestionSheetAggregate {
   const scored = questions.filter((question) => typeof question.finalScore === 'number')
-  const buckets = new Map<string, number[]>()
+  const buckets = new Map<string, Array<{ score: number; max: number }>>()
   for (const question of scored) {
     const key = question.dimension?.trim() || question.category?.trim() || '综合能力'
-    buckets.set(key, [...(buckets.get(key) ?? []), question.finalScore as number])
+    const max = question.category?.startsWith('rubric:') ? Math.max(1, ...question.tiers.map(tier => tier.max)) : 100
+    buckets.set(key, [...(buckets.get(key) ?? []), { score: question.finalScore as number, max }])
   }
-  const average = (values: number[]) => Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+  const average = (values: Array<{ score: number; max: number }>) => Math.round(values.reduce((sum, item) => sum + item.score, 0) / values.reduce((sum, item) => sum + item.max, 0) * 100)
   const ratings = Object.fromEntries([...buckets].map(([key, values]) => [key, average(values)]))
   return {
-    score: scored.length ? average(scored.map((question) => question.finalScore as number)) : null,
+    score: scored.length ? average(scored.map((question) => ({ score: question.finalScore as number, max: question.category?.startsWith('rubric:') ? Math.max(1, ...question.tiers.map(tier => tier.max)) : 100 }))) : null,
     ratings,
     scoredCount: scored.length,
     totalCount: questions.length,

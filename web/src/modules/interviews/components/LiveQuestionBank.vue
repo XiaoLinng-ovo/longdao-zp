@@ -2,10 +2,10 @@
 import { computed } from 'vue'
 import type { GeneratedInterviewQuestion } from '../api'
 import { commonGroupsForRound } from '../utils/common-question-templates'
-const props = withDefaults(defineProps<{ questions: GeneratedInterviewQuestion[]; currentQuestion: string; round: number; disabled?: boolean; engine?: string; followUps?: string[]; group?: 'ai' | 'hr' | 'department' }>(), { disabled: false, engine: '', followUps: () => [] })
+const props = withDefaults(defineProps<{ questions: GeneratedInterviewQuestion[]; currentQuestion: string; round: number; disabled?: boolean; engine?: string; followUps?: string[]; group?: 'ai' | 'hr' | 'department' | 'boss' }>(), { disabled: false, engine: '', followUps: () => [] })
 const emit = defineEmits<{ select: [question: string, source: 'manual' | 'ai_adopted'] }>()
 const resumeQuestions = computed(() => props.questions.filter(question => !question.group || question.group === 'ai'))
-const groups = computed(() => commonGroupsForRound(props.round).filter(group => !props.group || group.id === props.group || (props.group === 'department' && group.id === 'boss')).map(group => {
+const groups = computed(() => commonGroupsForRound(props.round).filter(group => !props.group || group.id === props.group).map(group => {
   const generated = props.questions.filter(question => question.group === group.id)
   if (!generated.length) return { ...group, generated: false }
   return { ...group, title: group.id === 'department' && props.round >= 2 ? '业务通用提问' : group.id === 'boss' ? 'BOSS 通用提问' : group.title, generated: true, description: props.engine === 'local_fallback' ? '本地规则能力参考题，每个维度一道。大模型恢复后可重新生成。' : 'AI 按能力维度生成通用考核题，每个维度一道。模板仅作为能力与评分参考，重新生成可换一批问题。', dimensions: group.dimensions.map(dimension => ({ ...dimension, questions: generated.filter(question => question.dimension === dimension.id).map(question => question.question) })) }

@@ -5,12 +5,13 @@ import { MockPaymentAdapter, requireSimulationChannel, type SimulationPaymentEve
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const digest = (input: unknown) => createHash('sha256').update(JSON.stringify(input)).digest('hex')
 export const sandboxCatalog = [
- {code:'team_test_v1',name:'团队版 · 模拟测试',planVersionId:'00000000-0000-4000-8000-000000000053',seatLimit:20,jobLimit:200,amountFen:100,currency:'CNY',durationDays:30},
- {code:'growth_test_v1',name:'成长版 · 模拟测试',planVersionId:'00000000-0000-4000-8000-000000000054',seatLimit:100,jobLimit:2000,amountFen:200,currency:'CNY',durationDays:30},
+ {code:'all_modules_year_v1',name:'全功能年付套餐',planVersionId:'00000000-0000-4000-8000-000000000054',seatLimit:100,jobLimit:2000,amountFen:250000,currency:'CNY',durationDays:null,durationMonths:12,allModules:true},
+ {code:'all_modules_half_year_v1',name:'全功能半年套餐',planVersionId:'00000000-0000-4000-8000-000000000054',seatLimit:100,jobLimit:2000,amountFen:130000,currency:'CNY',durationDays:null,durationMonths:6,allModules:true},
+ {code:'all_modules_month_v1',name:'全功能月付套餐',planVersionId:'00000000-0000-4000-8000-000000000054',seatLimit:100,jobLimit:2000,amountFen:25800,currency:'CNY',durationDays:null,durationMonths:1,allModules:true},
 ] as const
 function orderView(row: any) {
  return {id:row.id,productCode:row.product_code,name:row.product_name,seatLimit:row.seat_limit,jobLimit:row.job_limit,
-  amountFen:row.amount_fen,currency:row.currency,durationDays:row.duration_days,channel:row.channel,status:row.status,
+  amountFen:row.amount_fen,currency:row.currency,durationDays:row.duration_days,durationMonths:row.duration_months ?? null,allModules:row.all_modules ?? false,channel:row.channel,status:row.status,
   createdAt:row.created_at,expiresAt:row.expires_at,paidAt:row.paid_at,refundedAt:row.refunded_at}
 }
 export class BillingSandboxService {
@@ -41,24 +42,27 @@ export class BillingSandboxService {
    const active = shadow?.active_order_id ? (await db.query('SELECT * FROM billing_sandbox_orders WHERE id=$1 AND organization_id=$2',[shadow.active_order_id,org])).rows[0] : undefined
    return {mode:'simulation',livePaymentEnabled:false,catalog:sandboxCatalog,page,pageSize:20,total,
     entitlement:{version:shadow?.version ?? 1,activeOrderId:shadow?.active_order_id ?? null,name:active?.product_name ?? null,
-     seatLimit:active?.seat_limit ?? null,jobLimit:active?.job_limit ?? null,expiresAt:shadow?.expires_at ?? null,
+     seatLimit:active?.seat_limit ?? null,jobLimit:active?.job_limit ?? null,allModules:active?.all_modules ?? false,expiresAt:shadow?.expires_at ?? null,
      effective:!!shadow?.expires_at && new Date(shadow.expires_at).getTime()>Date.now()},orders:orders.rows.map(orderView)}
   })
  }
  async create(actor: string, org: string, input: any, key: string) {
   if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key)) throw new HttpError(400,'INVALID_IDEMPOTENCY_KEY','需要有效订单操作标识')
   if (!input || typeof input!=='object' || Object.keys(input).some(k=>!['productCode','channel','expectedVersion'].includes(k))) throw new HttpError(400,'INVALID_ORDER','订单参数无效；金额由服务器决定')
-  const product = sandboxCatalog.find(p=>p.code===input.productCode),channel=requireSimulationChannel(input.channel)
-  if (!product || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion<1) throw new HttpError(400,'INVALID_ORDER','模拟商品或权益版本无效')
-  const fingerprint=digest([product.code,channel,input.expectedVersion])
+  const channel=requireSimulationChannel(input.channel)
+  if (typeof input.productCode!=='string' || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion<1) throw new HttpError(400,'INVALID_ORDER','模拟商品或权益版本无效')
+  const fingerprint=digest([input.productCode,channel,input.expectedVersion])
   return this.transaction(actor,org,async db=> {
    const previous=(await db.query('SELECT * FROM billing_sandbox_orders WHERE organization_id=$1 AND actor_id=$2 AND idempotency_key=$3',[org,actor,key])).rows[0]
    if(previous) { if(previous.fingerprint!==fingerprint) throw new HttpError(409,'ORDER_KEY_CONFLICT','同一标识不能创建不同订单'); return orderView(previous) }
+   // Retired products remain replayable, but cannot be purchased as new orders.
+   const product = sandboxCatalog.find(p=>p.code===input.productCode)
+   if(!product) throw new HttpError(400,'INVALID_ORDER','模拟商品无效或已下架')
    const shadow=await this.shadow(db,org)
    if(shadow.version!==input.expectedVersion) throw new HttpError(409,'VERSION_CONFLICT','模拟权益已变化，请刷新后创建订单')
    const row=(await db.query(
-    'INSERT INTO billing_sandbox_orders(organization_id,actor_id,idempotency_key,fingerprint,product_code,plan_version_id,product_name,seat_limit,job_limit,amount_fen,currency,duration_days,channel,expected_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *',
-    [org,actor,key,fingerprint,product.code,product.planVersionId,product.name,product.seatLimit,product.jobLimit,product.amountFen,product.currency,product.durationDays,channel,input.expectedVersion])).rows[0]
+    'INSERT INTO billing_sandbox_orders(organization_id,actor_id,idempotency_key,fingerprint,product_code,plan_version_id,product_name,seat_limit,job_limit,amount_fen,currency,duration_days,channel,expected_version,duration_months,all_modules) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *',
+    [org,actor,key,fingerprint,product.code,product.planVersionId,product.name,product.seatLimit,product.jobLimit,product.amountFen,product.currency,product.durationDays,channel,input.expectedVersion,product.durationMonths,product.allModules])).rows[0]
    return orderView(row)
   })
  }
@@ -104,7 +108,7 @@ export class BillingSandboxService {
    if(late || shadow.version!==order.expected_version) {status='review';outcome='review'}
    else {
     status='fulfilled';outcome='applied'
-    await db.query("UPDATE billing_sandbox_entitlements SET version=version+1,active_order_id=$2,plan_version_id=$3,expires_at=now()+($4 * interval '1 day') WHERE organization_id=$1",[org,order.id,order.plan_version_id,order.duration_days])
+    await db.query("UPDATE billing_sandbox_entitlements SET version=version+1,active_order_id=$2,plan_version_id=$3,expires_at=CASE WHEN $5::integer IS NOT NULL THEN ((now() AT TIME ZONE 'Asia/Shanghai') + make_interval(months => $5::integer)) AT TIME ZONE 'Asia/Shanghai' ELSE now()+($4::integer * interval '1 day') END WHERE organization_id=$1",[org,order.id,order.plan_version_id,order.duration_days,order.duration_months])
    }
    await db.query('UPDATE billing_sandbox_orders SET paid_at=now(),transaction_id=$2 WHERE id=$1',[order.id,event.transactionId])
   } else if(event.kind==='failure' && status==='pending') {status='failed';outcome='applied'}

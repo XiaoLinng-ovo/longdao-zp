@@ -105,6 +105,7 @@ const feedbackForm = ref({
 })
 
 const showConclude = ref(false)
+const concludeError = ref('')
 const showSheets = ref(false)
 const showSummary = ref(false)
 const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
@@ -222,7 +223,9 @@ async function submitFeedbackForm() {
 }
 
 function openConclude() {
+  if (!detail.value || acting.value) return
   clearFlags()
+  concludeError.value = ''
   concludeOutcome.value = 'continue'
   showConclude.value = true
 }
@@ -231,16 +234,21 @@ async function submitConclude() {
   if (!detail.value || acting.value) return
   acting.value = true
   clearFlags()
+  concludeError.value = ''
   const id = detail.value.id
+  const outcome = concludeOutcome.value
   try {
-    await concludeInterview(id, concludeOutcome.value)
-    const outcomeLabel = concludeOutcome.value === 'offer' ? '通过，进入 Offer 阶段' : concludeOutcome.value === 'reject' ? '未通过' : '进入下一轮'
-    feedback.value = `面试已完成：${outcomeLabel}`
+    await concludeInterview(id, outcome)
+    const outcomeLabel = outcome === 'offer' ? '通过，进入 Offer 阶段' : outcome === 'reject' ? '未通过' : '进入下一轮'
     showConclude.value = false
     await load()
+    feedback.value = `面试已完成：${outcomeLabel}`
     showSummary.value = true
   } catch (cause) {
-    error.value = describeApiFailure(cause, '完成面试失败').message
+    const failure = describeApiFailure(cause, '完成面试失败，请稍后重试')
+    concludeError.value = failure.code === 'INTERVIEW_FEEDBACK_INCOMPLETE'
+      ? '请先填写并锁定所有面试官的综合反馈，再确认完成面试。可取消此窗口，前往“填写综合反馈”处理。'
+      : failure.message
   } finally {
     acting.value = false
   }
@@ -265,7 +273,7 @@ onMounted(async () => {
         v-if="detail"
         class="sheet-entry"
         type="button"
-        title="面试问题表（题目、候选人回答、AI 打分与阶段综合分公式）"
+        title="面试问题表（角色考察点、评分区间、人工打分与阶段综合分）"
         @click="showSheets = true"
       >
         <span aria-hidden="true">▤</span>
@@ -278,7 +286,7 @@ onMounted(async () => {
         进入 AI 面试室
       </button>
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSheets = true">
-        逐题评价与 AI 评分
+        考察点评分
       </button>
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSummary = true">面试总结表</button>
       <button v-if="detail && detail.feedbackStatus !== 'locked' && detail.status !== 'cancelled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openFeedback">
@@ -411,13 +419,14 @@ onMounted(async () => {
     </div>
   </div>
 
-  <div v-if="showConclude && detail" class="overlay" role="presentation" @click.self="showConclude = false">
-    <div class="dialog" role="dialog" aria-modal="true">
-      <h3>完成面试</h3>
+  <div v-if="showConclude && detail" class="overlay" role="presentation" @click.self="!acting && (showConclude = false)">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conclude-dialog-title" :aria-busy="acting">
+      <h3 id="conclude-dialog-title">完成面试</h3>
       <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
+      <div v-if="concludeError" class="error-note" role="alert">{{ concludeError }}</div>
       <div class="form-field">
-        <label>面试结论</label>
-        <select v-model="concludeOutcome">
+        <label for="conclude-outcome">面试结论</label>
+        <select id="conclude-outcome" v-model="concludeOutcome" :disabled="acting">
           <option value="continue">进入下一轮</option>
           <option value="offer">通过，进入 Offer</option>
           <option value="reject">未通过</option>
@@ -431,7 +440,17 @@ onMounted(async () => {
     </div>
   </div>
 
-  <InterviewSummaryDialog v-if="detail" :open="showSummary" :interview-id="detail.id" @close="showSummary = false" />
+  <InterviewSummaryDialog
+    v-if="detail"
+    :open="showSummary"
+    :interview-id="detail.id"
+    :application-id="detail.applicationId"
+    :stage="detail.stage ?? stageOfRound(detail.round)"
+    :candidate-name="candidateName"
+    :job-title="jobTitle"
+    :interview-date="detail.scheduledStartAt"
+    @close="showSummary = false"
+  />
   <QuestionSheetDialog
     v-if="detail"
     :open="showSheets"

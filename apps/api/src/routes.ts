@@ -760,7 +760,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     const analysisResultActionMatch = path.match(/^\/api\/v1\/analysis-results\/([^/]+)\/review$/);
     if (analysisResultActionMatch && method === 'POST') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.reviewAnalysisResult(analysisResultActionMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
     if (path === '/api/v1/applications' && method === 'GET') { sendList(context, await recruiting.listApplications(context.url.searchParams.get('candidateId') ?? undefined, context.url.searchParams.get('jobId') ?? undefined, departmentScope(auth))); return; }
-    if (path === '/api/v1/dashboard/summary' && method === 'GET') { sendSuccess(context, await recruiting.getDashboardSummary(departmentScope(auth))); return; }
+    if (path === '/api/v1/dashboard/summary' && method === 'GET') { sendSuccess(context, await recruiting.getDashboardSummary(departmentScope(auth), ids => questionSheets.listDashboardReviews(ids))); return; }
     if (path === '/api/v1/reports' && method === 'GET') { sendSuccess(context, await recruiting.getReports(departmentScope(auth))); return; }
     if (path === '/api/v1/reports/funnel' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).funnel); return; }
     if (path === '/api/v1/reports/channels' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).channels); return; }
