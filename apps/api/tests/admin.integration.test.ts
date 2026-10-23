@@ -76,7 +76,7 @@ describe('admin API role matrix', { concurrency: false }, () => {
       const loginResponse = await jsonRequest('POST', '/api/v1/auth/login', credentials)
       assert.equal(loginResponse.status, 200)
       cookie = (loginResponse.headers['set-cookie'] as string[] | undefined)?.map((item) => item.split(';', 1)[0]).join('; ') ?? ''
-      const endpoints = ['/api/v1/admin/users', '/api/v1/admin/roles', '/api/v1/admin/settings', '/api/v1/admin/audit-logs']
+      const endpoints = ['/api/v1/admin/users', '/api/v1/admin/account-organizations', '/api/v1/admin/roles', '/api/v1/admin/settings', '/api/v1/admin/audit-logs']
       for (const endpoint of endpoints) {
         const response = await jsonRequest('GET', endpoint)
         const expectedStatus = credentials.email === 'admin@smartrecruit.local' ? 200 : 403
@@ -90,11 +90,17 @@ describe('admin API role matrix', { concurrency: false }, () => {
     const loginResponse = await jsonRequest('POST', '/api/v1/auth/login', { email: 'recruiter@smartrecruit.local', password: 'recruiter123' })
     assert.equal(loginResponse.status, 200)
     cookie = (loginResponse.headers['set-cookie'] as string[] | undefined)?.map((item) => item.split(';', 1)[0]).join('; ') ?? ''
-    for (const endpoint of ['/api/v1/admin/users', '/api/v1/admin/roles', '/api/v1/admin/settings', '/api/v1/admin/analysis-tasks', '/api/v1/admin/audit-logs']) {
+    for (const endpoint of ['/api/v1/admin/users', '/api/v1/admin/account-organizations', '/api/v1/admin/roles', '/api/v1/admin/settings', '/api/v1/admin/analysis-tasks', '/api/v1/admin/audit-logs']) {
       const response = await jsonRequest('GET', endpoint)
       assert.equal(response.status, 403, `${endpoint} must reject recruiter`)
       assert.equal(response.body.error.code, endpoint === '/api/v1/admin/analysis-tasks' ? 'FORBIDDEN' : 'PLATFORM_PERMISSION_REQUIRED')
     }
+    const createResponse = await jsonRequest('POST', '/api/v1/admin/users', {
+      email: 'new-colleague@example.com', displayName: '新同事', organizationId: '00000000-0000-4000-8000-000000000001',
+      departmentCode: 'dept-tech', role: 'recruiter',
+    })
+    assert.equal(createResponse.status, 403)
+    assert.equal(createResponse.body.error.code, 'PLATFORM_PERMISSION_REQUIRED')
   })
 
   it('never returns raw secret values from settings', async (context) => {

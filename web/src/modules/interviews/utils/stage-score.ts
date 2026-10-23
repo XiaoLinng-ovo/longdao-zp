@@ -27,19 +27,25 @@ export function isScoreableSheet(status: string): boolean {
   return status === 'submitted' || status === 'locked'
 }
 
+export function questionMaximum(question: Pick<ApiInterviewQuestion, 'category' | 'tiers' | 'maxScore'>): number {
+  if (!question.category?.startsWith('rubric:')) return 100
+  if (typeof question.maxScore === 'number' && Number.isFinite(question.maxScore) && question.maxScore > 0) return question.maxScore
+  return Math.max(1, ...question.tiers.map(tier => tier.max))
+}
+
 /** 表内得分 = 已打分题目的算术平均；未打分的题不参与，也不按 0 计。 */
 export function aggregateQuestions(questions: ApiInterviewQuestion[]): QuestionSheetAggregate {
   const scored = questions.filter((question) => typeof question.finalScore === 'number')
   const buckets = new Map<string, Array<{ score: number; max: number }>>()
   for (const question of scored) {
     const key = question.dimension?.trim() || question.category?.trim() || '综合能力'
-    const max = question.category?.startsWith('rubric:') ? Math.max(1, ...question.tiers.map(tier => tier.max)) : 100
+    const max = questionMaximum(question)
     buckets.set(key, [...(buckets.get(key) ?? []), { score: question.finalScore as number, max }])
   }
   const average = (values: Array<{ score: number; max: number }>) => Math.round(values.reduce((sum, item) => sum + item.score, 0) / values.reduce((sum, item) => sum + item.max, 0) * 100)
   const ratings = Object.fromEntries([...buckets].map(([key, values]) => [key, average(values)]))
   return {
-    score: scored.length ? average(scored.map((question) => ({ score: question.finalScore as number, max: question.category?.startsWith('rubric:') ? Math.max(1, ...question.tiers.map(tier => tier.max)) : 100 }))) : null,
+    score: scored.length ? average(scored.map((question) => ({ score: question.finalScore as number, max: questionMaximum(question) }))) : null,
     ratings,
     scoredCount: scored.length,
     totalCount: questions.length,

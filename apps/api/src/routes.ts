@@ -13,7 +13,7 @@ import { readBody, readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { RepositoryNotFoundError } from './recruiting/repositories/postgres-repository.js';
-import { AdminService, AdminNotFoundError, AdminValidationError, type AiPromptSkillTarget } from './admin/service.js';
+import { AdminService, AdminConflictError, AdminNotFoundError, AdminValidationError, type AiPromptSkillTarget } from './admin/service.js';
 import { RecruitmentApprovalSettingsError, RecruitmentApprovalSettingsService } from './admin/recruitment-approval-settings.js';
 import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
@@ -34,10 +34,11 @@ import { PostgresDingTalkApprovalRepository } from './integrations/dingtalk/post
 import { mockDingTalkApprovalClient } from './integrations/dingtalk/mock-approval-client.js';
 import { executePlatformRecruitmentApprovalAction, executeRecruitmentApprovalAction } from './integrations/dingtalk/approval-routing.js';
 import { executeOfferApprovalAction } from './integrations/dingtalk/offer-approval.js';
-import { createInterviewQuestionGenerator, generateLocalInterviewQuestions, InterviewQuestionGenerationError, loadInterviewQuestionGeneratorConfig } from './interviews/question-generator.js';
+import { COMMON_CAPABILITY_DIMENSIONS, createInterviewQuestionGenerator, generateLocalInterviewQuestions, InterviewQuestionGenerationError, loadInterviewQuestionGeneratorConfig, questionsForInterviewGroup, replaceInterviewQuestionGroup, replaceSelectedInterviewQuestion, type InterviewQuestionConversationMessage, type InterviewQuestionGroup } from './interviews/question-generator.js';
 import { createInterviewAnswerAnalyzer, InterviewAnswerAnalysisError, loadInterviewAnswerAnalyzerConfig } from './interviews/answer-analyzer.js';
 
 import { analyzeActualAnswer } from './interviews/actual-answer-analysis.js';
+import { selectUtteranceSegments } from './interviews/utterance-segments.js';
 import { createJobSpecGenerator, generateLocalJobSpec, JobSpecGenerationError, loadJobSpecGeneratorConfig } from './recruiting/job-spec-generator.js';
 import { createJobDescriptionGenerator, generateLocalJobDescription, JobDescriptionGenerationError, loadJobDescriptionGeneratorConfig } from './recruiting/job-description-generator.js';
 import { FunAsrError, loadFunAsrConfig, probeFunAsrService } from './interviews/funasr-client.js';
@@ -803,6 +804,13 @@ const routeMiddleware: Middleware = async (context, next) => {
     }
 
     if (path === '/api/v1/admin/users' && method === 'GET') { requirePlatformAdmin(auth); sendList(context, await adminService.listUsers()); return; }
+    if (path === '/api/v1/admin/account-organizations' && method === 'GET') { requirePlatformAdmin(auth); sendList(context, await adminService.listAccountOrganizations()); return; }
+    if (path === '/api/v1/admin/users' && method === 'POST') {
+      requirePlatformAdmin(auth);
+      context.res.setHeader('Cache-Control', 'no-store');
+      sendSuccess(context, await adminService.createUser(await readJson(context) as never, auth.user.id, context.requestId), 201);
+      return;
+    }
     if (path === '/api/v1/admin/departments' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.listDepartments()); return; }
     if (path === '/api/v1/admin/departments' && method === 'POST') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return; }
     const adminDepartmentMatch = path.match(/^\/api\/v1\/admin\/departments\/([^/]+)$/);
@@ -1085,7 +1093,7 @@ const routeMiddleware: Middleware = async (context, next) => {
         }
         const mapped = mapAudioSourceRoles(transcribed, source, known, inferred);
         const saved = [];
-        for (const item of mapped) saved.push(await liveInterviewSessions.addSegment(liveSessionPath.sessionId, { speakerId: stableRoleSpeakerId(item), role: item.role, confidence: item.confidence, text: item.text, startMs: item.startMs, endMs: item.endMs, audioObjectKey, ...(item.audioSource ? { audioSource: item.audioSource } : {}) }));
+        for (const item of mapped) saved.push(await liveInterviewSessions.addSegment(liveSessionPath.sessionId, { speakerId: stableRoleSpeakerId(item), role: item.role, confidence: item.confidence, text: item.text, startMs: item.startMs, endMs: item.endMs, audioObjectKey, ...(item.transcriptComparison ? { transcriptComparison: item.transcriptComparison } : {}), ...(item.audioSource ? { audioSource: item.audioSource } : {}) }));
         if (latest.session.status === 'completed') liveInterviewVoices.forget(liveSessionPath.sessionId);
         sendSuccess(context, saved, 201);
       } catch (error) {
@@ -1095,13 +1103,26 @@ const routeMiddleware: Middleware = async (context, next) => {
       }
       return;
     }
-    const liveSegmentMatch = path.match(/^\/api\/v1\/interview-live-segments\/([^/]+)\/(role|analyze)$/);
+    const liveSegmentMatch = path.match(/^\/api\/v1\/interview-live-segments\/([^/]+)\/(role|analyze|refinement)$/);
     if (liveSegmentMatch && method === 'POST') {
       requireRole(auth, INTERVIEW_WRITE_ROLES);
       const body = await readJson(context);
       const segmentId = liveSegmentMatch[1]!;
       const analysisContext = await liveInterviewSessions.getAnalysisContext(segmentId);
       await recruiting.assertInterviewInScope(analysisContext.interviewId, departmentScope(auth));
+      if (liveSegmentMatch[2] === 'refinement') {
+        if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 50000
+          || typeof body.expectedText !== 'string' || !body.expectedText.trim() || body.expectedText.length > 50000
+          || !Array.isArray(body.sourceSegments) || !body.sourceSegments.length || body.sourceSegments.length > 100
+          || body.sourceSegments.some(source => !source || typeof source !== 'object' || Array.isArray(source)
+            || !['id', 'text', 'role', 'speakerId'].every(key => typeof (source as Record<string, unknown>)[key] === 'string'))
+          || new Set(body.sourceSegments.map(source => source.id)).size !== body.sourceSegments.length
+          || !body.sourceSegments.some(source => source.id === segmentId)) {
+          throw new HttpError(400, 'INVALID_INPUT', '请输入有效的整理文本（最多 50000 字符），并提供完整的原始分段。');
+        }
+        sendSuccess(context, await liveInterviewSessions.updateRefinement(segmentId, { text: body.text, expectedText: body.expectedText, sourceSegments: body.sourceSegments }, auth.user.id));
+        return;
+      }
       const ids = Array.isArray(body.segmentIds) ? body.segmentIds.map(String) : [segmentId];
       if (liveSegmentMatch[2] === 'role') {
         const role = String(body.role);
@@ -1109,16 +1130,17 @@ const routeMiddleware: Middleware = async (context, next) => {
         sendSuccess(context, await liveInterviewSessions.correctUtteranceRole(segmentId, ids, role));
         return;
       }
-      if (analysisContext.segment.role !== 'candidate' || analysisContext.segment.confidence < 0.6) throw new HttpError(409, 'CANDIDATE_ROLE_UNCONFIRMED', '只有已确认的候选人回答才能进入 AI 分析');
+      if (!['candidate', 'interviewer'].includes(analysisContext.segment.role) || analysisContext.segment.confidence < 0.6) throw new HttpError(409, 'CANDIDATE_ROLE_UNCONFIRMED', '请先确认发言属于候选人还是面试官，再进行 AI 分析');
       try {
-        await liveInterviewSessions.getUtteranceText(segmentId, ids);
+        if (analysisContext.segment.role === 'candidate') await liveInterviewSessions.getUtteranceText(segmentId, ids);
         const saved = await liveInterviewSessions.get(analysisContext.segment.sessionId);
+        const selectedIds = selectUtteranceSegments(saved.segments, segmentId, ids).map(segment => segment.id);
         let model = '';
-        const result = await analyzeActualAnswer(saved.segments, ids, {
+        const result = await analyzeActualAnswer(saved.segments, selectedIds, {
           jobTitle: analysisContext.jobTitle,
           jobRequirements: analysisContext.jobRequirements.length ? analysisContext.jobRequirements : ['岗位要求未结构化'],
         }, async input => {
-          const resumeContext = await recruiting.getInterviewQuestionContext(analysisContext.interviewId).then(ctx => [ctx.anonymizedResume, ...ctx.analysisSummary]).catch(() => []);
+          const resumeContext = input.speechRole === 'interviewer' ? [] : await recruiting.getInterviewQuestionContext(analysisContext.interviewId).then(ctx => [ctx.anonymizedResume, ...ctx.analysisSummary]).catch(() => []);
           const config = loadInterviewAnswerAnalyzerConfig(await tenantAiEnv());
           model = config.model;
           return createInterviewAnswerAnalyzer(config).analyze({ ...input, resumeContext });
@@ -1132,43 +1154,125 @@ const routeMiddleware: Middleware = async (context, next) => {
       return;
     }
     const resumeQuestionsMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/questions$/);
-    if (resumeQuestionsMatch && method === 'GET') { await recruiting.assertInterviewInScope(resumeQuestionsMatch[1]!, departmentScope(auth)); const saved = await interviewQuestionSets.get(resumeQuestionsMatch[1]!); sendSuccess(context, saved ? { questions: saved.questions, engine: saved.engine, updatedAt: saved.updatedAt, advisoryOnly: true, applicationStatusMutation: 'none' } : null); return; }
+    if (resumeQuestionsMatch && method === 'GET') { await recruiting.assertInterviewInScope(resumeQuestionsMatch[1]!, departmentScope(auth)); const saved = await interviewQuestionSets.get(resumeQuestionsMatch[1]!); sendSuccess(context, saved ? { questions: saved.questions.map(question => ({ ...question, sourceEngine: question.sourceEngine ?? saved.engine })), engine: saved.engine, updatedAt: saved.updatedAt, advisoryOnly: true, applicationStatusMutation: 'none' } : null); return; }
     const interviewMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)(?:\/(feedback|lock-feedback|conclude|questions))?$/);
     if (interviewMatch && method === 'GET' && !interviewMatch[2]) { await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.getInterview(interviewMatch[1]!)); return; }
     if (interviewMatch && method === 'PATCH' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.updateInterviewSchedule(interviewMatch[1]!, await readJson(context), auth.user.id)); return; }
     if (interviewMatch && method === 'DELETE' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); await recruiting.deleteInterview(interviewMatch[1]!, auth.user.id); sendSuccess(context, { deleted: true }); return; }
     if (interviewMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') {
+      if (body.refinement !== undefined) {
+        const rawRefinement = body.refinement;
+        if (!rawRefinement || typeof rawRefinement !== 'object' || Array.isArray(rawRefinement)) throw new HttpError(400, 'INVALID_INPUT', 'refinement 格式无效');
+        const refinementBody = rawRefinement as Record<string, unknown>;
+        const groups: InterviewQuestionGroup[] = ['ai', 'hr', 'department', 'boss'];
+        if (typeof refinementBody.group !== 'string' || !groups.includes(refinementBody.group as InterviewQuestionGroup)) throw new HttpError(400, 'INVALID_INPUT', '请选择有效的题库分组');
+        const group = refinementBody.group as InterviewQuestionGroup;
+        const messages = refinementBody.messages;
+        if (!Array.isArray(messages) || messages.some(message => !message || typeof message !== 'object' || Array.isArray(message) || !['user', 'assistant'].includes(String((message as Record<string, unknown>).role)) || typeof (message as Record<string, unknown>).content !== 'string')) {
+          throw new HttpError(400, 'INVALID_INPUT', '对话内容格式无效');
+        }
+        const interview = await recruiting.getInterview(interviewMatch[1]!);
+        const latestLiveSession = await liveInterviewSessions.findLatest(interviewMatch[1]!);
+        if (interview.status === 'completed' || interview.status === 'cancelled' || latestLiveSession?.session.status === 'completed') {
+          throw new HttpError(409, 'INTERVIEW_CLOSED', '面试已结束或取消，只能查看已保存题库，不能继续生成。');
+        }
+        const saved = await interviewQuestionSets.get(interviewMatch[1]!);
+        if (!saved?.questions.length) throw new HttpError(409, 'QUESTION_BANK_NOT_READY', '请先生成并保存完整题库，再通过对话调整。');
+        const input = await recruiting.getInterviewQuestionContext(interviewMatch[1]!);
+        const isAvailableGroup = group === 'ai' || group === 'hr' || group === 'department' || (group === 'boss' && input.stage === 'final');
+        if (!isAvailableGroup) throw new HttpError(400, 'INVALID_INPUT', '该面试阶段没有此题库分组');
+        const currentGroup = questionsForInterviewGroup(saved.questions, group);
+        let target: { index: number; question: string } | undefined;
+        if (refinementBody.target !== undefined) {
+          const rawTarget = refinementBody.target as Record<string, unknown> | null;
+          if (!rawTarget || typeof rawTarget !== 'object' || !Number.isInteger(rawTarget.index) || Number(rawTarget.index) < 0 || typeof rawTarget.question !== 'string') throw new HttpError(400, 'INVALID_INPUT', '所选题目定位格式无效');
+          target = { index: Number(rawTarget.index), question: rawTarget.question };
+          if (currentGroup[target.index]?.question !== target.question) throw new HttpError(409, 'QUESTION_SELECTION_STALE', '所选题目已更新，请刷新题库后重新选择。原题库未修改。');
+        }
+        const expectedCount = group === 'ai' ? input.questionCount : 5;
+        if (currentGroup.length !== expectedCount) throw new HttpError(409, 'QUESTION_GROUP_INCOMPLETE', '当前分组题目不完整，请先重新生成完整题库。原题库未修改。');
+        if (group !== 'ai') {
+          const dimensions = COMMON_CAPABILITY_DIMENSIONS[group];
+          if (dimensions.some(dimension => currentGroup.filter(question => question.dimension === dimension.id).length !== 1)) {
+            throw new HttpError(409, 'QUESTION_GROUP_INCOMPLETE', '当前分组的考察点不完整，请先重新生成完整题库。原题库未修改。');
+          }
+        }
+        const generationInput = { ...input, questionCount: currentGroup.length, includeCommonQuestions: true };
+        const controller = new AbortController();
+        const disconnect = () => { if (!context.res.writableEnded) controller.abort(); };
+        context.res.once('close', disconnect);
+        try {
+          let refined;
+          try {
+            const generator = createInterviewQuestionGenerator(loadInterviewQuestionGeneratorConfig(await tenantAiEnv()));
+            refined = await generator.refine(generationInput, group, currentGroup, messages as InterviewQuestionConversationMessage[], controller.signal, target);
+          } catch (error) {
+            if (controller.signal.aborted) return;
+            if (!(error instanceof InterviewQuestionGenerationError)) throw error;
+            console.warn('interview-question-refinement-failed', { code: error.code, group });
+            if (error.code === 'INVALID_INPUT') throw new HttpError(400, error.code, error.message);
+            const reason = error.code === 'AI_NOT_CONFIGURED' ? '当前企业未完整配置模型地址、密钥和模型名称。' : error.message;
+            throw new HttpError(error.code === 'AI_NOT_CONFIGURED' ? 503 : 502, error.code, reason + ' 原题库保持不变。');
+          }
+          if (controller.signal.aborted || context.res.destroyed) return;
+          const baseQuestions = saved.questions.map(question => ({ ...question, sourceEngine: question.sourceEngine ?? saved.engine }));
+          const questions = target ? replaceSelectedInterviewQuestion(baseQuestions, group, target, refined.questions[0]!) : replaceInterviewQuestionGroup(baseQuestions, group, refined.questions);
+          const engine = questions.every(question => question.sourceEngine === 'llm') ? 'llm' : 'local_fallback';
+          const updated = await interviewQuestionSets.save({ interviewId: interviewMatch[1]!, generatedBy: auth.user.id, engine, questions });
+          sendSuccess(context, { questions, engine, advisoryOnly: true, applicationStatusMutation: 'none', assistantMessage: refined.assistantMessage ?? (target ? '已修改选中的这一题，其他题目保持不变。' : '已按你的要求调整当前整张面试表，其他表保持不变。'), updatedAt: updated.updatedAt });
+        } finally { context.res.off('close', disconnect); }
+        return;
+      }
       const input = await recruiting.getInterviewQuestionContext(interviewMatch[1]!);
       const requestedCount = body.questionCount === undefined ? input.questionCount : Number(body.questionCount);
       if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 20) throw new HttpError(400, 'INVALID_INPUT', 'questionCount 必须是 1 到 20 的整数');
       if (body.includeCommonQuestions !== undefined && typeof body.includeCommonQuestions !== 'boolean') throw new HttpError(400, 'INVALID_INPUT', 'includeCommonQuestions 必须是布尔值');
-      const generationInput = { ...input, questionCount: requestedCount, includeCommonQuestions: body.includeCommonQuestions === true };
+      const requestedGroup = body.group as InterviewQuestionGroup | undefined;
+      if (requestedGroup !== undefined && (!['ai', 'hr', 'department', 'boss'].includes(requestedGroup) || (requestedGroup === 'boss' && input.stage !== 'final'))) throw new HttpError(400, 'INVALID_INPUT', '当前面试轮次不包含所选面试表');
+      const generationInput = { ...input, questionCount: requestedCount, includeCommonQuestions: requestedGroup !== undefined || body.includeCommonQuestions === true };
       if (context.res.destroyed) return;
       const controller = new AbortController();
       const disconnect = () => { if (!context.res.writableEnded) controller.abort(); };
       context.res.once('close', disconnect);
+      const generationStartedAt = Date.now();
       try {
         let questionSet: { questions: GeneratedInterviewQuestion[]; engine: 'llm' | 'local_fallback'; advisoryOnly: true; applicationStatusMutation: 'none'; generationWarning?: string };
+        const previous = await interviewQuestionSets.get(interviewMatch[1]!);
         try {
           const generator = createInterviewQuestionGenerator(loadInterviewQuestionGeneratorConfig(await tenantAiEnv()));
-          const generated = await generator.generate(generationInput, controller.signal);
+          const generated = requestedGroup ? await generator.generateGroup(generationInput, requestedGroup, controller.signal) : await generator.generate(generationInput, controller.signal);
           questionSet = { ...generated, engine: 'llm' };
         } catch (error) {
           if (controller.signal.aborted) return;
           if (!(error instanceof InterviewQuestionGenerationError)) throw error;
           if (error.code === 'INVALID_INPUT') throw new HttpError(400, error.code, error.message);
           const reason = error.code === 'AI_NOT_CONFIGURED' ? '当前企业未完整配置模型地址、密钥和模型名称。'
-            : error.code === 'MODEL_RESPONSE_INVALID' ? '模型返回的题目数量、分组或评分格式不完整。'
             : error.message;
-          const previous = await interviewQuestionSets.get(interviewMatch[1]!);
-          if (previous?.engine === 'llm' && previous.questions.length) throw new HttpError(502, error.code, reason + ' 已保留原题库，请重试。');
+          console.warn('interview-question-generation-failed', { code: error.code, group: requestedGroup ?? 'all', elapsedMs: Date.now() - generationStartedAt });
+          if (requestedGroup || previous?.engine === 'llm' || previous?.questions.some(question => question.sourceEngine === 'llm')) throw new HttpError(error.code === 'AI_NOT_CONFIGURED' ? 503 : 502, error.code, reason + ' 已保留原题库，请重试。');
           questionSet = { ...generateLocalInterviewQuestions(generationInput), engine: 'local_fallback', generationWarning: reason };
         }
         if (controller.signal.aborted || context.res.destroyed) return;
+        questionSet.questions = questionSet.questions.map(question => ({ ...question, sourceEngine: questionSet.engine }));
+        if (requestedGroup) {
+          const baseQuestions = previous?.questions.length ? previous.questions.map(question => ({ ...question, sourceEngine: question.sourceEngine ?? previous.engine })) : generateLocalInterviewQuestions(generationInput).questions.map(question => ({ ...question, sourceEngine: 'local_fallback' as const }));
+          questionSet.questions = questionsForInterviewGroup(baseQuestions, requestedGroup).length
+            ? replaceInterviewQuestionGroup(baseQuestions, requestedGroup, questionSet.questions)
+            : [...baseQuestions, ...questionSet.questions];
+          questionSet.engine = questionSet.questions.every(question => question.sourceEngine === 'llm') ? 'llm' : 'local_fallback';
+        }
         const saved = await interviewQuestionSets.save({ interviewId: interviewMatch[1]!, generatedBy: auth.user.id, engine: questionSet.engine, questions: questionSet.questions });
+        console.info('interview-question-generation-completed', { group: requestedGroup ?? 'all', elapsedMs: Date.now() - generationStartedAt, questionCount: requestedGroup ? questionsForInterviewGroup(questionSet.questions, requestedGroup).length : questionSet.questions.length });
         sendSuccess(context, { ...questionSet, updatedAt: saved.updatedAt });
       } finally { context.res.off('close', disconnect); }
     } return; }
+    const applicationResumeMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/resume$/);
+    if (applicationResumeMatch && method === 'GET') {
+      await recruiting.assertApplicationInScope(applicationResumeMatch[1]!, departmentScope(auth));
+      context.res.setHeader('cache-control', 'private, no-store');
+      sendSuccess(context, await recruiting.getApplicationResume(applicationResumeMatch[1]!));
+      return;
+    }
     const applicationMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/status$/);
     if (applicationMatch && method === 'POST') { requireRole(auth, APPLICATION_WRITE_ROLES); await recruiting.assertApplicationInScope(applicationMatch[1]!, departmentScope(auth)); const body = await readJson(context); sendSuccess(context, await recruiting.updateApplicationStatus(applicationMatch[1]!, String(body.status) as never, body.reason, auth.user.id)); return; }
 
@@ -1343,6 +1447,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (error instanceof EnterpriseAiError) throw new HttpError(error.status, error.code, error.message);
     if (error instanceof AdminValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message);
     if (error instanceof AdminNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message);
+    if (error instanceof AdminConflictError) throw new HttpError(409, 'CONFLICT', error.message);
     if (error instanceof RepositoryNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message);
     errorFromRecruiting(error);
   }

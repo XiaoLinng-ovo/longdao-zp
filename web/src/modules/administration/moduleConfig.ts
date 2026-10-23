@@ -1,5 +1,6 @@
 export const administrationModules = [
   { key: 'users', label: '用户与角色' },
+  { key: 'account-creation', label: '账号创建' },
   { key: 'departments', label: '部门管理' },
   { key: 'settings', label: '系统设置' },
   { key: 'ai', label: 'AI 模型配置' },

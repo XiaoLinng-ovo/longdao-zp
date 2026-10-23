@@ -6,6 +6,7 @@ import {
   COMMON_CAPABILITY_DIMENSIONS,
   generateLocalInterviewQuestions,
   createInterviewQuestionGenerator,
+  replaceSelectedInterviewQuestion,
   loadInterviewQuestionGeneratorConfig,
 } from './question-generator.js'
 
@@ -152,7 +153,13 @@ function generatedBank(final = false): GeneratedInterviewQuestion[] {
   ]
 }
 function bankGenerator(payload: unknown, requests: RequestInit[] = []) {
-  return createInterviewQuestionGenerator({ baseUrl: 'https://llm.example/v1', apiKey: 'secret', model: 'model', timeoutMs: 2000 }, async (_, init) => { requests.push(init!); const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content); const questions = Array.isArray(payload) && input.requestedGroup ? payload.filter(question => question.group === input.requestedGroup) : payload; return responseWith(JSON.stringify({ questions })) })
+  return createInterviewQuestionGenerator({ baseUrl: 'https://llm.example/v1', apiKey: 'secret', model: 'model', timeoutMs: 2000 }, async (_, init) => {
+    requests.push(init!)
+    const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content)
+    const groupQuestions = Array.isArray(payload) && input.requestedGroup ? payload.filter(question => question.group === input.requestedGroup) : payload
+    const questions = Array.isArray(groupQuestions) && input.requestedGroup === 'ai' ? groupQuestions.slice(input.batchOffset ?? 0, (input.batchOffset ?? 0) + input.questionCount) : groupQuestions
+    return responseWith(JSON.stringify({ questions }))
+  })
 }
 describe('AI capability question bank', () => {
   it('generates 10 resume questions and one question per HR / department dimension with diverse sampling', async () => {
@@ -165,10 +172,11 @@ describe('AI capability question bank', () => {
     const prompt = body.messages[0].content
     assert.match(prompt, /不复制模板/)
     assert.match(prompt, /不依赖简历特定项目/)
-    assert.equal(requests.length, 3)
+    assert.equal(requests.length, 4)
     const hrRequest = requests.map(request => JSON.parse(String(request.body))).find(request => JSON.parse(request.messages[1].content).requestedGroup === 'hr')
     assert.deepEqual(JSON.parse(hrRequest.messages[1].content).capabilityDimensions, { hr: COMMON_CAPABILITY_DIMENSIONS.hr })
-    assert.equal(JSON.parse(hrRequest.messages[1].content).anonymizedResume, '')
+    assert.equal(JSON.parse(hrRequest.messages[1].content).anonymizedResume, bankInput.anonymizedResume)
+    assert.deepEqual(JSON.parse(hrRequest.messages[1].content).analysisSummary, bankInput.analysisSummary)
   })
   it('rejects omitted, duplicate, unknown dimensions, incorrect groups and score totals', async () => {
     for (const mutate of [
@@ -210,7 +218,7 @@ describe('第二轮复试题库', () => {
     assert.equal(result.questions.length, 25)
     assert.equal(result.questions.filter(item => item.group === 'ai').length, 10)
     assert.deepEqual(result.questions.filter(item => item.group === 'boss').map(item => item.dimension).sort(), COMMON_CAPABILITY_DIMENSIONS.boss.map(item => item.id).sort())
-    assert.equal(requests.length, 4)
+    assert.equal(requests.length, 5)
     const body = requests.map(request => JSON.parse(String(request.body))).find(request => JSON.parse(request.messages[1].content).requestedGroup === 'boss')
     assert.match(body.messages[0].content, /第二轮复试/)
     assert.match(body.messages[0].content, /group=boss/)
@@ -236,10 +244,59 @@ describe('第二轮复试题库', () => {
 })
 
 
+describe('当前面试表独立生成与简历分批', () => {
+  it('只生成所选用人部门表，不先生成简历题，且只发送五题要求', async () => {
+    const requests: RequestInit[] = []
+    const result = await bankGenerator(generatedBank(), requests).generateGroup(bankInput, 'department')
+    assert.equal(requests.length, 1)
+    const payload = JSON.parse(JSON.parse(String(requests[0]!.body)).messages[1].content)
+    assert.equal(payload.requestedGroup, 'department')
+    assert.equal(payload.questionCount, 5)
+    assert.equal(payload.anonymizedResume, bankInput.anonymizedResume)
+    assert.deepEqual(payload.analysisSummary, bankInput.analysisSummary)
+    assert.equal(result.questions.length, 5)
+    assert.ok(result.questions.every(question => question.group === 'department'))
+  })
+  it('十道简历题拆为两批五题，后批传递前批问题避免重复', async () => {
+    const requests: RequestInit[] = []
+    const result = await bankGenerator(generatedBank(), requests).generateGroup(bankInput, 'ai')
+    const payloads = requests.map(request => JSON.parse(JSON.parse(String(request.body)).messages[1].content))
+    assert.equal(requests.length, 2)
+    assert.deepEqual(payloads.map(payload => payload.questionCount), [5, 5])
+    assert.equal(payloads[0].previousQuestions, undefined)
+    assert.equal(payloads[1].batchOffset, 5)
+    assert.deepEqual(payloads[1].previousQuestions, result.questions.slice(0, 5).map(question => question.question))
+    assert.equal(new Set(result.questions.map(question => question.question)).size, 10)
+  })
+  it('两批各自合法但跨批重复时拒绝返回成功', async () => {
+    const bank = generatedBank()
+    bank[5]!.question = bank[0]!.question
+    await assert.rejects(bankGenerator(bank).generateGroup(bankInput, 'ai'), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_RESPONSE_INVALID')
+  })
+  it('初试不能生成BOSS表，调用模型前拒绝', async () => {
+    const requests: RequestInit[] = []
+    await assert.rejects(bankGenerator(generatedBank(), requests).generateGroup(bankInput, 'boss'), /不包含/)
+    assert.equal(requests.length, 0)
+  })
+  it('第二批失败时不返回已完成的第一批', async () => {
+    let calls = 0
+    const generator = createInterviewQuestionGenerator({ baseUrl: 'https://llm.example/v1', apiKey: 'key', model: 'mock', timeoutMs: 2000 }, async () => {
+      calls++
+      return calls === 1 ? responseWith(JSON.stringify({ questions: generatedBank().slice(0, 5) })) : responseWith('{}', 503)
+    })
+    await assert.rejects(generator.generateGroup(bankInput, 'ai'), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_HTTP_ERROR')
+    assert.equal(calls, 2)
+  })
+})
+
 describe('题库串行生成、限流重试与超时保护', () => {
   const config = { baseUrl: 'https://llm.example/v1', apiKey: 'test-key', model: 'mock', timeoutMs: 2000 }
   const groupOf = (init?: RequestInit): string => JSON.parse(JSON.parse(String(init?.body)).messages[1].content).requestedGroup
-  const responseFor = (group: string) => responseWith(JSON.stringify({ questions: generatedBank(true).filter(q => q.group === group) }))
+  const responseFor = (group: string, init?: RequestInit) => {
+    const input = init ? JSON.parse(JSON.parse(String(init.body)).messages[1].content) : {}
+    const questions = generatedBank(true).filter(q => q.group === group)
+    return responseWith(JSON.stringify({ questions: group === 'ai' ? questions.slice(input.batchOffset ?? 0, (input.batchOffset ?? 0) + (input.questionCount ?? 5)) : questions }))
+  }
   it('四组依次请求，全部通过校验后再合并', async () => {
     let release!: () => void
     const groups: string[] = []
@@ -248,13 +305,13 @@ describe('题库串行生成、限流重试与超时保护', () => {
       signals.push(init!.signal! as AbortSignal)
       groups.push(groupOf(init))
       if (groups.length === 1) await new Promise<void>(resolve => { release = resolve })
-      return responseFor(groupOf(init))
+      return responseFor(groupOf(init), init)
     })
     const pending = generator.generate({ ...bankInput, stage: 'final' })
     assert.deepEqual(groups, ['ai'])
     release()
     assert.equal((await pending).questions.length, 25)
-    assert.deepEqual(groups, ['ai', 'hr', 'department', 'boss'])
+    assert.deepEqual(groups, ['ai', 'ai', 'hr', 'department', 'boss'])
     assert.equal(new Set(signals).size, 1)
     assert.ok(signals.every(signal => signal.aborted))
   })
@@ -263,16 +320,16 @@ describe('题库串行生成、限流重试与超时保护', () => {
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       const group = groupOf(init)
       calls[group] = (calls[group] ?? 0) + 1
-      return group === 'hr' && calls[group] === 1 ? responseWith('{}') : responseFor(group)
+      return group === 'hr' && calls[group] === 1 ? responseWith('{}') : responseFor(group, init)
     })
     assert.equal((await generator.generate({ ...bankInput, stage: 'final' })).questions.length, 25)
-    assert.deepEqual(calls, { ai: 1, hr: 2, department: 1, boss: 1 })
+    assert.deepEqual(calls, { ai: 2, hr: 2, department: 1, boss: 1 })
   })
   it('响应正文不结束时，总超时仍退出并中止所有请求', async () => {
     const signals: AbortSignal[] = []
     const generator = createInterviewQuestionGenerator({ ...config, timeoutMs: 30 }, async (_, init) => {
       signals.push(init!.signal! as AbortSignal)
-      const response = responseFor(groupOf(init))
+      const response = responseFor(groupOf(init), init)
       response.json = () => new Promise<never>(() => {})
       return response
     })
@@ -311,10 +368,10 @@ describe('题库串行生成、限流重试与超时保护', () => {
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       signals.push(init!.signal! as AbortSignal)
       groups.push(groupOf(init))
-      return groupOf(init) === 'hr' ? responseWith('{}', 503) : responseFor(groupOf(init))
+      return groupOf(init) === 'hr' ? responseWith('{}', 503) : responseFor(groupOf(init), init)
     })
     await assert.rejects(generator.generate({ ...bankInput, stage: 'final' }), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_HTTP_ERROR')
-    assert.deepEqual(groups, ['ai', 'hr'])
+    assert.deepEqual(groups, ['ai', 'ai', 'hr'])
     assert.ok(signals.every(signal => signal.aborted))
   })
   it('单组均合格时仍拒绝跨组重复问题', async () => {
@@ -331,10 +388,10 @@ describe('题库串行生成、限流重试与超时保护', () => {
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       const group = groupOf(init)
       calls[group] = (calls[group] ?? 0) + 1
-      return group === 'hr' && calls[group] === 1 ? limited('0') : responseFor(group)
+      return group === 'hr' && calls[group] === 1 ? limited('0') : responseFor(group, init)
     })
     assert.equal((await generator.generate({ ...bankInput, stage: 'final' })).questions.length, 25)
-    assert.deepEqual(calls, { ai: 1, hr: 2, department: 1, boss: 1 })
+    assert.deepEqual(calls, { ai: 2, hr: 2, department: 1, boss: 1 })
   })
   it('持续限流最多重试三次，给出友好错误而不暴露服务端信息', async () => {
     let calls = 0
@@ -352,7 +409,7 @@ describe('题库串行生成、限流重试与超时保护', () => {
     const times: number[] = []
     const generator = createInterviewQuestionGenerator(config, async (_, init) => {
       times.push(performance.now())
-      return times.length === 1 ? limited('0.05') : responseFor(groupOf(init))
+      return times.length === 1 ? limited('0.05') : responseFor(groupOf(init), init)
     })
     assert.equal((await generator.generate(bankInput)).questions.length, 20)
     assert.ok(times[1]! - times[0]! >= 45)
@@ -362,7 +419,7 @@ describe('题库串行生成、限流重试与超时保护', () => {
       const times: number[] = []
       const generator = createInterviewQuestionGenerator({ ...config, timeoutMs: 5000 }, async (_, init) => {
         times.push(performance.now())
-        return times.length === 1 ? limited(retryAfter) : responseFor(groupOf(init))
+        return times.length === 1 ? limited(retryAfter) : responseFor(groupOf(init), init)
       })
       assert.equal((await generator.generate(bankInput)).questions.length, 20)
       assert.ok(times[1]! - times[0]! >= 950)
@@ -397,9 +454,141 @@ describe('题库串行生成、限流重试与超时保护', () => {
       calls[group] = (calls[group] ?? 0) + 1
       if (group === 'ai' && calls[group] <= 3) return limited('0')
       if (group === 'ai' && calls[group] === 4) return responseWith('{}')
-      return responseFor(group)
+      return responseFor(group, init)
     })
     assert.equal((await generator.generate(bankInput)).questions.length, 20)
-    assert.deepEqual(calls, { ai: 5, hr: 1, department: 1 })
+    assert.deepEqual(calls, { ai: 6, hr: 1, department: 1 })
+  })
+})
+
+describe('题库对话兼容与独立分组预算', () => {
+  const config = { baseUrl: 'https://llm.example/v1', apiKey: 'test-key', model: 'mock', timeoutMs: 2000 }
+  const hrQuestions = () => generatedBank().filter(q => q.group === 'hr')
+  const messages = [{ role: 'user' as const, content: '请改为适合应届生的情境题。' }]
+  it('各组均未超时时，累计超过单组预算仍可生成完整题库', async () => {
+    const generator = createInterviewQuestionGenerator({ ...config, timeoutMs: 200 }, async (_, init) => {
+      const payload = JSON.parse(JSON.parse(String(init?.body)).messages[1].content)
+      const group = payload.requestedGroup
+      await new Promise(resolve => setTimeout(resolve, 80))
+      return responseWith(JSON.stringify({ questions: generatedBank(true).filter(q => q.group === group).slice(group === 'ai' ? payload.batchOffset ?? 0 : 0, group === 'ai' ? (payload.batchOffset ?? 0) + payload.questionCount : 5) }))
+    })
+    assert.equal((await generator.generate({ ...bankInput, stage: 'final' })).questions.length, 25)
+  })
+  it('兼容代码围栏及文本内容块，同时返回中文回复', async () => {
+    const content = '~~~json\n' + JSON.stringify({ questions: hrQuestions(), assistantMessage: '已调整为情境题。' }) + '\n~~~'
+    const generator = createInterviewQuestionGenerator(config, async () => new Response(JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: content.replaceAll('~~~', String.fromCharCode(96).repeat(3)) }] } }] })))
+    const result = await generator.refine(bankInput, 'hr', hrQuestions(), messages)
+    assert.equal(result.questions.length, 5)
+    assert.equal(result.assistantMessage, '已调整为情境题。')
+  })
+  it('仅在接口明确不支持JSON模式时去掉response_format重新请求', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return bodies.length === 1 ? new Response('response_format json_object is not supported', { status: 400 }) : responseWith(JSON.stringify({ questions: hrQuestions() }))
+    })
+    assert.equal((await generator.refine(bankInput, 'hr', hrQuestions(), messages)).questions.length, 5)
+    assert.ok(bodies[0]!.response_format)
+    assert.equal(bodies[1]!.response_format, undefined)
+  })
+  it('普通400错误不被误当成格式兼容问题或重复扣费重试', async () => {
+    let calls = 0
+    const generator = createInterviewQuestionGenerator(config, async () => { calls++; return new Response('invalid model', { status: 400 }) })
+    await assert.rejects(generator.refine(bankInput, 'hr', hrQuestions(), messages), /400/)
+    assert.equal(calls, 1)
+  })
+  it('格式重试带上具体校验反馈，且仍然拒绝错误分值', async () => {
+    const bodies: Array<{ messages: Array<{ content: string }> }> = []
+    const invalid = hrQuestions().map(q => ({ ...q, scoringRubric: [{ criterion: '行动依据', points: 1 }] }))
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return responseWith(JSON.stringify({ questions: invalid }))
+    })
+    await assert.rejects(generator.refine(bankInput, 'hr', hrQuestions(), messages), /points 总和/)
+    assert.equal(bodies.length, 2)
+    assert.match(JSON.parse(bodies[1]!.messages[1]!.content).validationFeedback, /points 总和/)
+  })
+  it('截断响应进行一次精简重试，未修复则给出截断原因', async () => {
+    let calls = 0
+    const generator = createInterviewQuestionGenerator(config, async () => {
+      calls++
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{}' } }] }))
+    })
+    await assert.rejects(generator.refine(bankInput, 'hr', hrQuestions(), messages), /截断/)
+    assert.equal(calls, 2)
+  })
+  it('对话取消后中止模型请求，不再返回修改结果', async () => {
+    const controller = new AbortController()
+    let signal: AbortSignal | undefined
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => { signal = init!.signal as AbortSignal; return new Promise(() => {}) })
+    const pending = generator.refine(bankInput, 'hr', hrQuestions(), messages, controller.signal)
+    const rejected = assert.rejects(pending, /已取消/)
+    controller.abort()
+    await rejected
+    assert.ok(signal?.aborted)
+  })
+})
+
+describe('精确单题修改与整表修改范围', () => {
+  const config = { baseUrl: 'https://llm.example/v1', apiKey: 'test-key', model: 'mock', timeoutMs: 2000 }
+  const messages = [{ role: 'user' as const, content: '把这道题改为考察创新能力' }]
+  const department = () => generatedBank().filter(q => q.group === 'department')
+  it('把第一道题改为创新题仍替换第一题，其他题目与创新维度保持原样', async () => {
+    const bank = generatedBank(), current = department(), original = current[0]!
+    const target = { index: 0, question: original.question }
+    const replacement = { ...original, question: '请描述你提出创新方案并验证效果的经历。' }
+    let body: { messages: Array<{ content: string }> } | undefined
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      body = JSON.parse(String(init?.body))
+      return responseWith(JSON.stringify({ questions: [replacement], assistantMessage: '已修改所选题目' }))
+    })
+    const result = await generator.refine(bankInput, 'department', current, messages, undefined, target)
+    const request = JSON.parse(body!.messages[1]!.content)
+    assert.equal(request.scope, 'single_question')
+    assert.equal(request.questionCount, 1)
+    assert.deepEqual(request.currentQuestions, [original])
+    assert.equal(request.capabilityDimensions, undefined)
+    assert.match(body!.messages[0]!.content, /不得转去其他创新维度/)
+    const updated = replaceSelectedInterviewQuestion(bank, 'department', target, result.questions[0]!)
+    assert.equal(updated[15]!.question, replacement.question)
+    assert.equal(updated[15]!.sourceEngine, 'llm')
+    bank.forEach((question, index) => { if (index !== 15) assert.equal(updated[index], question) })
+  })
+  for (const kind of ['wrong_dimension', 'whole_group', 'wrong_points'] as const) {
+    it('拒绝单题请求中的错误结果：' + kind, async () => {
+      const current = department(), original = current[0]!
+      const questions = kind === 'whole_group' ? current : [{ ...original,
+        ...(kind === 'wrong_dimension' ? { dimension: current[3]!.dimension } : {}),
+        ...(kind === 'wrong_points' ? { scoringRubric: [{ criterion: '证据', points: 1 }] } : {}),
+      }]
+      const bodies: Array<{ messages: Array<{ content: string }> }> = []
+      const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+        bodies.push(JSON.parse(String(init?.body)))
+        return responseWith(JSON.stringify({ questions }))
+      })
+      await assert.rejects(generator.refine(bankInput, 'department', current, messages, undefined, { index: 0, question: original.question }), (error: unknown) => error instanceof InterviewQuestionGenerationError && error.code === 'MODEL_RESPONSE_INVALID')
+      assert.equal(bodies.length, 2)
+      assert.ok(JSON.parse(bodies[1]!.messages[1]!.content).validationFeedback)
+    })
+  }
+  it('过期题文或越界索引在调用模型前就拒绝', async () => {
+    let calls = 0
+    const generator = createInterviewQuestionGenerator(config, async () => { calls++; return responseWith('{}') })
+    for (const target of [{ index: 0, question: '旧题文' }, { index: 99, question: department()[0]!.question }]) {
+      await assert.rejects(generator.refine(bankInput, 'department', department(), messages, undefined, target), /所选题目/)
+    }
+    assert.equal(calls, 0)
+  })
+  it('未选择题目时提交整表范围和完整五题，不按关键词限定其中一题', async () => {
+    let payload: Record<string, unknown> | undefined
+    const generator = createInterviewQuestionGenerator(config, async (_, init) => {
+      payload = JSON.parse(JSON.parse(String(init?.body)).messages[1].content)
+      return responseWith(JSON.stringify({ questions: department() }))
+    })
+    const result = await generator.refine(bankInput, 'department', department(), messages)
+    assert.equal(payload!.scope, 'entire_group')
+    assert.deepEqual(payload!.currentQuestions, department())
+    assert.equal(payload!.selectedQuestion, undefined)
+    assert.equal(result.questions.length, 5)
   })
 })

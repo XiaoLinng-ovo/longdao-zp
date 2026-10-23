@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { buildActualDialogue, reliableCandidateTurns } from './interview-summary.js'
 import type { LiveSegment } from './live-session-repository.js'
 import type { Pool, PoolClient } from 'pg'
+import type { RepositoryQueryExecutor } from '../recruiting/repositories/types.js'
 import { mergeSheetQuestionSources, normalizeSheetQuestion, type SheetQuestionBank } from './question-sheet-input.js'
 import { assessmentCriterion, questionMaximum } from './question-sheet-rubrics.js'
 
@@ -31,6 +32,7 @@ export interface InterviewQuestionRecord {
   question: string
   dimension: string | null
   category: string | null
+  maxScore?: number
   assessmentFocus?: string | null
   difficulty: string | null
   source: QuestionSource
@@ -185,13 +187,15 @@ function mapSheetRow(row: Record<string, unknown>): Omit<InterviewQuestionSheetR
 
 function mapQuestionRow(row: Record<string, unknown>): InterviewQuestionRecord {
   const category = (row.category as string | null) ?? null
+  const criterion = assessmentCriterion(category)
   return {
     id: String(row.id),
     seq: Number(row.seq),
     question: String(row.question),
     dimension: (row.dimension as string | null) ?? null,
     category,
-    assessmentFocus: assessmentCriterion(category)?.focus ?? null,
+    assessmentFocus: criterion?.focus ?? null,
+    ...(criterion ? { maxScore: criterion.maxScore } : {}),
     difficulty: (row.difficulty as string | null) ?? null,
     source: String(row.source) as QuestionSource,
     questionEventId: (row.question_event_id as string | null) ?? null,
@@ -267,6 +271,51 @@ export class QuestionSheetNotFoundError extends Error {
   readonly status = 404
   readonly code = 'QUESTION_SHEET_NOT_FOUND'
   constructor(message: string) { super(message); this.name = 'QuestionSheetNotFoundError' }
+}
+
+export async function recordStageDecisionWithExecutor(client: RepositoryQueryExecutor, applicationId: string, stage: InterviewStage, decision: StageDecision, actorId: string): Promise<InterviewStageReviewRecord> {
+  const application = (await client.query(
+    'SELECT id, organization_id, status FROM applications WHERE id = $1::uuid FOR UPDATE', [applicationId],
+  )).rows[0]
+  if (!application) throw new QuestionSheetNotFoundError('应聘记录不存在')
+  const previous = (await client.query(
+    'SELECT decision FROM interview_stage_reviews WHERE application_id = $1::uuid AND stage = $2', [applicationId, stage],
+  )).rows[0]
+  if (stage === 'initial' && previous?.decision === 'advanced' && decision !== 'advanced') {
+    throw new QuestionSheetConflictError('候选人已进入复试，请在复试阶段确认结论')
+  }
+  let nextInterview: NextRoundInterview | null = null
+  if (stage === 'initial' && decision === 'advanced') {
+    const existing = (await client.query(`SELECT i.id, i.round, i.status FROM interviews i JOIN applications a ON a.id = i.application_id AND a.organization_id = i.organization_id WHERE i.application_id = $1::uuid AND i.stage = 'final' AND i.round >= 2 ORDER BY (i.status = 'cancelled'), i.round, i.created_at LIMIT 1`, [applicationId])).rows[0]
+    if (existing) {
+      nextInterview = { id: String(existing.id), round: Number(existing.round), stage: 'final', status: existing.status }
+    } else {
+      if (!['interviewing', 'human_review'].includes(application.status)) {
+        throw new QuestionSheetConflictError('当前应聘状态不能进入复试')
+      }
+      const initial = (await client.query(
+        `SELECT type, timezone, participants FROM interviews WHERE application_id = $1::uuid AND organization_id = $2::uuid AND stage = 'initial' AND status <> 'cancelled' ORDER BY round DESC, created_at DESC LIMIT 1`,
+        [applicationId, application.organization_id],
+      )).rows[0]
+      if (!initial) throw new QuestionSheetConflictError('请先完成初试面试安排，再进入复试')
+      const id = randomUUID()
+      await client.query(
+        `INSERT INTO interviews (id, application_id, interview_no, round, stage, type, title, status, timezone, participants, organization_id) VALUES ($1::uuid, $2::uuid, $3, 2, 'final', $4, '第二轮复试', 'scheduled', $5, $6::jsonb, $7::uuid)`,
+        [id, applicationId, 'INT-' + id.toUpperCase(), initial.type, initial.timezone, JSON.stringify(initial.participants), application.organization_id],
+      )
+      nextInterview = { id, round: 2, stage: 'final', status: 'scheduled' }
+      await client.query("UPDATE applications SET status = 'interviewing', updated_at = now() WHERE id = $1::uuid", [applicationId])
+      await client.query(
+        `INSERT INTO workflow_events (subject_type, subject_id, event_type, actor_user_id, from_status, to_status, reason, metadata, organization_id) VALUES ('application', $1::uuid, 'advance_to_final_interview', $2::uuid, $3, 'interviewing', '初试确认进入复试', $4::jsonb, $5::uuid)`,
+        [applicationId, actorId, application.status, JSON.stringify({ interviewId: id, round: 2, stage: 'final' }), application.organization_id],
+      )
+    }
+  }
+  const result = await client.query(
+    `INSERT INTO interview_stage_reviews (application_id, stage, decision, decided_by, decided_at, organization_id) VALUES ($1::uuid, $2, $3, $4::uuid, now(), $5::uuid) ON CONFLICT (application_id, stage) DO UPDATE SET decision = EXCLUDED.decision, decided_by = CASE WHEN interview_stage_reviews.decision = EXCLUDED.decision THEN interview_stage_reviews.decided_by ELSE EXCLUDED.decided_by END, decided_at = CASE WHEN interview_stage_reviews.decision = EXCLUDED.decision THEN interview_stage_reviews.decided_at ELSE now() END, updated_at = now() RETURNING ${STAGE_REVIEW_COLUMNS}`,
+    [applicationId, stage, decision, actorId, application.organization_id],
+  )
+  return { ...mapStageReviewRow(result.rows[0]!), ...(stage === 'initial' && decision === 'advanced' ? { nextInterview } : {}) }
 }
 
 export class QuestionSheetRepository {
@@ -410,19 +459,30 @@ export class QuestionSheetRepository {
   async loadAssessmentRubric(applicationId: string, stage: InterviewStage, sheetType: QuestionSheetType, actorId: string,
     questions: QuestionWriteInput[], promptVersion: string): Promise<void> {
     const existing = await this.ensure(applicationId, stage, sheetType)
-    await this.transaction(async (client) => {
-      await this.lockSheet(client, existing.id)
-      const sheet = await this.loadWithExecutor(client, existing.id)
-      if (sheet.status === 'generating') return
-      if (sheet.status === 'submitted' || sheet.status === 'locked' || sheet.questions.some(question => question.finalScore !== null || question.comment !== null)) {
+    await this.replaceAssessmentRubric(existing.id, actorId, questions, promptVersion, false)
+  }
+
+  async upgradeAssessmentRubric(sheetId: string, questions: QuestionWriteInput[], promptVersion: string): Promise<boolean> {
+    return this.replaceAssessmentRubric(sheetId, null, questions, promptVersion, true)
+  }
+
+  private async replaceAssessmentRubric(sheetId: string, actorId: string | null, questions: QuestionWriteInput[],
+    promptVersion: string, onlyOutdated: boolean): Promise<boolean> {
+    return this.transaction(async (client) => {
+      await this.lockSheet(client, sheetId)
+      const sheet = await this.loadWithExecutor(client, sheetId)
+      if (sheet.status === 'generating' || (onlyOutdated && sheet.promptVersion === promptVersion)) return false
+      if (sheet.status === 'submitted' || sheet.status === 'locked' || sheet.questions.some(question => question.finalScore !== null || question.finalTier !== null || question.comment !== null)) {
+        if (onlyOutdated) return false
         throw new QuestionSheetConflictError('已有评分、评语或已提交的面试表不可重新载入考察点')
       }
-      await client.query('DELETE FROM interview_questions WHERE sheet_id = $1::uuid', [existing.id])
-      for (const question of questions) await this.insertQuestion(client, existing.id, question)
+      await client.query('DELETE FROM interview_questions WHERE sheet_id = $1::uuid', [sheetId])
+      for (const question of questions) await this.insertQuestion(client, sheetId, question)
       await client.query(`UPDATE interview_question_sheets SET status = 'scoring', source = 'manual',
         generation_model = 'manual-rubric', prompt_version = $2, generated_by = $3::uuid,
         generation_error = NULL, generation_notice = NULL, generated_at = now(), updated_at = now()
-        WHERE id = $1::uuid`, [existing.id, promptVersion, actorId])
+        WHERE id = $1::uuid`, [sheetId, promptVersion, actorId])
+      return true
     })
   }
 
@@ -431,7 +491,7 @@ export class QuestionSheetRepository {
     await this.transaction(async (client) => {
       await this.lockSheet(client, sheetId)
       const sheet = await this.loadWithExecutor(client, sheetId)
-      if (!sheet || sheet.status !== 'generating' || sheet.questions.some(question => question.finalScore !== null || question.comment !== null)) {
+      if (!sheet || sheet.status !== 'generating' || sheet.questions.some(question => question.finalScore !== null || question.finalTier !== null || question.comment !== null)) {
         throw new QuestionSheetConflictError('面试表已存在人工评分或不处于生成状态，未覆盖任何记录')
       }
       await client.query(`DELETE FROM interview_questions WHERE sheet_id = $1::uuid`, [sheetId])
@@ -475,7 +535,7 @@ export class QuestionSheetRepository {
         if (!existing.rows[0]) throw new QuestionSheetNotFoundError('未找到该考察点')
         const category = existing.rows[0].category as string | null
         const tiers = tierArray(existing.rows[0].tiers)
-        const max = category?.startsWith('rubric:') ? Math.max(1, ...tiers.map(tier => tier.max)) : 100
+        const max = questionMaximum({ category, tiers })
         if (patch.finalScore !== null && (!Number.isFinite(patch.finalScore) || patch.finalScore < 0 || patch.finalScore > max)) throw new QuestionSheetConflictError(`该考察点得分必须在 0–${max} 分之间`)
         add('final_score', patch.finalScore)
       }
@@ -609,50 +669,7 @@ export class QuestionSheetRepository {
 
   /** 锁定申请后确认结论，进入复试与建第二轮原子提交；重试复用已建轮次。 */
   async recordStageDecision(applicationId: string, stage: InterviewStage, decision: StageDecision, actorId: string): Promise<InterviewStageReviewRecord> {
-    return this.transaction(async (client) => {
-      const application = (await client.query(
-        'SELECT id, organization_id, status FROM applications WHERE id = $1::uuid FOR UPDATE', [applicationId],
-      )).rows[0]
-      if (!application) throw new QuestionSheetNotFoundError('应聘记录不存在')
-      const previous = (await client.query(
-        'SELECT decision FROM interview_stage_reviews WHERE application_id = $1::uuid AND stage = $2', [applicationId, stage],
-      )).rows[0]
-      if (stage === 'initial' && previous?.decision === 'advanced' && decision !== 'advanced') {
-        throw new QuestionSheetConflictError('候选人已进入复试，请在复试阶段确认结论')
-      }
-      let nextInterview: NextRoundInterview | null = null
-      if (stage === 'initial' && decision === 'advanced') {
-        const existing = (await client.query(`SELECT i.id, i.round, i.status FROM interviews i JOIN applications a ON a.id = i.application_id AND a.organization_id = i.organization_id WHERE i.application_id = $1::uuid AND i.stage = 'final' AND i.round >= 2 ORDER BY (i.status = 'cancelled'), i.round, i.created_at LIMIT 1`, [applicationId])).rows[0]
-        if (existing) {
-          nextInterview = { id: String(existing.id), round: Number(existing.round), stage: 'final', status: existing.status }
-        } else {
-          if (!['interviewing', 'human_review'].includes(application.status)) {
-            throw new QuestionSheetConflictError('当前应聘状态不能进入复试')
-          }
-          const initial = (await client.query(
-            `SELECT type, timezone, participants FROM interviews WHERE application_id = $1::uuid AND organization_id = $2::uuid AND stage = 'initial' AND status <> 'cancelled' ORDER BY round DESC, created_at DESC LIMIT 1`,
-            [applicationId, application.organization_id],
-          )).rows[0]
-          if (!initial) throw new QuestionSheetConflictError('请先完成初试面试安排，再进入复试')
-          const id = randomUUID()
-          await client.query(
-            `INSERT INTO interviews (id, application_id, interview_no, round, stage, type, title, status, timezone, participants, organization_id) VALUES ($1::uuid, $2::uuid, $3, 2, 'final', $4, '第二轮复试', 'scheduled', $5, $6::jsonb, $7::uuid)`,
-            [id, applicationId, 'INT-' + id, initial.type, initial.timezone, JSON.stringify(initial.participants), application.organization_id],
-          )
-          nextInterview = { id, round: 2, stage: 'final', status: 'scheduled' }
-          await client.query("UPDATE applications SET status = 'interviewing', updated_at = now() WHERE id = $1::uuid", [applicationId])
-          await client.query(
-            `INSERT INTO workflow_events (subject_type, subject_id, event_type, actor_user_id, from_status, to_status, reason, metadata, organization_id) VALUES ('application', $1::uuid, 'advance_to_final_interview', $2::uuid, $3, 'interviewing', '初试确认进入复试', $4::jsonb, $5::uuid)`,
-            [applicationId, actorId, application.status, JSON.stringify({ interviewId: id, round: 2, stage: 'final' }), application.organization_id],
-          )
-        }
-      }
-      const result = await client.query(
-        `INSERT INTO interview_stage_reviews (application_id, stage, decision, decided_by, decided_at, organization_id) VALUES ($1::uuid, $2, $3, $4::uuid, now(), $5::uuid) ON CONFLICT (application_id, stage) DO UPDATE SET decision = EXCLUDED.decision, decided_by = CASE WHEN interview_stage_reviews.decision = EXCLUDED.decision THEN interview_stage_reviews.decided_by ELSE EXCLUDED.decided_by END, decided_at = CASE WHEN interview_stage_reviews.decision = EXCLUDED.decision THEN interview_stage_reviews.decided_at ELSE now() END, updated_at = now() RETURNING ${STAGE_REVIEW_COLUMNS}`,
-        [applicationId, stage, decision, actorId, application.organization_id],
-      )
-      return { ...mapStageReviewRow(result.rows[0]), ...(stage === 'initial' && decision === 'advanced' ? { nextInterview } : {}) }
-    })
+    return this.transaction(client => recordStageDecisionWithExecutor(client, applicationId, stage, decision, actorId))
   }
 
   /** 按音频时间轴关联实际提问和回答，忽略参考题选择与转写写入时间。 */

@@ -33,7 +33,7 @@ onMounted(()=>load())
 </script>
 <template>
  <main class="sandbox-page">
-  <header><div><span class="tag">模拟测试</span><h1>订单与支付测试</h1><p>当前不接真实支付宝或微信，不会收款。</p></div><button :disabled="busy" @click="load()">{{busy?'处理中…':'刷新订单'}}</button></header>
+  <header><div><span class="tag">模拟测试</span><h1>支付流程测试</h1><p>当前不接真实支付宝或微信，不会收款。</p></div><button :disabled="busy" @click="load()">{{busy?'处理中…':'刷新订单'}}</button></header>
   <aside class="scope">模拟权益仅用于验证订单流程，不改变当前企业的真实套餐、成员席位、岗位配额或服务状态。支付宝与微信选项仅模拟支付场景。</aside>
   <p v-if="error" role="alert" class="error">{{error}}</p><p v-if="notice" role="status" class="notice">{{notice}}</p>
   <template v-if="report">

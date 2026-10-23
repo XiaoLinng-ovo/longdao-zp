@@ -194,12 +194,12 @@ export const appRoutes: AppRouteRecord[] = [
     path: '/enterprise/billing-sandbox',
     name: 'enterprise-billing-sandbox',
     component: () => import('../modules/platform/pages/EnterpriseBillingSandboxPage.vue'),
-    meta: {title:'订单与支付测试',navLabel:'订单与支付测试',icon:'◇',group:'企业管理',crumb:'企业管理 / 订单与支付测试',workspaceAdminOnly:true},
+    meta: {title:'支付流程测试',navLabel:'支付流程测试',icon:'◇',group:'企业管理',crumb:'企业管理 / 支付流程测试',workspaceAdminOnly:true},
   },
   {
     path: '/enterprise/payments', name: 'enterprise-payments',
     component: () => import('../modules/platform/pages/EnterprisePaymentsPage.vue'),
-    meta: {title:'套餐与支付',navLabel:'套餐与支付',icon:'◇',group:'企业管理',crumb:'企业管理 / 套餐与支付',workspaceAdminOnly:true,billingOnly:true},
+    meta: {title:'套餐订购与续费',navLabel:'套餐订购与续费',icon:'◇',group:'企业管理',crumb:'企业管理 / 套餐订购与续费',workspaceAdminOnly:true,billingOnly:true},
   },
   {
     path: '/enterprise/payments/:id', name: 'enterprise-payment-order',

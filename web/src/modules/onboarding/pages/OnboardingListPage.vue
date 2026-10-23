@@ -5,6 +5,7 @@ import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
+import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
 import OnboardingTable from '../components/OnboardingTable.vue'
 
 const rows = ref<OnboardingRow[]>([])
@@ -105,6 +106,7 @@ onMounted(refresh)
   <div v-if="showDetail && selected" class="overlay" role="presentation" @click.self="showDetail = false">
     <div class="dialog" role="dialog" aria-modal="true" style="max-width: 580px">
       <h3>入职归档详情</h3>
+      <ApplicationResumeButton :application-id="selected.applicationId" />
       <div class="detail-card" style="margin-top: 12px">
         <div class="detail-grid">
           <div class="detail-item"><span>状态</span><StatusTag :status="selected.status" /></div>

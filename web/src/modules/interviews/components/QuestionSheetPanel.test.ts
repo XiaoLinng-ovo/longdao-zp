@@ -381,8 +381,9 @@ describe('角色通用考察点评分模板', () => {
     ['final', 'boss', 20, 17, 12, 16],
   ] as const)('%s/%s：按角色上限人工评分、保存档位和评语，展示原始分与百分制', async (stage, type, max, excellentMin, passMin, passMax) => {
     const criterion = rubricCriterion()
+    criterion.maxScore = max
     criterion.tiers = [
-      { tier: 'excellent', min: excellentMin, max, description: '优秀表现描述' },
+      { tier: 'excellent', min: excellentMin, max: max === 12 ? 10 : max, description: '优秀表现描述' },
       { tier: 'pass', min: passMin, max: passMax, description: '合格表现描述' },
       { tier: 'below', min: 0, max: passMin - 1, description: '需警惕的表现描述' },
     ]
@@ -401,13 +402,14 @@ describe('角色通用考察点评分模板', () => {
     expect(card.querySelector('.question-delete')).toBeNull()
     expect(card.textContent).not.toContain('手工补录题目')
 
-    const scored = { ...questions[0]!, finalScore: max, finalTier: 'excellent' as const }
+    const finalTier = max === 12 ? null : 'excellent' as const
+    const scored = { ...questions[0]!, finalScore: max, finalTier }
     mockedScore.mockResolvedValueOnce(scored)
     setInput(input, String(max))
     input.dispatchEvent(new Event('change', { bubbles: true }))
     await flush()
-    expect(mockedScore).toHaveBeenLastCalledWith('app-1', stage, type, 'criterion-0', { finalScore: max, finalTier: 'excellent' })
-    expect(row.querySelector('.criterion-excellent')?.getAttribute('aria-pressed')).toBe('true')
+    expect(mockedScore).toHaveBeenLastCalledWith('app-1', stage, type, 'criterion-0', { finalScore: max, finalTier })
+    expect(row.querySelector('.criterion-excellent')?.getAttribute('aria-pressed')).toBe(String(finalTier === 'excellent'))
     expect(row.textContent).toContain('已保存')
     expect(card.textContent).toContain('标准化得分 100 / 100')
 
@@ -476,6 +478,9 @@ describe('角色通用考察点评分模板', () => {
 
   it.each([
     { finalScore: 7 },
+    { finalScore: 0 },
+    { finalTier: 'pass' as const },
+    { comment: '' },
     { comment: '已记录人工评价' },
   ])('已有评分或评语时禁止覆盖模板：%j', async (saved) => {
     const view = buildView('draft')

@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import StageScoreFormula from './StageScoreFormula.vue'
+import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
 import AssessmentCriterionRow from './AssessmentCriterionRow.vue'
 import {
   STAGE_DECISION_LABEL,
@@ -33,6 +34,7 @@ import {
 } from '../api/question-sheets'
 import {
   aggregateQuestions,
+  questionMaximum,
   cloneWeights,
   scoreForTier,
   sheetScoresOf,
@@ -197,7 +199,7 @@ function isRubric(question: ApiInterviewQuestion): boolean {
 }
 
 function rubricTotal(sheet: ApiQuestionSheet): number {
-  return sheet.questions.reduce((sum, question) => sum + Math.max(1, ...tierOf(question).map(tier => tier.max)), 0)
+  return sheet.questions.reduce((sum, question) => sum + questionMaximum(question), 0)
 }
 
 function rubricScore(sheet: ApiQuestionSheet): number {
@@ -208,7 +210,7 @@ function canRegenerate(sheet: ApiQuestionSheet | null): boolean {
   if (!sheet) return true
   if (['generating', 'submitted', 'locked'].includes(sheet.status)) return false
   return !sheet.questions.some(
-    (question) => question.finalScore !== null || question.comment !== null,
+    (question) => question.finalScore !== null || question.finalTier !== null || question.comment !== null,
   )
 }
 
@@ -255,7 +257,7 @@ async function commitScore(sheet: ApiQuestionSheet, question: ApiInterviewQuesti
   const raw = scoreInputs.value[question.id]
   if (raw === undefined) return
   const next = raw === '' ? null : Number(raw)
-  const maxScore = Math.max(1, ...tierOf(question).map(tier => tier.max))
+  const maxScore = questionMaximum(question)
   if (next !== null && (!Number.isFinite(next) || next < 0 || next > maxScore)) {
     error.value = `分数需在 0-${maxScore} 之间`
     return
@@ -444,6 +446,7 @@ onUnmounted(stopPolling)
         按面试角色展示通用考察点与评分区间，由面试官依据交流表现人工评分；面试室内 AI 生成的面试表保持不变。
       </p>
       <div class="inline-actions">
+        <ApplicationResumeButton :application-id="applicationId" />
         <button
           v-for="tab in stageTabs"
           :key="tab.value"
@@ -621,7 +624,7 @@ onUnmounted(stopPolling)
                   <input
                     type="number"
                     min="0"
-                    :max="Math.max(1, ...tierOf(question).map(tier => tier.max))"
+                    :max="questionMaximum(question)"
                     :value="scoreValue(question)"
                     :disabled="!editable(slot.sheet!) || Boolean(busy)"
                     :aria-label="`${question.question}得分`"

@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import QRCode from "qrcode";
+import { Check, CalendarDays, UsersRound, BriefcaseBusiness } from "@lucide/vue";
 import { authSession, refreshAuthSession } from "../../auth/session";
 import {
   getCheckout,
@@ -10,6 +11,7 @@ import {
   paymentOrderAction,
   paymentStatusLabel,
   formatPayment,
+  paymentDurationLabel,
   type Checkout,
   type PaymentOrder,
 } from "../api/payments";
@@ -41,6 +43,8 @@ const providers = computed(
 const product = computed(() =>
   report.value?.products.find((p) => p.id === productId.value),
 );
+const priceUnit = (months: number | null | undefined) =>
+  months === 12 ? "年" : months === 6 ? "半年" : months === 1 ? "月" : null;
 const terminal = computed(
   () =>
     order.value &&
@@ -210,7 +214,7 @@ onBeforeUnmount(() => {
     <header>
       <div>
         <span class="eyebrow">企业订阅</span>
-        <h1>套餐与支付</h1>
+        <h1>套餐订购与续费</h1>
         <p>
           {{ report?.organization.name ?? "企业付款中心" }} ·
           按企业开通招聘席位与岗位容量
@@ -226,6 +230,7 @@ onBeforeUnmount(() => {
           <h2>选择适合团队的套餐</h2>
           <p v-if="!report.products.length" class="empty">
             暂无在售套餐，请联系平台管理员。
+            <RouterLink v-if="authSession.user?.platformRole === 'admin'" to="/platform/payments">配置正式套餐</RouterLink>
           </p>
           <div class="products">
             <button
@@ -234,12 +239,16 @@ onBeforeUnmount(() => {
               class="product"
               :class="{ selected: productId === p.id }"
               :aria-pressed="productId === p.id"
+              :aria-label="p.name + '，' + formatPayment(p.amountFen) + '，' + paymentDurationLabel(p)"
               @click="productId = p.id"
             >
-              <b>{{ p.name }}</b
-              ><strong>{{ formatPayment(p.amountFen) }}</strong
-              ><span>{{ p.durationDays }} 天 · {{ p.seatLimit }} 个席位</span
-              ><span>{{ p.jobLimit }} 个岗位</span>
+              <span class="product-heading"><b>{{ p.name }}</b><span class="selection-indicator"><Check v-if="productId === p.id" :size="14" aria-hidden="true" /></span></span>
+              <span class="product-price"><strong>{{ formatPayment(p.amountFen) }}</strong><span v-if="priceUnit(p.durationMonths)"> / {{ priceUnit(p.durationMonths) }}</span></span>
+              <span v-if="p.allModules" class="product-features"><Check :size="16" aria-hidden="true" />全部模块功能</span>
+              <span class="product-detail"><CalendarDays :size="16" aria-hidden="true" />使用期限：{{ paymentDurationLabel(p) }}</span>
+              <span class="product-detail"><UsersRound :size="16" aria-hidden="true" />{{ p.seatLimit }} 个席位</span>
+              <span class="product-detail"><BriefcaseBusiness :size="16" aria-hidden="true" />{{ p.jobLimit }} 个岗位</span>
+              <span class="product-select">{{ productId === p.id ? '已选择' : '选择套餐' }}</span>
             </button>
           </div>
           <aside>
@@ -252,6 +261,7 @@ onBeforeUnmount(() => {
         <form class="checkout-card" @submit.prevent="create">
           <h2>确认购买</h2>
           <p>{{ product?.name ?? "请选择套餐" }}</p>
+          <p v-if="product" class="selected-details">{{ paymentDurationLabel(product) }} · {{ product.seatLimit }} 个席位 · {{ product.jobLimit }} 个岗位<span v-if="product.allModules"> · 全部模块功能</span></p>
           <strong class="total">{{
             product ? formatPayment(product.amountFen) : "—"
           }}</strong>
@@ -279,7 +289,7 @@ onBeforeUnmount(() => {
             </select></label
           >
           <p v-if="!providers.length" class="empty">
-            此支付方式尚未启用，请选择其他方式或联系管理员。
+            此支付方式尚未启用，暂不能付款。已选套餐不会产生扣款，请联系管理员配置收款渠道。
           </p>
           <fieldset>
             <legend>付款模式</legend>
@@ -414,6 +424,8 @@ onBeforeUnmount(() => {
   margin: auto;
   padding: 30px;
   color: #172b44;
+  box-sizing: border-box;
+  min-width: 0;
 }
 header {
   display: flex;
@@ -442,49 +454,66 @@ p {
 }
 .purchase-layout {
   display: grid;
-  grid-template-columns: 1fr 340px;
+  grid-template-columns: minmax(0, 1fr) 300px;
   gap: 28px;
 }
 .products {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
   gap: 16px;
 }
 .product {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   text-align: left;
   background: white;
   border: 2px solid #e3eaf2;
-  border-radius: 14px;
-  padding: 24px;
+  border-radius: 8px;
+  padding: 20px;
   color: inherit;
   cursor: pointer;
+  min-width: 0;
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease, background .18s ease;
 }
+.product:hover { border-color: #81b4bc; box-shadow: 0 6px 18px #234c6510; transform: translateY(-2px); }
+.product:active { transform: translateY(0) scale(.99); }
+.product:focus-visible { outline: 3px solid #9ac8f0; outline-offset: 3px; }
 .product.selected {
-  border-color: #2771b7;
-  background: #f0f7ff;
+  border-color: #398a83;
+  background: #f0faf6;
 }
 .product strong {
-  font-size: 30px;
+  font-size: 26px;
+  color: #205e5b;
 }
 .product span {
   font-size: 14px;
   color: #52657b;
 }
+.product .product-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #254858; font-size: 15px; }
+.selection-indicator { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 18px; height: 18px; border: 1px solid #b9cdcd; border-radius: 50%; }
+.selected .selection-indicator { color: white; background: #398a83; border-color: #398a83; }
+.product-price { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px; }
+.product .product-features { display: flex; align-items: center; gap: 6px; color: #287758; font-weight: 600; }
+.product-detail { display: flex; align-items: center; gap: 8px; line-height: 1.6; }
+.product-detail svg, .product-features svg { flex-shrink: 0; }
+.product .product-select { display: block; margin-top: auto; padding-top: 14px; border-top: 1px solid #dbe8e7; color: #347d76; font-weight: 600; }
+.selected-details { font-size: 13px; margin: 0; }
 .checkout-card,
 .order-card,
 .history {
   background: white;
   border: 1px solid #e3eaf2;
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 26px;
 }
 .checkout-card {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  align-self: start;
+  min-width: 0;
 }
 .total {
   font-size: 36px;
@@ -608,6 +637,8 @@ small {
   }
   header {
     align-items: flex-start;
+    flex-direction: column;
+    gap: 16px;
   }
 }
 </style>

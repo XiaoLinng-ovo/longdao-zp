@@ -1,7 +1,40 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { QuestionSheetConflictError, QuestionSheetRepository, type QuestionWriteInput } from './question-sheet-repository.js'
-import { ASSESSMENT_RUBRICS, tiersForCriterion } from './question-sheet-rubrics.js'
+import { ASSESSMENT_RUBRICS, ASSESSMENT_RUBRIC_VERSION, tiersForCriterion } from './question-sheet-rubrics.js'
+
+describe('固定考察点人工分数边界', () => {
+  for (const score of [0, 10, 11, 12, 13]) {
+    it('用人部门人工分数 ' + score + (score > 12 ? ' 拒绝保存' : ' 可保存'), async () => {
+      const statements: string[] = []
+      const criterion = ASSESSMENT_RUBRICS.department[0]!
+      const client = {
+        async query(sql: string, values: unknown[] = []) {
+          statements.push(sql)
+          if (sql.includes('FOR UPDATE')) return { rows: [{ status: 'scoring' }] }
+          if (sql.startsWith('SELECT category, tiers')) return { rows: [{ category: 'rubric:department:results', tiers: tiersForCriterion('department', criterion) }] }
+          if (sql.startsWith('UPDATE interview_questions')) return { rows: [{ id: 'question-1', seq: 1, question: criterion.title,
+            category: 'rubric:department:results', source: 'manual', final_score: values[1],
+            created_at: '2026-10-22T00:00:00Z', updated_at: '2026-10-22T00:00:00Z' }] }
+          return { rows: [] }
+        },
+        release() {},
+      }
+      const repository = new QuestionSheetRepository({ connect: async () => client } as never)
+      const save = () => repository.patchQuestion('sheet-1', 'question-1', { finalScore: score }, 'user-1')
+      if (score > 12) {
+        await assert.rejects(save(), QuestionSheetConflictError)
+        assert.ok(!statements.some(sql => sql.startsWith('UPDATE interview_questions')))
+        assert.ok(statements.includes('ROLLBACK'))
+      } else {
+        const result = await save()
+        assert.equal(result.finalScore, score)
+        assert.equal(result.maxScore, 12)
+        assert.ok(statements.includes('COMMIT'))
+      }
+    })
+  }
+})
 
 describe('即时载入人工考察点', () => {
   const template: QuestionWriteInput[] = ASSESSMENT_RUBRICS.hr.map((item, index) => ({
@@ -12,7 +45,7 @@ describe('即时载入人工考察点', () => {
   function setup(status = 'draft', saved: Record<string, unknown> = {}, failInsert = false) {
     const statements: Array<{ sql: string; values: unknown[] }> = []
     const row = { id: 'sheet-1', application_id: 'app-1', stage: 'initial', sheet_type: 'hr_screen', status,
-      source: 'ai', created_at: '2026-10-22T00:00:00Z', updated_at: '2026-10-22T00:00:00Z' }
+      source: 'ai', prompt_version: null as string | null, created_at: '2026-10-22T00:00:00Z', updated_at: '2026-10-22T00:00:00Z' }
     const original = { id: 'old-id', seq: 1, question: '旧面试问题', source: 'ai_generated',
       created_at: row.created_at, updated_at: row.updated_at, ...saved }
     let rows: Array<Record<string, unknown>> = [original]
@@ -31,7 +64,7 @@ describe('即时载入人工考察点', () => {
           rows.push(item)
           return { rows: [item] }
         }
-        if (sql.startsWith('UPDATE interview_question_sheets')) row.status = 'scoring'
+        if (sql.startsWith('UPDATE interview_question_sheets')) { row.status = 'scoring'; row.prompt_version = String(values[1]) }
         return { rows: [] }
       },
       release() { statements.push({ sql: 'release', values: [] }) },
@@ -64,6 +97,7 @@ describe('即时载入人工考察点', () => {
   for (const [status, saved] of [
     ['submitted', {}], ['locked', {}], ['scoring', { final_score: 0 }],
     ['scoring', { final_score: 7 }], ['draft', { comment: '已记录的人工评语' }],
+    ['scoring', { final_tier: 'pass' }], ['draft', { comment: '' }],
   ] as const) {
     it(status + JSON.stringify(saved) + '禁止删除或覆盖原记录', async () => {
       const { load, statements, rows } = setup(status, saved)
@@ -79,6 +113,29 @@ describe('即时载入人工考察点', () => {
     await load()
     assert.equal(statements.filter(item => /^(DELETE|INSERT|UPDATE)/.test(item.sql)).length, 0)
   })
+
+  it('旧版未评分表原位升级为固定模板，重复读取不再替换', async () => {
+    const { repository, row, rows } = setup('scoring')
+    repository.ensure = async () => { throw new Error('升级不得新建面试表') }
+    assert.equal(await repository.upgradeAssessmentRubric('sheet-1', template, ASSESSMENT_RUBRIC_VERSION), true)
+    assert.equal(row.prompt_version, ASSESSMENT_RUBRIC_VERSION)
+    assert.equal(rows().length, 5)
+    const ids = rows().map(item => item.id)
+    assert.equal(await repository.upgradeAssessmentRubric('sheet-1', template, ASSESSMENT_RUBRIC_VERSION), false)
+    assert.deepEqual(rows().map(item => item.id), ids)
+  })
+
+  for (const [status, saved] of [
+    ['generating', {}], ['submitted', {}], ['locked', {}], ['scoring', { final_score: 0 }],
+    ['scoring', { final_tier: 'pass' }], ['draft', { comment: '' }],
+  ] as const) {
+    it('自动升级保护已有状态和人工记录：' + status + JSON.stringify(saved), async () => {
+      const { repository, statements, rows } = setup(status, saved)
+      assert.equal(await repository.upgradeAssessmentRubric('sheet-1', template, ASSESSMENT_RUBRIC_VERSION), false)
+      assert.equal(rows()[0]!.id, 'old-id')
+      assert.ok(!statements.some(item => /^(DELETE|INSERT|UPDATE)/.test(item.sql)))
+    })
+  }
 
   it('任一考察点写入失败时回滚，保留原表', async () => {
     const { load, statements, rows } = setup('scoring', {}, true)

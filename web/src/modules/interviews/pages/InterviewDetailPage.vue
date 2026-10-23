@@ -6,6 +6,7 @@ import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 import QuestionSheetDialog from '../components/QuestionSheetDialog.vue'
+import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
 import InterviewSummaryDialog from '../components/InterviewSummaryDialog.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { stageOfRound } from '../api/question-sheets'
@@ -281,6 +282,7 @@ onMounted(async () => {
       </button>
     </template>
     <div class="inline-actions">
+      <ApplicationResumeButton v-if="detail" :application-id="detail.applicationId" />
       <button v-if="detail?.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting || savingSchedule" @click="openSchedule">编辑安排</button>
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
         进入 AI 面试室

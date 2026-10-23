@@ -31,6 +31,8 @@ export const orderView = (r: Row) => ({
   amountFen: r.amount_fen,
   currency: r.currency,
   durationDays: r.duration_days,
+  durationMonths: r.duration_months ?? null,
+  allModules: r.all_modules ?? false,
   method: r.method,
   mode: r.mode,
   status: r.status,
@@ -49,6 +51,8 @@ const productView = (r: Row) => ({
   amountFen: r.amount_fen,
   currency: r.currency,
   durationDays: r.duration_days,
+  durationMonths: r.duration_months ?? null,
+  allModules: r.all_modules ?? false,
   active: r.active,
   seatLimit: r.seat_limit,
   jobLimit: r.job_limit,
@@ -148,6 +152,12 @@ export class PaymentService {
     };
   }
   async publishProduct(actor: string, input: Row) {
+    const dayBased = Number.isSafeInteger(input.durationDays) &&
+      input.durationDays >= 1 && input.durationDays <= 3660 &&
+      input.durationMonths == null;
+    const monthBased = Number.isSafeInteger(input.durationMonths) &&
+      input.durationMonths >= 1 && input.durationMonths <= 120 &&
+      input.durationDays == null;
     if (
       Object.keys(input).some(
         (k) =>
@@ -156,6 +166,8 @@ export class PaymentService {
             "name",
             "amountFen",
             "durationDays",
+            "durationMonths",
+            "allModules",
             "reason",
           ].includes(k),
       ) ||
@@ -165,14 +177,13 @@ export class PaymentService {
       !Number.isSafeInteger(input.amountFen) ||
       input.amountFen < 1 ||
       input.amountFen > 100000000 ||
-      !Number.isSafeInteger(input.durationDays) ||
-      input.durationDays < 1 ||
-      input.durationDays > 3660
+      (!dayBased && !monthBased) ||
+      (input.allModules !== undefined && typeof input.allModules !== "boolean")
     )
       throw new HttpError(
         400,
         "VALIDATION_ERROR",
-        "请填写有效商品名称、分单位售价及 1～3660 天期限",
+        "请填写有效商品名称、分单位售价，以及 1～3660 天或 1～120 个月期限（二选一）",
       );
     const plan = uuid(input.planVersionId),
       reason = note(input.reason);
@@ -192,14 +203,17 @@ export class PaymentService {
         throw new HttpError(400, "PLAN_INVALID", "请选择明确容量的已发布套餐");
       const r = (
         await db.query(
-          "INSERT INTO payment_products(plan_version_id,name,amount_fen,duration_days,created_by) VALUES($1,$2,$3,$4,$5) RETURNING *",
-          [plan, input.name.trim(), input.amountFen, input.durationDays, actor],
+          "INSERT INTO payment_products(plan_version_id,name,amount_fen,duration_days,created_by,duration_months,all_modules) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+          [plan, input.name.trim(), input.amountFen, input.durationDays ?? null, actor, input.durationMonths ?? null, input.allModules ?? false],
         )
       ).rows[0];
       await this.audit(db, actor, null, "payment.product.publish", {
         productId: r.id,
         reason,
         amountFen: input.amountFen,
+        durationDays: r.duration_days,
+        durationMonths: r.duration_months,
+        allModules: r.all_modules,
       });
       return productView({
         ...r,
@@ -443,7 +457,7 @@ export class PaymentService {
         no = "sr" + randomBytes(15).toString("hex");
       const row = (
         await db.query(
-          "INSERT INTO payment_orders(id,out_trade_no,organization_id,actor_id,product_id,provider_id,method,mode,amount_fen,currency,product_name,plan_version_id,duration_days,expected_version,idempotency_key,fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *",
+          "INSERT INTO payment_orders(id,out_trade_no,organization_id,actor_id,product_id,provider_id,method,mode,amount_fen,currency,product_name,plan_version_id,duration_days,expected_version,idempotency_key,fingerprint,duration_months,all_modules) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *",
           [
             id,
             no,
@@ -461,6 +475,8 @@ export class PaymentService {
             input.expectedVersion,
             key,
             fingerprint,
+            product.duration_months,
+            product.all_modules,
           ],
         )
       ).rows[0];
@@ -613,7 +629,12 @@ export class PaymentService {
                 new Date(o.paid_subscription_expires_at).getTime(),
               )
             : Date.now();
-        const expires = new Date(start + r.duration_days * 86400000);
+        const expires = r.duration_months == null
+          ? new Date(start + r.duration_days * 86400000)
+          : (await db.query(
+              "SELECT (($1::timestamptz AT TIME ZONE 'Asia/Shanghai') + make_interval(months => $2::integer)) AT TIME ZONE 'Asia/Shanghai' AS expires",
+              [new Date(start), r.duration_months],
+            )).rows[0].expires;
         await db.query(
           "UPDATE organizations SET plan_version_id=$2,paid_subscription_expires_at=$3,entitlement_version=entitlement_version+1,service_status='enabled',trial_ends_at=NULL,service_version=service_version+1,active_payment_order_id=$4 WHERE id=$1",
           [o.id, r.plan_version_id, expires, r.id],

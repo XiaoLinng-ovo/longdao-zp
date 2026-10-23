@@ -66,7 +66,7 @@ describe("platform payment management", () => {
       select = form.querySelector("select")!;
     select.value = "plan";
     select.dispatchEvent(new Event("change"));
-    const inputs = form.querySelectorAll("input");
+    const inputs = form.querySelectorAll<HTMLInputElement>("input:not([type=checkbox])");
     for (const [i, value] of [
       "团队版月付",
       "299.01",
@@ -93,6 +93,30 @@ describe("platform payment management", () => {
     expect(root.querySelector(".product-form")).toBeNull();
     expect(root.querySelector(".channel-form")).toBeNull();
     expect(root.textContent).toContain("收款渠道");
+  });
+  it("publishes a calendar-month package with an explicit full-module scope", async () => {
+    await mount();
+    const form = root.querySelector<HTMLFormElement>(".product-form")!;
+    const selects = form.querySelectorAll("select");
+    selects[0]!.value = "plan";
+    selects[0]!.dispatchEvent(new Event("change"));
+    selects[1]!.value = "months";
+    selects[1]!.dispatchEvent(new Event("change"));
+    await nextTick();
+    const inputs = form.querySelectorAll<HTMLInputElement>("input:not([type=checkbox])");
+    for (const [index, value] of ["全功能年付套餐", "2500", "12", "发布正式年付价格"].entries()) {
+      inputs[index]!.value = value;
+      inputs[index]!.dispatchEvent(new Event("input"));
+    }
+    const checkbox = form.querySelector<HTMLInputElement>("[type=checkbox]")!;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    form.dispatchEvent(new Event("submit"));
+    await flush();
+    expect(publishPaymentProduct).toHaveBeenCalledWith({
+      planVersionId: "plan", name: "全功能年付套餐", amountFen: 250000,
+      durationDays: null, durationMonths: 12, allModules: true, reason: "发布正式年付价格",
+    });
   });
   it("does not treat three-decimal prices as valid currency", async () => {
     await mount();

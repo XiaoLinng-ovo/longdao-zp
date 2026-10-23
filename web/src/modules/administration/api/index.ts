@@ -23,6 +23,25 @@ export interface AdminUser {
 }
 
 export interface AdminRole { id: string; code: string; name: string }
+export interface AdminAccountOrganization { id: string; name: string }
+export interface AdminUserCreate {
+  email: string
+  displayName: string
+  organizationId: string
+  departmentCode: string
+  role: string
+  password?: string
+}
+export interface AdminUserCreateResult { user: AdminUser; initialPassword: string; generatedPassword: boolean }
+
+export async function listAccountOrganizations(): Promise<AdminAccountOrganization[]> {
+  return (await apiClient.getJson<AdminAccountOrganization[]>('/admin/account-organizations')).data
+}
+
+export async function createAdminUser(input: AdminUserCreate): Promise<AdminUserCreateResult> {
+  return (await apiClient.postJson<AdminUserCreateResult>('/admin/users', input)).data
+}
+
 export interface AdminDepartment { id: string; code: string; name: string; isActive: boolean; createdAt: string; updatedAt: string }
 export interface AdminDepartmentDeleteResult { id: string; code: string; name: string; removedApprovalPolicies: number }
 export type AdminSettings = Record<string, unknown>

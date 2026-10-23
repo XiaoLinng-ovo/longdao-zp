@@ -415,6 +415,51 @@ test("real-payment ledger serializes enterprise orders, settlement, expiry, pric
         );
       },
     );
+    await t.test("calendar products preserve immutable snapshots and renew by Shanghai calendar month", async () => {
+      const base = {
+        planVersionId: product.planVersionId,
+        name: "自然月正式套餐", amountFen: 25800, reason: "自然月套餐隔离验证",
+      };
+      for (const duration of [
+        {}, { durationMonths: 0 }, { durationMonths: 121 }, { durationMonths: 1.5 },
+        { durationDays: 30, durationMonths: 1 }, { durationMonths: 1, allModules: "true" },
+      ]) await assert.rejects(service.publishProduct(actor, { ...base, ...duration }), { code: "VALIDATION_ERROR" });
+      assert.equal(product.durationDays, 30);
+      assert.equal(product.durationMonths, null);
+      const monthly = await service.publishProduct(actor, { ...base, durationMonths: 1, allModules: true });
+      assert.equal(monthly.durationDays, null);
+      assert.equal(monthly.durationMonths, 1);
+      assert.equal(monthly.allModules, true);
+      await service.toggleProduct(actor, monthly.id, { active: true, reason: "测试上架" });
+      await assert.rejects(pool.query("UPDATE payment_products SET duration_months=2 WHERE id=$1", [monthly.id]));
+      await assert.rejects(pool.query("UPDATE payment_products SET all_modules=false WHERE id=$1", [monthly.id]));
+      await assert.rejects(pool.query("UPDATE payment_products SET duration_days=30 WHERE id=$1", [monthly.id]));
+      const originalExpiry = "2099-01-31T04:00:00.000Z";
+      await pool.query("UPDATE organizations SET plan_version_id=$2, paid_subscription_expires_at=$3 WHERE id=$1", [org, monthly.planVersionId, originalExpiry]);
+      const checkout = await service.checkout(actor, org);
+      const visible = checkout.products.find((p) => p.id === monthly.id)!;
+      assert.equal(visible.durationMonths, 1);
+      assert.equal(visible.allModules, true);
+      const order = await create(randomUUID(), { productId: monthly.id, expectedVersion: checkout.organization.entitlementVersion });
+      assert.equal(order.durationDays, null);
+      assert.equal(order.durationMonths, 1);
+      assert.equal(order.allModules, true);
+      await service.settle(provider.id, paid(order), "callback");
+      assert.equal((await service.read(actor, org, order.id)).status, "fulfilled");
+      const renewed = (await pool.query("SELECT paid_subscription_expires_at FROM organizations WHERE id=$1", [org])).rows[0];
+      assert.equal(renewed.paid_subscription_expires_at.toISOString(), "2099-02-28T04:00:00.000Z");
+      await service.refund(actor, order.id, "自然月退款回退验证");
+      const restored = (await pool.query("SELECT paid_subscription_expires_at FROM organizations WHERE id=$1", [org])).rows[0];
+      assert.equal(restored.paid_subscription_expires_at.toISOString(), originalExpiry);
+      for (const [start, months, expected] of [
+        ["2028-01-31T04:00:00Z", 1, "2028-02-29T04:00:00.000Z"],
+        ["2028-08-31T04:00:00Z", 6, "2029-02-28T04:00:00.000Z"],
+        ["2028-02-29T04:00:00Z", 12, "2029-02-28T04:00:00.000Z"],
+      ] as const) {
+        const result = await pool.query("SELECT (($1::timestamptz AT TIME ZONE 'Asia/Shanghai') + make_interval(months => $2::integer)) AT TIME ZONE 'Asia/Shanghai' AS expires", [start, months]);
+        assert.equal(result.rows[0].expires.toISOString(), expected);
+      }
+    });
     await t.test(
       "expired subscriptions retain billing access without restoring recruitment access",
       async () => {

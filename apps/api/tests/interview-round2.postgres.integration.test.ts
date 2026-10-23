@@ -17,7 +17,7 @@ test('复试流转：第二轮独立建档、幂等、企业隔离、回滚和�
   const executor = { query, release() {} }
   const fixturePool = { query, async connect() { return executor } } as unknown as Pool
   const repository = new QuestionSheetRepository(fixturePool)
-  const fixtures = [0, 1].map(() => ({ org: randomUUID(), user: randomUUID(), candidate: randomUUID(), job: randomUUID(), app: randomUUID(), initial: randomUUID() }))
+  const fixtures = [0, 1, 2, 3].map(() => ({ org: randomUUID(), user: randomUUID(), candidate: randomUUID(), job: randomUUID(), app: randomUUID(), initial: randomUUID() }))
   await client.query('BEGIN')
   try {
     for (const f of fixtures) {
@@ -27,7 +27,7 @@ test('复试流转：第二轮独立建档、幂等、企业隔离、回滚和�
       await client.query("INSERT INTO candidates (id,organization_id,candidate_no,name) VALUES ($1,$2,$3,'round2-test')", [f.candidate, f.org, 'CAN-' + f.candidate])
       await client.query("INSERT INTO jobs (id,organization_id,job_no,title,headcount) VALUES ($1,$2,$3,'round2-test',1)", [f.job, f.org, 'JOB-' + f.job])
       await client.query("INSERT INTO applications (id,organization_id,application_no,candidate_id,job_id,status) VALUES ($1,$2,$3,$4,$5,'interviewing')", [f.app, f.org, 'APP-' + f.app, f.candidate, f.job])
-      await client.query("INSERT INTO interviews (id,organization_id,application_id,interview_no,round,stage,type,title,status,scheduled_start_at,participants) VALUES ($1,$2,$3,$4,1,'initial','technical','初试','completed','2026-10-01T01:00:00Z',$5::jsonb)", [f.initial, f.org, f.app, 'INT-' + f.initial, JSON.stringify([{ userId: f.user, role: 'interviewer', required: true }])])
+      await client.query("INSERT INTO interviews (id,organization_id,application_id,interview_no,round,stage,type,title,status,scheduled_start_at,participants) VALUES ($1,$2,$3,$4,1,'initial','technical','初试','completed','2026-10-01T01:00:00Z',$5::jsonb)", [f.initial, f.org, f.app, 'INT-' + f.initial.toUpperCase(), JSON.stringify([{ userId: f.user, role: 'interviewer', required: true }])])
     }
     const a = fixtures[0]!, b = fixtures[1]!
     assert.equal(await repository.findNextRound(a.app), null)
@@ -80,6 +80,43 @@ test('复试流转：第二轮独立建档、幂等、企业隔离、回滚和�
     assert.equal(cancelled.nextInterview?.status, 'cancelled')
     assert.equal((await repository.findNextRound(b.app))?.status, 'cancelled')
     assert.equal((await client.query("SELECT count(*) FROM interviews WHERE application_id=$1 AND stage='final'", [b.app])).rows[0].count, '1')
+
+    // Completing the initial interview also creates the final round, atomically.
+    const c = fixtures[2]!, d = fixtures[3]!
+    const concluding = new NormalizedRecruitingRepository(fixturePool as unknown as RepositoryPool, { organizationId: c.org })
+    await client.query("UPDATE interviews SET status='scheduled' WHERE id=$1", [c.initial])
+    const feedback = await concluding.createInterviewFeedback({ interviewId: c.initial, interviewerId: c.user, status: 'submitted', overallScore: 90 })
+    await assert.rejects(concluding.concludeInterview(c.initial, 'continue', c.user), (error: any) => error.code === 'INTERVIEW_FEEDBACK_INCOMPLETE')
+    assert.equal(await repository.findNextRound(c.app), null)
+    assert.equal((await client.query('SELECT status FROM interviews WHERE id=$1', [c.initial])).rows[0].status, 'scheduled')
+    await concluding.updateInterviewFeedback(feedback.id, { status: 'locked' })
+    await assert.rejects(scoped.concludeInterview(c.initial, 'continue', a.user))
+    await assert.rejects(concluding.concludeInterview(c.initial, 'continue', a.user))
+    assert.equal(await repository.findNextRound(c.app), null)
+    assert.equal((await client.query('SELECT count(*) FROM interview_stage_reviews WHERE application_id=$1', [c.app])).rows[0].count, '0')
+    const concluded = await concluding.concludeInterview('INT-' + c.initial, 'continue', c.user)
+    assert.equal(concluded.status, 'completed')
+    const created = await repository.findNextRound(c.app)
+    assert.equal(created?.round, 2)
+    assert.equal(created?.status, 'scheduled')
+    assert.equal((await concluding.getInterview('INT-' + created!.id)).id, created?.id)
+    await concluding.concludeInterview(c.initial, 'continue', c.user)
+    assert.equal((await repository.findNextRound(c.app))?.id, created?.id)
+    assert.equal((await client.query("SELECT count(*) FROM workflow_events WHERE subject_id=$1 AND event_type='conclude'", [c.initial])).rows[0].count, '1')
+    assert.equal((await client.query("SELECT count(*) FROM workflow_events WHERE subject_id=$1 AND event_type='advance_to_final_interview'", [c.app])).rows[0].count, '1')
+    await assert.rejects(concluding.concludeInterview(c.initial, 'reject', c.user), (error: any) => error.code === 'INTERVIEW_ALREADY_CONCLUDED')
+    await client.query("UPDATE applications SET status='offer_approval' WHERE id=$1", [c.app])
+    await client.query("UPDATE interviews SET status='cancelled' WHERE id=$1", [created!.id])
+    await concluding.concludeInterview(c.initial, 'continue', c.user)
+    assert.equal((await repository.findNextRound(c.app))?.status, 'cancelled')
+    assert.equal((await client.query('SELECT status FROM applications WHERE id=$1', [c.app])).rows[0].status, 'offer_approval')
+
+    // Historical releases could conclude without creating a final or stage review.
+    await client.query("INSERT INTO workflow_events (subject_type,subject_id,event_type,actor_user_id,metadata,organization_id) VALUES ('interview',$1,'conclude',$2,'{\"outcome\":\"continue\"}'::jsonb,$3)", [d.initial,d.user,d.org])
+    const legacy = new NormalizedRecruitingRepository(fixturePool as unknown as RepositoryPool, { organizationId: d.org })
+    await legacy.concludeInterview(d.initial, 'continue', d.user)
+    assert.equal((await repository.findNextRound(d.app))?.round, 2)
+    assert.equal((await client.query("SELECT count(*) FROM workflow_events WHERE subject_id=$1 AND event_type='conclude'", [d.initial])).rows[0].count, '1')
   } finally {
     await client.query('ROLLBACK')
     client.release()

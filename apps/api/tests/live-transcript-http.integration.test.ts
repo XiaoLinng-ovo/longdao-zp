@@ -72,7 +72,9 @@ before(async () => {
       const response = input.question ? { questionKind: 'assessment', summary: '实际项目交付',
         evidence: ['完成了测试'], scores: [{ dimension: '项目交付', score: 7, rationale: '有开发及测试经历', questionQuote: '请介绍项目', evidence: ['完成了测试'] }],
         concerns: [], confidence: .8, nextQuestion: '建议但尚未问过的题目' } : { questionKind: 'unreviewed', summary: '需进一步核实，暂不评分。', evidence: [], scores: [], concerns: [], confidence: 0, nextQuestion: '' }
-      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }))
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...response,
+        ...(input.refineTranscript ? { transcriptRefinement: { text: input.candidateAnswer, corrections: [], uncertainties: [] } } : {}),
+      }) } }] }))
       return
     }
     for await (const _ of req) { /* Consume the uploaded audio. */ }
@@ -322,6 +324,35 @@ test('rejects invalid checkpoints before storing audio and requires authorizatio
   assert.equal(upstreamCalls, calls)
 })
 
+test('minor preview differences cannot discard offline sentences; alternatives survive replay and reload', async () => {
+  const text = '我负责平台开发。团队一共八个人。我还承担测试和上线工作。'
+  upstreamRows = [{ text, speakerId: 'speaker_0', startMs: 0, endMs: 14000 }]
+  const body = { ...payload(), streamingTranscript: { text: '我负责平台的开发。', endMs: 30000, complete: false } }
+  const response = await send('POST', segmentPath, body, { 'Idempotency-Key': 'minor-preview-difference' })
+  assert.equal(response.status, 201, JSON.stringify(response.body))
+  assert.equal(response.body.data.map((row: LiveSegment) => row.text).join(''), text)
+  const row = response.body.data[0]
+  assert.deepEqual(row.transcriptComparison, { streamingText: body.streamingTranscript.text, offlineText: text,
+    streamingComplete: false, selectedSource: 'offline', startMs: 15000, endMs: 30000 })
+  const count = saved.length
+  const replay = await send('POST', segmentPath, body, { 'Idempotency-Key': 'minor-preview-difference' })
+  assert.deepEqual(replay.body.data, response.body.data)
+  assert.equal(saved.length, count)
+  const restored = await send('GET', '/interview-live-sessions/checkpoint-session')
+  assert.deepEqual(restored.body.data.segments.find((item: LiveSegment) => item.id === row.id).transcriptComparison, row.transcriptComparison)
+})
+
+test('ambiguous recognizer differences preserve both texts without inserting duplicate dialogue', async () => {
+  const text = '我负责平台开发和测试。', stream = '我不负责平台开发。我负责需求整理。'
+  upstreamRows = [{ text, speakerId: 'speaker_0', startMs: 0, endMs: 14000 }]
+  const response = await send('POST', segmentPath, { ...payload(), streamingTranscript: { text: stream, endMs: 30000, complete: true } })
+  assert.equal(response.status, 201)
+  assert.equal(response.body.data.length, 1)
+  assert.equal(response.body.data[0].text, stream)
+  assert.equal(response.body.data[0].role, 'unknown')
+  assert.equal(response.body.data[0].transcriptComparison.offlineText, text)
+})
+
 test('summary endpoints require authentication, CSRF and an interview within scope', async () => {
   const path = `/interviews/${interviewId}/summary`
   assert.equal((await send('GET', path, {}, { authorization: '' })).status, 401)
@@ -476,4 +507,50 @@ test('rejects mismatched provenance and invalid source timelines before ASR or o
     assert.equal(response.status, 400, JSON.stringify(response.body))
   }
   assert.equal(upstreamCalls, calls); assert.equal(recordings.size, count)
+})
+
+test('manual refinement endpoint authenticates, validates and forwards the source snapshot and actor', async () => {
+  const segment = saved[0]!
+  const path = `/interview-live-segments/${segment.id}/refinement`
+  const sourceSegments = [{ id: segment.id, text: segment.text, role: segment.role, speakerId: segment.speakerId }]
+  const input = { text: '手动微调后的发言。', expectedText: '模型整理后的发言。', sourceSegments }
+  const refinement = { text: input.text, corrections: [], uncertainties: [], editedAt: new Date().toISOString(), editedBy: 'test-actor' }
+  const update = mock.method(LiveInterviewSessionRepository.prototype, 'updateRefinement', async (...[id, body, actorId]: Parameters<LiveInterviewSessionRepository['updateRefinement']>) => {
+    assert.equal(id, segment.id)
+    assert.deepEqual(body, input)
+    assert.ok(actorId)
+    return refinement
+  })
+  try {
+    assert.equal((await send('POST', path, input, { authorization: '' })).status, 401)
+    assert.equal((await send('POST', path, input, { 'x-csrf-token': '' })).status, 403)
+    for (const invalid of [
+      { ...input, text: ' ' }, { ...input, text: 'a'.repeat(50001) },
+      { ...input, expectedText: '' }, { ...input, sourceSegments: [] },
+      { ...input, sourceSegments: [...sourceSegments, ...sourceSegments] },
+      { ...input, sourceSegments: [{ ...sourceSegments[0], speakerId: null }] },
+      { ...input, sourceSegments: [{ ...sourceSegments[0], id: 'other-segment' }] },
+    ]) assert.equal((await send('POST', path, invalid)).status, 400)
+    assert.equal(update.mock.callCount(), 0)
+    const result = await send('POST', path, input)
+    assert.equal(result.status, 200, JSON.stringify(result.body))
+    assert.deepEqual(result.body.data, refinement)
+    assert.equal(update.mock.callCount(), 1)
+  } finally { update.mock.restore() }
+})
+
+test('manual refinement endpoint preserves conflict responses without overwriting text', async () => {
+  const segment = saved[0]!
+  const update = mock.method(LiveInterviewSessionRepository.prototype, 'updateRefinement', async () => {
+    throw Object.assign(new Error('发言已更新，请刷新后重新编辑。'), { status: 409, code: 'TRANSCRIPT_REFINEMENT_CONFLICT' })
+  })
+  try {
+    const result = await send('POST', `/interview-live-segments/${segment.id}/refinement`, {
+      text: '微调后的发言', expectedText: '旧版发言',
+      sourceSegments: [{ id: segment.id, text: segment.text, role: segment.role, speakerId: segment.speakerId }],
+    })
+    assert.equal(result.status, 409, JSON.stringify(result.body))
+    assert.equal(result.body.error.code, 'TRANSCRIPT_REFINEMENT_CONFLICT')
+    assert.equal(update.mock.callCount(), 1)
+  } finally { update.mock.restore() }
 })

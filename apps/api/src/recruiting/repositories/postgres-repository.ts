@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { recordStageDecisionWithExecutor } from '../../interviews/question-sheet-repository.js'
 import { RecruitingWorkflowError } from '../workflow.js'
 import { prepareInterviewScheduleUpdate } from '../interview-schedule.js'
 import { OFFER_ELIGIBILITY_SQL } from '../offer-eligibility.js'
@@ -1090,6 +1091,42 @@ export class NormalizedRecruitingRepository {
       await this.appendWorkflowEventWithExecutor(client, { subjectType: 'interview', subjectId: current.id, action: 'update', actorId,
         reason: '修改面试安排', metadata: { before: Object.fromEntries(keys.map((key) => [key, current[key]])), after: patch } })
       return updated
+    })
+  }
+
+  async concludeInterview(idOrBusinessId: string, outcome: 'continue' | 'offer' | 'reject', actorId: string): Promise<InterviewDbRecord> {
+    if (!['continue', 'offer', 'reject'].includes(outcome)) throw new RepositoryValidationError('无效的面试结论')
+    return this.transaction(async (client) => {
+      const id = await resolveEntityId(client, 'interviews', 'interview_no', 'INT', 'int', idOrBusinessId, this.organizationId)
+      const initial = await this.getInterviewWithExecutor(client, id)
+      // Match stage advancement's lock order so concurrent confirmations share one next round.
+      const application = await queryOne<{ status: string; organization_id: string }>(client,
+        'SELECT status, organization_id FROM applications WHERE id = $1::uuid FOR UPDATE', [initial.applicationId])
+      await client.query('SELECT id FROM interviews WHERE id = $1::uuid FOR UPDATE', [initial.id])
+      const interview = await this.getInterviewWithExecutor(client, initial.id)
+      if (interview.status === 'cancelled') throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认结论', 409)
+      const previous = (await client.query<{ metadata: { outcome?: string } }>(
+        "SELECT metadata FROM workflow_events WHERE subject_type = 'interview' AND subject_id = $1::uuid AND event_type = 'conclude' ORDER BY created_at DESC LIMIT 1", [interview.id])).rows[0]
+      if (previous && previous.metadata.outcome !== outcome) throw new RecruitingWorkflowError('INTERVIEW_ALREADY_CONCLUDED', '该面试已确认其他结论，请在当前面试阶段继续处理', 409)
+      const advance = (interview.stage === 'initial' || (!interview.stage && interview.round === 1)) && outcome === 'continue'
+      const completingFinalOffer = application.status === 'offer_approval' && outcome === 'offer' && (interview.stage === 'final' || interview.round >= 2)
+      if (!previous && !['interviewing', 'human_review'].includes(application.status) && !completingFinalOffer) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请状态不能确认面试结论', 409)
+      const actor = await resolveActorId(client, actorId, { required: true, organizationId: application.organization_id }) as string
+      if (previous) {
+        if (advance) await recordStageDecisionWithExecutor(client, interview.applicationId, 'initial', 'advanced', actor)
+        return interview
+      }
+      const feedback = (await client.query<{ interviewer_id: string; status: string }>(
+        'SELECT interviewer_id, status FROM interview_feedback WHERE interview_id = $1::uuid FOR UPDATE', [interview.id])).rows
+      const missingRequired = interview.participants.some(person => person.required && (person.role ?? 'interviewer') === 'interviewer'
+        && !feedback.some(item => item.interviewer_id === person.userId && item.status === 'locked'))
+      if (!feedback.length || feedback.some(item => item.status !== 'locked') || missingRequired) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试官反馈锁定后才能完成面试')
+      if (advance) await recordStageDecisionWithExecutor(client, interview.applicationId, 'initial', 'advanced', actor)
+      await client.query("UPDATE interviews SET status = 'completed', updated_at = now() WHERE id = $1::uuid", [interview.id])
+      const nextStatus = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
+      await client.query('UPDATE applications SET status = $2, rejected_reason = CASE WHEN $2 = \'rejected\' THEN \'面试未通过\' ELSE rejected_reason END, updated_at = now() WHERE id = $1::uuid', [interview.applicationId, nextStatus])
+      await this.appendWorkflowEventWithExecutor(client, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus: interview.status, toStatus: 'completed', actorId: actor, metadata: { outcome } })
+      return this.getInterviewWithExecutor(client, interview.id)
     })
   }
 

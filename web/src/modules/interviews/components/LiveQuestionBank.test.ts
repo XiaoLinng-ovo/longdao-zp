@@ -54,6 +54,14 @@ describe('generated capability questions', () => {
   })
 })
 
+it('混合题库按各表实际来源标记，不把成功的AI表误标为本地规则', () => {
+  const bank = capabilityBank().map(question => ({ ...question, sourceEngine: question.group === 'department' ? 'llm' as const : 'local_fallback' as const }))
+  mount({ questions: bank, engine: 'local_fallback' })
+  expect(root.querySelector('[data-group="department"]')!.textContent).toContain('AI 生成 · 5 题')
+  expect(root.querySelector('[data-group="department"] .fallback-note')).toBeNull()
+  expect(root.querySelector('[data-group="hr"]')!.textContent).toContain('本地规则 · 5 题')
+})
+
 describe('independent complete reference sheets', () => {
   it.each(['ai', 'hr', 'department'])('renders only the %s group with expanded reference details', group => {
     const bank = capabilityBank(); mount({ group, questions: bank, engine: 'llm' })
@@ -65,10 +73,10 @@ describe('independent complete reference sheets', () => {
     expect(references.every(item => item.open)).toBe(true)
     expect(selected).toEqual([])
   })
-  it('preserves the complete final-round BOSS reference within the department sheet', () => {
-    mount({ group: 'department', round: 2 })
-    expect([...root.querySelectorAll('[data-group]')].map(item => item.getAttribute('data-group'))).toEqual(['department', 'boss'])
-    expect(root.querySelectorAll('.question-select')).toHaveLength(10)
+  it('keeps the final-round BOSS reference in its own sheet', () => {
+    mount({ group: 'boss', round: 2 })
+    expect([...root.querySelectorAll('[data-group]')].map(item => item.getAttribute('data-group'))).toEqual(['boss'])
+    expect(root.querySelectorAll('.question-select')).toHaveLength(5)
   })
 })
 

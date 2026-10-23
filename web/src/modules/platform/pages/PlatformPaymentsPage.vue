@@ -9,6 +9,7 @@ import {
   togglePaymentItem,
   adminPaymentAction,
   formatPayment,
+  paymentDurationLabel,
   paymentStatusLabel,
   type PaymentAdmin,
   type PaymentChannel,
@@ -26,6 +27,9 @@ const product = reactive({
   name: "",
   price: "",
   durationDays: 30,
+  durationMonths: 1,
+  periodUnit: "days" as "days" | "months",
+  allModules: false,
   reason: "",
 });
 const channel = reactive({
@@ -104,6 +108,10 @@ async function publish() {
         name: product.name,
         amountFen,
         durationDays: product.durationDays,
+        ...(product.periodUnit === "months"
+          ? { durationDays: null, durationMonths: product.durationMonths }
+          : {}),
+        ...(product.allModules ? { allModules: true } : {}),
         reason: product.reason,
       }),
     "新售价版本已发布，请确认后上架",
@@ -199,12 +207,17 @@ onMounted(() => void load());
               inputmode="decimal"
               placeholder="例如 299.00" /></label
           ><label
+            >计费期限<select v-model="product.periodUnit"><option value="days">按天</option><option value="months">按自然月</option></select></label
+          ><label v-if="product.periodUnit === 'days'"
             >有效天数<input
               v-model.number="product.durationDays"
               required
               type="number"
               min="1"
               max="3660" /></label
+          ><label v-else
+            >有效月数<input v-model.number="product.durationMonths" required type="number" min="1" max="120" /></label
+          ><label class="module-option"><input v-model="product.allModules" type="checkbox" />全部模块功能</label
           ><label
             >发布原因<input
               v-model="product.reason"
@@ -228,7 +241,7 @@ onMounted(() => void load());
               <tr v-for="p in report.products" :key="p.id">
                 <td>{{ p.name }}</td>
                 <td>
-                  {{ formatPayment(p.amountFen) }} / {{ p.durationDays }} 天
+                  {{ formatPayment(p.amountFen) }} / {{ paymentDurationLabel(p) }}
                 </td>
                 <td>{{ p.seatLimit }} 席位 / {{ p.jobLimit }} 岗位</td>
                 <td>{{ p.active ? "在售" : "已下架" }}</td>
@@ -430,6 +443,7 @@ label {
   gap: 8px;
   font-size: 14px;
 }
+.module-option { display: flex; align-items: center; gap: 8px; align-self: end; min-height: 42px; }
 input,
 select,
 textarea {

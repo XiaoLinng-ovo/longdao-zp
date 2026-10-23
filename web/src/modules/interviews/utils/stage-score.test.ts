@@ -3,6 +3,7 @@ import type { ApiInterviewQuestion, StageWeights } from '../api/question-sheets'
 import {
   STAGE_DEFAULT_WEIGHTS,
   aggregateQuestions,
+  questionMaximum,
   fromPercent,
   scoreForTier,
   sheetScoresOf,
@@ -40,6 +41,15 @@ function question(overrides: Partial<ApiInterviewQuestion> = {}): ApiInterviewQu
 const defaultWeights: StageWeights = { sheets: { hr_screen: 0.35, hiring_department: 0.35 }, recording: 0.3 }
 
 describe('面试表汇总（与后端口径一致）', () => {
+  it('用人部门原表优秀区间为8-10，但单项满分仍按12计算', () => {
+    const item = question({ category: 'rubric:department:results', maxScore: 12, finalScore: 12,
+      tiers: [{ tier: 'excellent', min: 8, max: 10, description: '原表评分标准' }] })
+    expect(questionMaximum(item)).toBe(12)
+    expect(aggregateQuestions([item]).score).toBe(100)
+    expect(questionMaximum(question())).toBe(100)
+    expect(questionMaximum({ ...item, maxScore: undefined })).toBe(10)
+  })
+
   it('只统计已打分题目，未打分不按 0 计', () => {
     const aggregate = aggregateQuestions([question({ id: 'a', finalScore: 90 }), question({ id: 'b', finalScore: 70 }), question({ id: 'c' })])
     expect(aggregate).toEqual({ score: 80, ratings: { 架构能力: 80 }, scoredCount: 2, totalCount: 3 })

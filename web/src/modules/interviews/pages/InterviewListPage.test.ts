@@ -4,7 +4,7 @@ import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import InterviewListPage from './InterviewListPage.vue'
 import type { InterviewView } from '../api'
-import { createInterview, deleteInterview, loadInterviewScheduleData, loadInterviews, lockFeedback, submitFeedback, updateInterviewSchedule } from '../api'
+import { concludeInterview, createInterview, deleteInterview, loadInterviewScheduleData, loadInterviews, lockFeedback, submitFeedback, updateInterviewSchedule } from '../api'
 import { createApplication } from '../../candidates/api'
 
 vi.mock('../api', async (importOriginal) => {
@@ -90,6 +90,63 @@ afterEach(() => {
 })
 
 describe('InterviewListPage', () => {
+  it('refreshes pending final interviews each time arrangement opens', async () => {
+    mockedLoadInterviews.mockResolvedValueOnce([]).mockResolvedValue([finalInterview()])
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
+    await mountPage()
+    button('安排面试').click()
+    await flush()
+    expect(mockedLoadInterviews).toHaveBeenCalledTimes(2)
+    expect(root!.querySelector('.arrange-dialog')?.textContent).toContain('王五')
+    expect(root!.querySelector('.arrange-dialog')?.textContent).not.toContain('暂无通过初试')
+  })
+
+  it('only lists pending finals without adding a second initial-pass confirmation', async () => {
+    mockedLoadInterviews.mockResolvedValue([
+      finalInterview({ entityId: 'initial-1', candidate: '已完成初试', stage: 'initial', round: '1 轮', status: 'completed', feedbackStatus: 'completed' }),
+      finalInterview({ entityId: 'initial-2', candidate: '仅锁定反馈', stage: 'initial', round: '1 轮', feedbackStatus: 'completed', applicationId: 'app-2' }),
+      finalInterview(),
+    ])
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
+    await mountPage()
+    button('安排面试').click()
+    await flush()
+    const dialog = root!.querySelector('.arrange-dialog')!
+    expect(dialog.textContent).not.toContain('待确认结论')
+    expect(dialog.textContent).not.toContain('确认初试通过')
+    expect(dialog.textContent).not.toContain('已完成初试')
+    expect(dialog.textContent).not.toContain('仅锁定反馈')
+    const select = dialog.querySelector('#final-interview-select') as HTMLSelectElement
+    expect([...select.options].map((option) => option.value)).toEqual(['', 'final-1'])
+    expect(select.value).toBe('final-1')
+    expect(concludeInterview).not.toHaveBeenCalled()
+    expect(createInterview).not.toHaveBeenCalled()
+  })
+
+  it('does not advance an initial interview merely by opening arrangement', async () => {
+    mockedLoadInterviews.mockResolvedValue([finalInterview({ stage: 'initial', round: '1 轮', feedbackStatus: 'completed' })])
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
+    await mountPage()
+    button('安排面试').click()
+    await flush()
+    expect(button('确认初试通过')).toBeUndefined()
+    expect(root!.querySelector('.arrange-dialog')?.textContent).toContain('暂无通过初试')
+    expect(concludeInterview).not.toHaveBeenCalled()
+  })
+
+  it('never offers another final round when a cancelled final already exists', async () => {
+    mockedLoadInterviews.mockResolvedValue([
+      finalInterview({ entityId: 'initial-1', stage: 'initial', round: '1 轮' }),
+      finalInterview({ status: 'cancelled' }),
+    ])
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
+    await mountPage()
+    button('安排面试').click()
+    await flush()
+    expect(button('确认初试通过')).toBeUndefined()
+    expect(root!.querySelector('.arrange-dialog')?.textContent).toContain('暂无通过初试')
+  })
+
   it('opens the arrange interview form in a modal instead of below the table', async () => {
     mockedLoadInterviews.mockResolvedValue([])
     mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })

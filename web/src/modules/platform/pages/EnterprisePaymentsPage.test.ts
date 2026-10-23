@@ -119,6 +119,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 describe("enterprise payment checkout", () => {
+  it("uses a subscription-specific page title", async () => {
+    await mount();
+    expect(root.querySelector("h1")?.textContent).toBe("套餐订购与续费");
+  });
   it("renders server-priced capacity and blocks purchase when no channel exists", async () => {
     await mount("/enterprise/payments", { ...report, providers: [] });
     expect(root.textContent).toContain("¥299.00");
@@ -156,6 +160,42 @@ describe("enterprise payment checkout", () => {
       expect.any(String),
     );
     expect(router.currentRoute.value.name).toBe("enterprise-payment-order");
+  });
+  it("shows formal package details and keeps selection usable before merchant activation", async () => {
+    const products = [
+      { id: "annual", name: "全功能年付套餐", amountFen: 250000, durationMonths: 12 },
+      { id: "half-year", name: "全功能半年套餐", amountFen: 130000, durationMonths: 6 },
+      { id: "monthly", name: "全功能月付套餐", amountFen: 25800, durationMonths: 1 },
+    ].map((p) => ({ ...report.products[0]!, ...p, durationDays: null, allModules: true, seatLimit: 100, jobLimit: 2000 }));
+    await mount("/enterprise/payments", { ...report, products, providers: [] });
+    const cards = root.querySelectorAll<HTMLButtonElement>(".product");
+    expect(cards).toHaveLength(3);
+    expect(cards[0]!.textContent).toContain("¥2,500.00");
+    expect(cards[0]!.textContent).toContain("使用期限：12 个月");
+    expect(cards[1]!.textContent).toContain("使用期限：6 个月");
+    expect(cards[2]!.textContent).toContain("使用期限：1 个月");
+    for (const card of cards) {
+      expect(card.textContent).toContain("全部模块功能");
+      expect(card.textContent).toContain("100 个席位");
+      expect(card.textContent).toContain("2000 个岗位");
+    }
+    cards[2]!.click();
+    await nextTick();
+    expect(cards[2]!.getAttribute("aria-pressed")).toBe("true");
+    expect(cards[0]!.getAttribute("aria-pressed")).toBe("false");
+    expect(root.querySelector(".checkout-card")?.textContent).toContain("全功能月付套餐");
+    expect(root.querySelector(".total")?.textContent).toBe("¥258.00");
+    expect(root.querySelector<HTMLButtonElement>("[type=submit]")!.disabled).toBe(true);
+    root.querySelector("form")!.dispatchEvent(new Event("submit"));
+    await flush();
+    expect(createPaymentOrder).not.toHaveBeenCalled();
+    expect(root.textContent).not.toContain("暂无在售套餐");
+  });
+  it("does not substitute simulation products when the formal catalog is empty", async () => {
+    await mount("/enterprise/payments", { ...report, products: [] });
+    expect(root.querySelectorAll(".product")).toHaveLength(0);
+    expect(root.textContent).toContain("暂无在售套餐");
+    expect(root.querySelector<HTMLButtonElement>("[type=submit]")!.disabled).toBe(true);
   });
   it("browser status=success does not grant success and QR comes from the persisted order", async () => {
     await mount("/enterprise/payments/order?status=success");

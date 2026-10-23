@@ -16,6 +16,7 @@ export interface ApiInterviewQuestion {
   dimension: string | null
   category: string | null
   assessmentFocus?: string | null
+  maxScore?: number
   difficulty: string | null
   source: 'live_question' | 'ai_generated' | 'manual'
   questionEventId: string | null

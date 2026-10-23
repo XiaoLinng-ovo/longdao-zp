@@ -15,7 +15,9 @@ export interface PaymentProduct {
   name: string;
   amountFen: number;
   currency: "CNY";
-  durationDays: number;
+  durationDays: number | null;
+  durationMonths?: number | null;
+  allModules?: boolean;
   active: boolean;
   seatLimit: number;
   jobLimit: number;
@@ -33,7 +35,9 @@ export interface PaymentOrder {
   name: string;
   amountFen: number;
   currency: string;
-  durationDays: number;
+  durationDays: number | null;
+  durationMonths?: number | null;
+  allModules?: boolean;
   method: "wxpay" | "alipay";
   mode: "qrcode" | "redirect";
   status: PaymentStatus;
@@ -109,7 +113,9 @@ export const publishPaymentProduct = async (input: {
   planVersionId: string;
   name: string;
   amountFen: number;
-  durationDays: number;
+  durationDays?: number | null;
+  durationMonths?: number | null;
+  allModules?: boolean;
   reason: string;
 }) =>
   (
@@ -167,3 +173,10 @@ export const formatPayment = (fen: number) =>
   new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(
     fen / 100,
   );
+
+export const paymentDurationLabel = (item: {
+  durationDays: number | null;
+  durationMonths?: number | null;
+}) => item.durationMonths != null
+  ? item.durationMonths + " 个月"
+  : item.durationDays + " 天";

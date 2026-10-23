@@ -94,32 +94,6 @@
   border-color: #b8d7ef;
   color: #215fae;
 }
-.nav-icon {
-  display: grid;
-  place-items: center;
-  width: 23px;
-  height: 23px;
-  flex: 0 0 23px;
-  border-radius: 7px;
-  background: #edf4f9;
-  color: #7692a7;
-  font-size: 13px;
-  opacity: 1;
-  transition: background-color .16s ease, color .16s ease, transform .16s ease;
-}
-.nav-item:hover .nav-icon {
-  background: #dcecf7;
-  color: #3479bd;
-  transform: scale(1.04);
-}
-.nav-item.router-link-active .nav-icon {
-  background: #c4e0f6;
-  color: #2569ba;
-}
-.nav-item.router-link-active:hover .nav-icon {
-  background: #b8d9f2;
-  color: #1f5fae;
-}
 .nav-parent {
   position: relative;
 }
@@ -181,18 +155,6 @@
   color: #167970;
   box-shadow: 0 4px 10px rgba(46, 149, 136, .12), inset 0 1px 0 rgba(255, 255, 255, .72);
 }
-.nav-subdot {
-  background: #9db5c4;
-  transition: background-color .16s ease, box-shadow .16s ease, transform .16s ease;
-}
-.nav-subitem:hover .nav-subdot {
-  background: #46b6a7;
-  transform: scale(1.12);
-}
-.nav-subitem.is-active .nav-subdot {
-  background: #2fa997;
-  box-shadow: 0 0 0 3px #d2f0e9;
-}
 @media (max-width: 760px) {
   .nav-item {
     min-height: 38px;
@@ -200,5 +162,75 @@
   }
   .nav-submenu {
     margin-top: 43px;
+  }
+}
+
+/* Unified lightweight icon treatment for the sidebar navigation. */
+.nav-section {
+  display: block;
+}
+.nav-section + .nav-section {
+  margin-top: 8px;
+  padding-top: 5px;
+  border-top: 1px solid #eef3f7;
+}
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: #8aa1b2;
+  opacity: 1;
+  stroke: currentColor;
+  transition: color .16s ease, transform .16s ease;
+}
+.nav-item:hover .nav-icon,
+.nav-item.router-link-active .nav-icon {
+  color: currentColor;
+}
+.nav-subicon {
+  width: 16px;
+  height: 16px;
+  flex-basis: 16px;
+  color: #96adba;
+}
+.nav-subitem:hover .nav-subicon,
+.nav-subitem.is-active .nav-subicon {
+  color: currentColor;
+}
+.nav-chevron {
+  flex: 0 0 auto;
+  transform: rotate(0deg);
+}
+.nav-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+@media (max-width: 760px) {
+  .nav-section {
+    display: contents;
+  }
+  .nav-section + .nav-section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+  .nav-icon {
+    width: 17px;
+    height: 17px;
+    flex-basis: 17px;
+  }
+  .nav-subicon {
+    width: 16px;
+    height: 16px;
+    flex-basis: 16px;
   }
 }

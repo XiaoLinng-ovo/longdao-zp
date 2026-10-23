@@ -1,7 +1,86 @@
 import { describe, expect, it } from 'vitest'
-import { buildUtterances, priorUtteranceContext } from './utterance-state'
+import { analysisMatchesUtterance, analysisSourceKey, analysisSourceSegments, buildUtterances, priorUtteranceContext } from './utterance-state'
+import type { LiveAnswerAnalysis } from '../api'
 
 describe('live interview utterance state', () => {
+  it('restores interviewer refinements only for exact speech without candidate scoring', () => {
+    const row = { id: 'q', sessionId: 's', role: 'interviewer' as const, speakerId: 'voice', confidence: 1, text: '请介绍项目。', startMs: 0, endMs: 1000, status: 'transcribed' as const }
+    const group = buildUtterances([row], 20000, 15000)[0]!
+    const result = { summary: '已整理', scores: [], evidence: [], concerns: [], nextQuestion: '', confidence: 1,
+      sourceSegments: analysisSourceSegments(group), transcriptRefinement: { text: row.text, corrections: [], uncertainties: [] } } as unknown as LiveAnswerAnalysis
+    expect(analysisMatchesUtterance(result, group)).toBe(true)
+    for (const changed of [{ ...result, sourceSegments: undefined }, { ...result, transcriptRefinement: undefined },
+      { ...result, scores: [{ dimension: '评分', score: 8, rationale: '错误' }] }, { ...result, nextQuestion: '下一题' }, { ...result, evidence: ['错误证据'] }]) {
+      expect(analysisMatchesUtterance(changed, group)).toBe(false)
+    }
+    expect(analysisMatchesUtterance(result, buildUtterances([{ ...row, role: 'candidate' }], 20000, 15000)[0]!)).toBe(false)
+    expect(analysisMatchesUtterance(result, buildUtterances([{ ...row, text: '修改后的提问' }], 20000, 15000)[0]!)).toBe(false)
+  })
+  it('ties refined answers to exact raw membership and invalidates changed speech or identity', () => {
+    const a = { id: 'a', sessionId: 's', role: 'candidate' as const, speakerId: 'voice', confidence: 1, text: '第一段，嗯嗯嗯。', startMs: 0, endMs: 1000, status: 'transcribed' as const }
+    const b = { ...a, id: 'b', text: '第二段。', startMs: 1000, endMs: 2000 }
+    const group = buildUtterances([a, b], 20000, 15000)[0]!
+    const sourceSegments = analysisSourceSegments(group)
+    const result = { sourceSegments, transcriptRefinement: { text: '第一段和第二段。', corrections: [], uncertainties: [] } } as unknown as LiveAnswerAnalysis
+    expect(sourceSegments.map(row => row.text)).toEqual([a.text, b.text])
+    expect(analysisMatchesUtterance(result, group)).toBe(true)
+    expect(analysisSourceKey(sourceSegments)).not.toEqual(analysisSourceKey([...sourceSegments].reverse()))
+    for (const rows of [[a], [a, { ...b, text: '新内容。' }], [a, { ...b, speakerId: 'other' }], [a, { ...b, role: 'interviewer' as const }], [a, b, { ...b, id: 'c', startMs: 2000, endMs: 3000 }]]) {
+      expect(analysisMatchesUtterance(result, buildUtterances(rows, 20000, 15000)[0]!)).toBe(false)
+    }
+    expect(analysisMatchesUtterance({} as LiveAnswerAnalysis, group)).toBe(false)
+    const single = buildUtterances([a], 20000, 15000)[0]!
+    expect(analysisMatchesUtterance({} as LiveAnswerAnalysis, single)).toBe(true)
+    expect(analysisMatchesUtterance({ transcriptRefinement: result.transcriptRefinement } as LiveAnswerAnalysis, single)).toBe(false)
+    expect(analysisMatchesUtterance(result, { ...group, confidence: .3 })).toBe(false)
+  })
+  it('merges five minutes of manually confirmed speech with different acoustic identities without changing originals', () => {
+    const source = Array.from({ length: 20 }, (_, index) => ({
+      id: `confirmed-${index}`, sessionId: 's', speakerId: `chunk-${index}:voice_0`,
+      role: 'candidate' as const, speakerConfirmed: true, confidence: 1,
+      text: `第${index + 1}部分。`, startMs: index * 15_000, endMs: (index + 1) * 15_000,
+      status: 'transcribed' as const, audioSource: 'microphone' as const,
+    }))
+    const snapshot = structuredClone(source)
+    const result = buildUtterances([...source].reverse(), 315_000, 15_000)
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ speakerConfirmed: true, startMs: 0, endMs: 300_000, final: true })
+    expect(result[0]?.text).toBe(source.map(row => row.text).join(''))
+    expect(result[0]?.sourceIds).toEqual(source.map(row => row.id))
+    expect(result[0]?.sourceSegments).toEqual(snapshot)
+    expect(source).toEqual(snapshot)
+  })
+
+  it('does not treat automatic confidence of one or a partially confirmed group as manual confirmation', () => {
+    const first = { id: 'a', sessionId: 's', speakerId: 'voice_a', role: 'candidate' as const, confidence: 1, text: '第一段', startMs: 0, endMs: 1000, status: 'transcribed' as const }
+    const second = { ...first, id: 'b', startMs: 1000, endMs: 2000, speakerConfirmed: true }
+    const third = { ...second, id: 'c', speakerId: 'voice_b', startMs: 2000, endMs: 3000 }
+    expect(buildUtterances([first, { ...third, speakerConfirmed: false }], 20000, 15000)).toHaveLength(2)
+    const result = buildUtterances([first, second, third], 20000, 15000)
+    expect(result.map(row => row.sourceIds)).toEqual([['a', 'b'], ['c']])
+    expect(result[0]?.speakerConfirmed).toBe(false)
+  })
+
+  it('keeps confirmed speech separate across interruptions, sources, sessions, overlaps and long pauses', () => {
+    const first = { id: 'a', sessionId: 's', speakerId: 'voice_a', role: 'candidate' as const, confidence: 1, speakerConfirmed: true, text: '第一段', startMs: 0, endMs: 1000, status: 'transcribed' as const, audioSource: 'microphone' as const }
+    const next = { ...first, id: 'b', speakerId: 'voice_b', startMs: 3000, endMs: 4000 }
+    for (const boundary of [{ ...next, audioSource: 'meeting' as const }, { ...next, sessionId: 'other' }, { ...next, startMs: 500 }, { ...next, startMs: 17000, endMs: 18000 }]) {
+      expect(buildUtterances([first, boundary], 40000, 15000)).toHaveLength(2)
+    }
+    for (const role of ['interviewer', 'unknown'] as const) {
+      const interruption = { ...first, id: 'interrupt', role, startMs: 1000, endMs: 2000 }
+      expect(buildUtterances([first, interruption, next], 40000, 15000)).toHaveLength(3)
+    }
+  })
+
+  it('limits each merged group to the analysis API maximum of 100 source fragments', () => {
+    const source = Array.from({ length: 101 }, (_, index) => ({
+      id: `part-${index}`, sessionId: 's', speakerId: `voice_${index}`, role: 'candidate' as const,
+      speakerConfirmed: true, confidence: 1, text: '回答。', startMs: index * 1000,
+      endMs: (index + 1) * 1000, status: 'transcribed' as const,
+    }))
+    expect(buildUtterances(source, 120000, 15000).map(row => row.sourceIds.length)).toEqual([100, 1])
+  })
   it('marks simultaneous sources as overlapping and keeps their order stable when responses arrive out of order', () => {
     const first = {id:'a',sessionId:'s',speakerId:'microphone:one',audioSource:'microphone' as const,role:'interviewer' as const,confidence:1,text:'你负责了哪些项目，具体做了什么？',startMs:0,endMs:2000,status:'transcribed' as const}
     const second = {...first,id:'b',speakerId:'meeting:one',audioSource:'meeting' as const,role:'candidate' as const,text:'我负责了项目开发，然后进行了测试。',startMs:1000,endMs:3000}

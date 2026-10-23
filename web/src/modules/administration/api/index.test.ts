@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection } from './index'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection, listAccountOrganizations, createAdminUser } from './index'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
@@ -22,6 +22,17 @@ describe('管理后台 API', () => {
     const result = await updateAdminSettings({ timezone: 'Asia/Shanghai' })
     expect(patchJson).toHaveBeenCalledWith('/admin/settings', { timezone: 'Asia/Shanghai' })
     expect(result.timezone).toBe('Asia/Shanghai')
+  })
+  it('读取可用企业并创建账号，保留服务端返回的一次性密码', async () => {
+    getJson.mockResolvedValue({ ok: true, data: [{ id: 'org-1', name: '示例企业' }], requestId: 'test' } as never)
+    expect(await listAccountOrganizations()).toEqual([{ id: 'org-1', name: '示例企业' }])
+    expect(getJson).toHaveBeenCalledWith('/admin/account-organizations')
+
+    const result = { user: { id: 'u-1' }, initialPassword: 'Generated!123', generatedPassword: true }
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: result, requestId: 'test' })
+    ;(apiClient as unknown as { postJson: typeof postJson }).postJson = postJson
+    expect(await createAdminUser({ email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })).toEqual(result)
+    expect(postJson).toHaveBeenCalledWith('/admin/users', { email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })
   })
   it('读取并更新钉钉环境配置', async () => {
     getJson.mockResolvedValue({ ok: true, data: {}, requestId: 'test' } as never)

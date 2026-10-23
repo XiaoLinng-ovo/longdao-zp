@@ -14,6 +14,7 @@ function close(): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape' || !props.open) return
   if (document.querySelector('[data-sheet-confirm]')) return
+  if (document.querySelector('.resume-document-dialog[open]')) return
   close()
 }
 

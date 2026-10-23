@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
+import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { employmentTypeLabel } from '../../../shared/utils/labels'
@@ -271,6 +272,7 @@ onMounted(load)
       <div class="card">
         <div class="section-title">状态操作</div>
         <div class="inline-actions" style="flex-wrap: wrap">
+          <ApplicationResumeButton :application-id="offer.applicationId" />
           <button v-if="offer.status === 'draft'" class="btn btn-ghost" type="button" @click="openRevise">修订</button>
           <button
             v-for="action in availableActions"

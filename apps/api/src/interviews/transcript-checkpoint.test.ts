@@ -7,6 +7,36 @@ const sentence = (text: string, startMs = 0): SpeakerSegment => ({ id: `s-${star
 const checkpoint = { text: '您好，请介绍一下你的项目经历和主要工作。', endMs: 30000, complete: true }
 
 describe('streaming transcript preservation', () => {
+  it('keeps offline extra sentences despite a small particle difference in an unfinished preview', () => {
+    const rows = [sentence('我负责平台开发。团队一共八个人。我还承担测试和上线工作。')]
+    const result = reconcileTranscript(rows, { text: '我负责平台的开发。', endMs: 15000, complete: false }, 0)
+    assert.equal(result.map(row => row.text).join(''), rows[0]!.text)
+    assert.equal(result[0]?.speakerVerified, true)
+    assert.equal(result[0]?.transcriptComparison?.streamingText, '我负责平台的开发。')
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
+    assert.equal(result[0]?.transcriptComparison?.streamingComplete, false)
+    assert.equal(rows[0]?.transcriptComparison, undefined)
+  })
+  it('preserves conflicting recognition as a separate alternative, never duplicate speech', () => {
+    const offline = '我负责平台开发和测试。', streaming = '我负责平台开发。团队一共有八个人。'
+    const result = reconcileTranscript([sentence(offline)], { text: streaming, endMs: 15000, complete: true }, 0)
+    assert.equal(result.map(row => row.text).join(''), streaming)
+    assert.equal(result[0]?.transcriptComparison?.offlineText, offline)
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'streaming')
+    assert.equal(result[0]?.speakerVerified, false)
+  })
+  for (const [offline, streaming] of [
+    ['我负责平台开发。后来完成了上线。', '我不负责平台的开发。'],
+    ['我负责二个平台开发。后来完成了上线。', '我负责三个平台的开发。'],
+    ['团队成员是李明。后来完成了上线。', '团队成员是李鸣。'],
+    ['测试然后开发最后上线。后来完成了交付。', '开发然后测试最后上线。'],
+    ['好的。我负责开发和测试。', '好啊。'],
+  ]) it(`does not fuzzy-replace meaningful differences: ${streaming}`, () => {
+    const result = reconcileTranscript([sentence(offline!)], { text: streaming!, endMs: 15000, complete: false }, 0)
+    assert.equal(result.map(row => row.text).join(''), streaming)
+    assert.equal(result[0]?.transcriptComparison?.offlineText, offline)
+    assert.equal(result[0]?.speakerMixed, true)
+  })
   it('aligns Traditional preview with Simplified acoustic turns without losing speakers', () => {
     const rows = [sentence('请介绍学校项目。'), { ...sentence('我负责开发。', 1000), speakerId: 'voice_2' }]
     const result = reconcileTranscript(rows, { text: '請介紹學校項目。我負責開發。', endMs: 15000, complete: true }, 0)

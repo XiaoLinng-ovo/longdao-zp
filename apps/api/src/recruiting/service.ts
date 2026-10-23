@@ -12,7 +12,7 @@ import { extractResumeText } from './resume-text-extractor.js'
 import mammoth from 'mammoth'
 import { resumeExperienceView } from './resume-experience-view.js'
 import { createObjectStorageFromEnv, type ObjectStorage } from '@smartrecruit-pro/object-storage'
-import { buildRuleBasedReport, buildJobAnalysisContext, buildJobRequirements as normalizeJobRequirements, isResumePlaceholderName, isResumeNameWithAppendedFields, normalizeResumeCandidateName } from '@smartrecruit-pro/resume-intelligence'
+import { anonymizeText, buildRuleBasedReport, buildJobAnalysisContext, buildJobRequirements as normalizeJobRequirements, isResumePlaceholderName, isResumeNameWithAppendedFields, normalizeResumeCandidateName } from '@smartrecruit-pro/resume-intelligence'
 import { initialResumeScanStatus } from './resume-scan-policy.js'
 import { latestAnalysisByKey } from './latest-analysis.js'
 import { buildDashboardTodos, type DashboardTodo } from './dashboard-todos.js'
@@ -1224,8 +1224,11 @@ export class RecruitingService {
       this.getCandidate(interview.application.candidateId),
       this.getJob(interview.application.jobId),
     ])
-    const latest = [...candidate.analysisResults].sort((a, b) => a.createdAt < b.createdAt ? 1 : -1)[0]
-    const report = latest?.result as {
+    const { resume, latest } = this.resolveApplicationResume(interview.application.id, candidate)
+    if (resume) requireCleanResume(resume.scanStatus)
+    const result = latest?.result
+    const nested = (result?.analysis as { report?: Record<string, unknown> } | undefined)?.report
+    const report = { ...nested, ...result, extraction: result?.extraction ?? nested?.extraction, assessment: result?.assessment ?? nested?.assessment } as {
       extraction?: {
         profile?: { headline?: string; summary?: string; totalExperienceYears?: number }
         experience?: Array<{ employer?: string; title?: string; description?: string; evidence?: string }>
@@ -1246,6 +1249,11 @@ export class RecruitingService {
       ...(extraction?.education ?? []).map((item) => [item.institution, item.degree, item.fieldOfStudy, item.evidence].filter(Boolean).join(' · ')),
       (extraction?.skills ?? []).map((item) => item.value || item.canonical).filter(Boolean).join('、'),
     ].map((item) => clean(item)).filter(Boolean)
+    let resumeText = resumeLines.join('\n')
+    if (!resumeText && resume) {
+      const content = await this.getResumeObject(resume.storageKey)
+      resumeText = await extractResumeText(content, resume.originalFilename, resume.mimeType)
+    }
     const requirements = [
       ...(job.spec?.requirements ?? []).map((item) => clean(item.label)),
       ...(job.spec?.skills ?? []).map((item) => clean(item)),
@@ -1258,7 +1266,7 @@ export class RecruitingService {
     return {
       jobTitle: job.title,
       jobRequirements: requirements.length ? requirements : [`具备 ${job.title} 相关经验`],
-      anonymizedResume: resumeLines.join('\n') || candidate.fullName,
+      anonymizedResume: anonymizeText(resumeText, { replaceNames: true, name: candidate.fullName }).text,
       analysisSummary,
       questionCount: 5,
       stage: interview.stage ?? (interview.round >= 2 ? 'final' : 'initial'),
@@ -1357,17 +1365,45 @@ export class RecruitingService {
 
   async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo'): Promise<InterviewRecord> {
     if (this.repository) {
-      const interview = await this.repository.getInterview(id)
-      const feedback = await this.repository.listInterviewFeedback(interview.id)
-      if (!feedback.length || feedback.some((item) => item.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试')
-      const fromStatus = interview.status
-      const updated = await this.repository.updateInterview(interview.id, { status: 'completed' })
-      const nextStatus = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
-      await this.repository.updateApplicationStatus(interview.applicationId, nextStatus, outcome === 'reject' ? '面试未通过' : undefined)
-      await this.repository.appendWorkflowEvent({ subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus, toStatus: 'completed', actorId, metadata: { outcome } })
-      return this.mapRepositoryInterview(updated)
+      return this.mapRepositoryInterview(await this.repository.concludeInterview(id, outcome, actorId))
     }
-    return this.store.transaction((state) => { const interview = state.interviews.find((x) => x.id === id); if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`); const application = applicationOrThrow(state, interview.applicationId); const feedback = state.interviewFeedback.filter((x) => x.interviewId === id); if (!feedback.length || feedback.some((x) => x.status !== 'locked')) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试反馈锁定后才能完成面试'); interview.status = 'completed'; interview.updatedAt = LocalRecruitingStore.timestamp(); application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'; if (outcome === 'reject') application.rejectionReason = '面试未通过'; application.updatedAt = interview.updatedAt; addEvent(state, { subjectType: 'interview', subjectId: id, action: 'conclude', fromStatus: 'scheduled', toStatus: 'completed', actorId, metadata: { outcome } }); return interview }) }
+    if (!['continue', 'offer', 'reject'].includes(outcome)) throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', '无效的面试结论')
+    return this.store.transaction((state) => {
+      const interview = state.interviews.find((item) => item.id === id || item.code === id)
+      if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`)
+      const application = applicationOrThrow(state, interview.applicationId)
+      if (interview.status === 'cancelled') throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认结论', 409)
+      const previous = [...state.workflowEvents].reverse().find((event) => event.subjectId === interview.id && event.action === 'conclude')
+      if (previous && previous.metadata?.outcome !== outcome) throw new RecruitingWorkflowError('INTERVIEW_ALREADY_CONCLUDED', '该面试已确认其他结论，请在当前面试阶段继续处理', 409)
+      const completingFinalOffer = application.status === 'offer_approval' && outcome === 'offer' && (interview.stage === 'final' || interview.round >= 2)
+      if (!previous && !['interviewing', 'human_review'].includes(application.status) && !completingFinalOffer) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请状态不能确认面试结论', 409)
+      if (!previous) {
+        const feedback = state.interviewFeedback.filter((item) => item.interviewId === interview.id)
+        const missingRequired = interview.participants.some((person) => person.required && (person.role ?? 'interviewer') === 'interviewer'
+          && !feedback.some((item) => item.interviewerId === person.userId && item.status === 'locked'))
+        if (!feedback.length || feedback.some((item) => item.status !== 'locked') || missingRequired) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试官反馈锁定后才能完成面试')
+      }
+      const now = LocalRecruitingStore.timestamp()
+      if ((interview.stage === 'initial' || (!interview.stage && interview.round === 1)) && outcome === 'continue') {
+        const existing = state.interviews.some((item) => item.applicationId === application.id && (item.stage === 'final' || item.round >= 2))
+        if (!existing) {
+          if (!['interviewing', 'human_review'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请状态不能进入复试', 409)
+          const next: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round: 2, stage: 'final', type: interview.type, title: '第二轮复试', status: 'scheduled', ...(interview.timezone ? { timezone: interview.timezone } : {}), participants: interview.participants.map((person) => ({ ...person })), createdAt: now, updatedAt: now }
+          state.interviews.push(next)
+          addEvent(state, { subjectType: 'application', subjectId: application.id, action: 'advance_to_final_interview', actorId, fromStatus: application.status, toStatus: 'interviewing', metadata: { interviewId: next.id, round: 2, stage: 'final' } })
+        }
+      }
+      if (previous) return interview
+      const fromStatus = interview.status
+      interview.status = 'completed'
+      interview.updatedAt = now
+      application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
+      if (outcome === 'reject') application.rejectionReason = '面试未通过'
+      application.updatedAt = now
+      addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus, toStatus: 'completed', actorId, metadata: { outcome } })
+      return interview
+    })
+  }
 
   async getDashboardSummary(departmentId?: string, loadReviews?: (interviewIds: string[]) => Promise<DashboardInterviewReview[]>): Promise<DashboardSummary> {
     const state = await this.stateView(departmentId)
@@ -1458,6 +1494,40 @@ export class RecruitingService {
     if (this.repository) { const items = (await this.repository.listResumes(candidateId, applicationId)).map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt })); return ids ? items.filter((item) => ids.applicationIds.has(item.applicationId ?? '') || ids.candidateIds.has(item.candidateId)) : items }
     const state = departmentId ? filterStateByDepartment(await this.store.read(), departmentId) : await this.store.read()
     return state.resumes.filter((item) => (!candidateId || item.candidateId === candidateId) && (!applicationId || item.applicationId === applicationId))
+  }
+
+  private resolveApplicationResume(applicationId: string, candidate: Awaited<ReturnType<RecruitingService['getCandidate']>>) {
+    const owned = new Map(candidate.resumes.map(resume => [resume.id, resume]))
+    const tasks = new Map(candidate.analysisTasks.filter(task => owned.has(task.resumeId)).map(task => [task.id, task]))
+    const resultApplication = (result: AnalysisResultRecord) => result.applicationId
+      ?? (tasks.get(result.analysisTaskId)?.resumeId === result.resumeId ? tasks.get(result.analysisTaskId)?.applicationId : undefined)
+      ?? owned.get(result.resumeId)?.applicationId
+    const associations = [
+      ...candidate.resumes.filter(resume => resume.applicationId === applicationId).map(resume => ({ resumeId: resume.id, createdAt: resume.createdAt })),
+      ...candidate.analysisTasks.filter(task => task.applicationId === applicationId && owned.has(task.resumeId)),
+      ...candidate.analysisResults.filter(result => resultApplication(result) === applicationId && owned.has(result.resumeId))
+        .map(result => ({ resumeId: result.resumeId, createdAt: tasks.get(result.analysisTaskId)?.createdAt ?? result.createdAt })),
+    ].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.resumeId.localeCompare(a.resumeId))
+    // Reused files keep their original applicationId; tasks/results carry the new association.
+    const resume = associations.length ? owned.get(associations[0]!.resumeId) : [...candidate.resumes]
+      .filter(item => !item.applicationId
+        && !candidate.analysisTasks.some(task => task.resumeId === item.id && task.applicationId)
+        && !candidate.analysisResults.some(result => result.resumeId === item.id && result.applicationId))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0]
+    const results = resume ? candidate.analysisResults.filter(result => result.resumeId === resume.id
+      && (resultApplication(result) === applicationId || !resultApplication(result))) : []
+    const latest = results.sort((a, b) => Number(resultApplication(b) === applicationId) - Number(resultApplication(a) === applicationId)
+      || b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0]
+    return { resume, latest }
+  }
+
+  async getApplicationResume(applicationId: string): Promise<Omit<ResumeRecord, 'storageKey'> | null> {
+    const application = this.repository ? await this.repository.getApplication(applicationId) : applicationOrThrow(await this.store.read(), applicationId)
+    const candidate = await this.getCandidate(application.candidateId)
+    const { resume } = this.resolveApplicationResume(application.id, candidate)
+    if (!resume) return null
+    const { storageKey: _storageKey, ...metadata } = resume
+    return metadata
   }
 
   async getResumeDocument(candidateId: string, resumeId: string) {

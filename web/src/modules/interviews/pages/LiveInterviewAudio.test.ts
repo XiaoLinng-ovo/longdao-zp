@@ -6,14 +6,16 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import LiveInterviewPage from './LiveInterviewPage.vue'
 import { ApiNetworkError, ApiResponseError, apiClient } from '../../../shared/api'
 import { createInterviewAudioCapture, InterviewAudioCaptureError, type InterviewAudioCapture } from '../utils/audio-capture'
-import { createLiveInterviewSession, endLiveInterviewSession, findActiveLiveInterviewSession, getInterview, getInterviewQuestions, generateInterviewQuestions, analyzeLiveSegment, updateLiveInterviewQuestion, uploadLiveInterviewChunk } from '../api'
+import { createLiveInterviewSession, endLiveInterviewSession, findActiveLiveInterviewSession, getInterview, getInterviewQuestions, generateInterviewQuestions, analyzeLiveSegment, correctLiveSegmentRole, updateLiveInterviewQuestion, uploadLiveInterviewChunk, type LiveInterviewSegment } from '../api'
 import { loadQuestionSheets } from '../api/question-sheets'
 import { savePendingAudio, removePendingAudio, restorePendingAudio } from '../utils/pending-audio'
 import { setWorkspaceContext } from '../../../shared/api/workspace-context'
 import { listInterviewRecordings } from '../api/recordings'
+import { saveLiveTranscriptRefinement } from '../api'
+import { refineInterviewQuestionGroup } from '../api'
 
 vi.mock('../../../shared/api', async original => ({ ...await original<typeof import('../../../shared/api')>(), apiClient: { getJson: vi.fn() } }))
-vi.mock('../api', () => ({ getInterview: vi.fn(), findActiveLiveInterviewSession: vi.fn(), getInterviewQuestions: vi.fn(), generateInterviewQuestions: vi.fn(), createLiveInterviewSession: vi.fn(), updateLiveInterviewQuestion: vi.fn(), uploadLiveInterviewChunk: vi.fn(), endLiveInterviewSession: vi.fn(), analyzeLiveSegment: vi.fn(), correctLiveSegmentRole: vi.fn(), addManualLiveSegment: vi.fn() }))
+vi.mock('../api', () => ({ getInterview: vi.fn(), refineInterviewQuestionGroup: vi.fn(), findActiveLiveInterviewSession: vi.fn(), getInterviewQuestions: vi.fn(), generateInterviewQuestions: vi.fn(), createLiveInterviewSession: vi.fn(), updateLiveInterviewQuestion: vi.fn(), uploadLiveInterviewChunk: vi.fn(), endLiveInterviewSession: vi.fn(), analyzeLiveSegment: vi.fn(), correctLiveSegmentRole: vi.fn(), addManualLiveSegment: vi.fn(), saveLiveTranscriptRefinement: vi.fn() }))
 vi.mock('../api/question-sheets', () => ({ loadQuestionSheets: vi.fn(), stageOfRound: () => 'initial' }))
 vi.mock('../api/recordings', () => ({ listInterviewRecordings: vi.fn(), loadInterviewRecording: vi.fn(), loadFullInterviewRecording: vi.fn() }))
 vi.mock('../utils/audio-capture', async original => ({ ...await original<typeof import('../utils/audio-capture')>(), createInterviewAudioCapture: vi.fn() }))
@@ -92,6 +94,27 @@ beforeEach(() => {
 afterEach(async () => { app?.unmount(); await flush(); root?.remove(); app = undefined; root = undefined; vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals() })
 
 describe('live interview meeting audio', () => {
+  it('restores separate recognition alternatives without duplicating them in the main dialogue', async () => {
+    const text = '我负责平台开发。团队一共八个人。我还承担测试和上线工作。'
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', interviewId: 'interview-1', status: 'active', externalStatus: 'ready', startedAt: '2026-10-23T00:00:00Z', createdBy: 'u', currentQuestion: '' }, segments: [
+      { id: 'alternative', sessionId: 'session-1', speakerId: 'chunk_15000:stream_15000', role: 'unknown', confidence: .35,
+        text, startMs: 15000, endMs: 30000, status: 'transcribed', transcriptComparison: {
+          streamingText: '我负责平台的开发。', offlineText: text, streamingComplete: false, selectedSource: 'offline', startMs: 15000, endMs: 30000,
+        } },
+    ] })
+    await mount()
+    const dialogue = root!.querySelector('.utterance')!
+    const comparison = dialogue.querySelector<HTMLDetailsElement>('.transcript-comparison')!
+    expect(comparison.open).toBe(false)
+    expect(comparison.textContent).toContain('识别版本对照 · 00:15–00:30')
+    expect(comparison.textContent).toContain('我负责平台的开发。')
+    expect(comparison.textContent).toContain(text)
+    expect(comparison.textContent).toContain('流式识别 · 未完成')
+    expect(comparison.textContent).toContain('录音分段识别 · 当前采用')
+    expect(dialogue.querySelector(':scope > p')?.textContent).toBe(text)
+    expect(root!.querySelectorAll('.utterance')).toHaveLength(1)
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+  })
   it('requires consent and lets users select microphone or meeting mode without binding a provider', async () => {
     await mount()
     expect(button('开始面试').disabled).toBe(true)
@@ -113,7 +136,12 @@ describe('live interview meeting audio', () => {
   it('keeps the audio controls compact without persistent instructions in either mode', async () => {
     await mount()
     const settings = root!.querySelector('[aria-label="面试音频采集设置"]')!
-    expect(settings.querySelector('h3')!.textContent).toBe('音频设置')
+    expect(settings.classList.contains('audio-settings-toolbar')).toBe(true)
+    expect(settings.querySelector('header')).toBeNull()
+    expect(settings.querySelector('.audio-setting-row .audio-mode-badge')!.textContent).toBe('仅麦克风')
+    expect(settings.compareDocumentPosition(root!.querySelector('.interview-room')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(root!.querySelector('.transcript-panel')).not.toBeNull()
+    expect(root!.querySelector('.analysis-panel')).not.toBeNull()
     expect(settings.querySelectorAll('select')).toHaveLength(3)
     expect(settings.querySelector<HTMLSelectElement>('[aria-label="本机麦克风角色"]')!.value).toBe('unknown')
     expect(settings.querySelector('.recording-consent input')).not.toBeNull()
@@ -489,6 +517,177 @@ describe('live interview chronological transcript', () => {
   })
   const texts = () => [...root!.querySelectorAll('.utterance > p')].map(row => row.textContent)
 
+  it('merges manually confirmed speakers, restores the merge and allows correcting just one original fragment', async () => {
+    let saved: LiveInterviewSegment[] = [
+      { ...speech('first', '第一段发言。', 0), speakerId: 'voice_a', audioSource: 'microphone' },
+      { ...speech('second', '第二段发言。', 1500), speakerId: 'voice_b', audioSource: 'microphone' },
+    ]
+    vi.mocked(findActiveLiveInterviewSession).mockImplementation(async () => ({ session: { id: 'session-1', status: 'completed' }, segments: saved.map(row => ({ ...row })) }) as never)
+    vi.mocked(correctLiveSegmentRole).mockImplementation(async (id, role, ids) => {
+      const selected = ids?.length ? ids : [id]
+      saved = saved.map(row => selected.includes(row.id) ? { ...row, role, confidence: 1, speakerConfirmed: true } : row)
+      return saved.filter(row => selected.includes(row.id)).map(row => ({ ...row }))
+    })
+    await mount()
+    expect(texts()).toEqual(['第一段发言。', '第二段发言。'])
+    const first = root!.querySelectorAll<HTMLElement>('.utterance')[0]!
+    ;[...first.querySelectorAll('button')].find(row => row.textContent === '面试官')!.click(); await flush()
+    expect(texts()).toHaveLength(2)
+    const second = root!.querySelectorAll<HTMLElement>('.utterance')[1]!
+    ;[...second.querySelectorAll('button')].find(row => row.textContent === '面试官')!.click(); await flush()
+    expect(texts()).toEqual(['第一段发言。第二段发言。'])
+    expect(root!.querySelector('.utterance-identity')!.textContent).toContain('已合并 2 段')
+    expect(root!.querySelectorAll('.utterance-fragment')).toHaveLength(2)
+    expect(saved.map(row => row.speakerId)).toEqual(['voice_a', 'voice_b'])
+
+    app!.unmount(); root!.remove(); app = undefined; root = undefined
+    await mount()
+    expect(texts()).toEqual(['第一段发言。第二段发言。'])
+    const fragment = root!.querySelector<HTMLElement>('[data-segment-id="second"]')!
+    ;[...fragment.querySelectorAll('button')].find(row => row.textContent === '候选人')!.click(); await flush()
+    expect(correctLiveSegmentRole).toHaveBeenLastCalledWith('second', 'candidate', ['second'])
+    expect(texts()).toEqual(['第一段发言。', '第二段发言。'])
+    expect(root!.querySelectorAll('.utterance-fragment')).toHaveLength(0)
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+  })
+
+  it('sends every fragment when analyzing a manually merged candidate answer', async () => {
+    vi.mocked(analyzeLiveSegment).mockReturnValue(deferred<never>().promise)
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: [
+      { ...speech('question', '请介绍你的项目经历。', 0, 'interviewer'), confidence: 1, speakerConfirmed: true },
+      { ...speech('first', '我负责需求分析并完成了系统开发。', 2000, 'candidate'), speakerId: 'voice_a', confidence: 1, speakerConfirmed: true },
+      { ...speech('second', '之后推进了上线验收和生产优化。', 3500, 'candidate'), speakerId: 'voice_b', confidence: 1, speakerConfirmed: true },
+    ] } as never)
+    await mount()
+    expect(texts()).toEqual(['请介绍你的项目经历。', '我负责需求分析并完成了系统开发。之后推进了上线验收和生产优化。'])
+    expect(analyzeLiveSegment).toHaveBeenCalledWith('first', '', ['first', 'second'])
+  })
+
+  it('refines the complete merged answer on analysis, keeps the raw text, and restores it without another request', async () => {
+    const saved = [
+      { ...speech('question', '请介绍你的项目经历。', 0, 'interviewer'), confidence: 1, speakerConfirmed: true },
+      { ...speech('first', '我用微付务完成了系统开发，嗯完成了系统开发。', 2000, 'candidate'), speakerId: 'voice_a', confidence: 1, speakerConfirmed: true },
+      { ...speech('second', '上线后做了性能优化，响应缩短到两秒。', 3500, 'candidate'), speakerId: 'voice_b', confidence: 1, speakerConfirmed: true },
+    ]
+    const result = {
+      summary: '介绍开发和优化经历。', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: {
+        text: '我用微服务完成了系统开发，上线后做了性能优化，响应缩短到两秒。',
+        corrections: [{ original: '微付务', corrected: '微服务' }], uncertainties: ['“两秒”的测试条件需要核实。'],
+      },
+      sourceSegments: saved.slice(1).map(({ id, text, role, speakerId }) => ({ id, text, role, speakerId })),
+    }
+    const initial = deferred<typeof result>()
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: saved } as never)
+    vi.mocked(analyzeLiveSegment).mockReturnValueOnce(initial.promise as never).mockResolvedValue(result as never)
+    await mount()
+    expect(root!.querySelector('.refined-answer')).toBeNull()
+    initial.resolve(result); await flush()
+    expect(root!.querySelector('.refined-answer')!.textContent).toBe(result.transcriptRefinement.text)
+    expect(root!.querySelector('.answer-original')!.textContent).toContain(saved[1]!.text)
+    expect(root!.querySelector('.answer-original')!.textContent).toContain(saved[2]!.text)
+    expect(root!.querySelector('.answer-corrections')!.textContent).toContain('微付务 → 微服务')
+    expect(root!.querySelector('.answer-uncertainties')).toBeNull()
+    expect(root!.textContent).not.toContain('测试条件需要核实')
+    expect(root!.querySelectorAll('.utterance-fragment')).toHaveLength(2)
+    const answer = root!.querySelectorAll('.utterance')[1]!
+    ;[...answer.querySelectorAll('button')].find(row => row.textContent === '分析完整回答')!.click(); await flush()
+    expect(analyzeLiveSegment).toHaveBeenLastCalledWith('first', '', ['first', 'second'])
+    expect(analyzeLiveSegment).toHaveBeenCalledTimes(2)
+
+    app!.unmount(); root!.remove(); app = undefined; root = undefined
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: saved.map(row => row.id === 'first' ? { ...row, analysis: result } : row) } as never)
+    await mount(); await tick(30000)
+    expect(root!.querySelector('.refined-answer')!.textContent).toBe(result.transcriptRefinement.text)
+    expect(analyzeLiveSegment).toHaveBeenCalledTimes(2)
+  })
+
+  it('manually refines merged interviewer speech and restores it without candidate scoring or automatic analysis', async () => {
+    const saved = [
+      { ...speech('first', '请介绍你使用微付务完成系统开发的经历。', 0, 'interviewer'), speakerId: 'voice_a', confidence: 1, speakerConfirmed: true },
+      { ...speech('second', '还有上线验收时遇到的问题和解决方法。', 1500, 'interviewer'), speakerId: 'voice_b', confidence: 1, speakerConfirmed: true },
+    ]
+    const result = {
+      summary: '面试官完整发言已整理。', evidence: [], scores: [], concerns: [], confidence: 1, nextQuestion: '',
+      transcriptRefinement: {
+        text: '请介绍你使用微服务完成系统开发的经历，以及上线验收时遇到的问题和解决方法。',
+        corrections: [{ original: '微付务', corrected: '微服务' }], uncertainties: [],
+      },
+      sourceSegments: saved.map(({ id, text, role, speakerId }) => ({ id, text, role, speakerId })),
+    }
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: saved } as never)
+    vi.mocked(analyzeLiveSegment).mockResolvedValue(result as never)
+    await mount(); await tick(30000)
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+    expect(button('分析完整回答').getAttribute('title')).toContain('不参与候选人评分')
+    button('分析完整回答').click(); await flush()
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+    expect(analyzeLiveSegment).toHaveBeenCalledWith('first', '', ['first', 'second'])
+    expect(root!.querySelector('.refined-answer-label')!.textContent).toBe('整理后的发言')
+    expect(root!.querySelector('.refined-answer')!.textContent).toBe(result.transcriptRefinement.text)
+    expect(root!.querySelector('.answer-original')!.textContent).toContain(saved[0]!.text)
+    expect(root!.querySelector('.answer-original')!.textContent).toContain(saved[1]!.text)
+    expect(root!.querySelector('.answer-corrections')!.textContent).toContain('微付务 → 微服务')
+    expect(root!.querySelector('.analysis-panel')!.textContent).not.toContain(result.summary)
+
+    button('编辑').click(); await flush()
+    expect(button('分析完整回答').disabled).toBe(true)
+    const draft = root!.querySelector('textarea.refinement-input')!
+    ;(draft as HTMLTextAreaElement).value = '请介绍微服务项目的上线验收经历。'
+    draft.dispatchEvent(new Event('input')); await flush()
+    const updated = { ...result.transcriptRefinement, text: '请介绍微服务项目的上线验收经历。', editedAt: '2026-10-23T00:00:00Z', editedBy: 'u' }
+    vi.mocked(saveLiveTranscriptRefinement).mockResolvedValue(updated)
+    button('保存修改').click(); await flush()
+    expect(saveLiveTranscriptRefinement).toHaveBeenCalledWith('first', updated.text, result.transcriptRefinement.text, result.sourceSegments)
+    expect(root!.querySelector('.refined-answer')!.textContent).toBe(updated.text)
+    expect(root!.querySelector('.answer-original')!.textContent).toContain(saved[0]!.text)
+    result.transcriptRefinement = updated
+
+    app!.unmount(); root!.remove(); app = undefined; root = undefined
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'completed' }, segments: saved.map(row => row.id === 'first' ? { ...row, analysis: result } : row) } as never)
+    await mount(); await tick(30000)
+    expect(root!.querySelector('.refined-answer')!.textContent).toBe(result.transcriptRefinement.text)
+    expect(root!.querySelector('.analysis-panel')!.textContent).not.toContain(result.summary)
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+  })
+
+  it('discards an in-flight refinement when another fragment joins the answer and analyzes the expanded group', async () => {
+    const saved = [
+      { ...speech('first', '我负责需求分析并完成了系统开发。', 0, 'candidate'), confidence: 1, speakerConfirmed: true },
+      { ...speech('second', '上线后继续做了性能优化。', 2000), speakerId: 'voice_second', confidence: 1 },
+    ]
+    const initial = deferred<Awaited<ReturnType<typeof analyzeLiveSegment>>>()
+    const expanded = deferred<Awaited<ReturnType<typeof analyzeLiveSegment>>>()
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: saved } as never)
+    vi.mocked(analyzeLiveSegment).mockReturnValueOnce(initial.promise).mockReturnValueOnce(expanded.promise)
+    vi.mocked(correctLiveSegmentRole).mockResolvedValue([{ ...saved[1]!, role: 'candidate', speakerConfirmed: true }] as never)
+    await mount()
+    expect(analyzeLiveSegment).toHaveBeenCalledWith('first', '', ['first'])
+    const second = root!.querySelectorAll('.utterance')[1]!
+    ;[...second.querySelectorAll('button')].find(row => row.textContent === '候选人')!.click(); await flush()
+    expect(root!.querySelectorAll('.utterance')).toHaveLength(1)
+    initial.resolve({
+      summary: '旧结果', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: { text: '只整理了第一段的旧结果。', corrections: [], uncertainties: [] },
+      sourceSegments: saved.slice(0, 1).map(({ id, text, role, speakerId }) => ({ id, text, role, speakerId })),
+    } as never)
+    await flush()
+    expect(root!.querySelector('.refined-answer')).toBeNull()
+    expect(analyzeLiveSegment).toHaveBeenLastCalledWith('first', '', ['first', 'second'])
+    expanded.resolve({
+      summary: '新结果', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: { text: '我负责需求分析并完成了系统开发，上线后继续做了性能优化。', corrections: [], uncertainties: [] },
+    } as never)
+    await flush()
+    expect(root!.querySelector('.refined-answer')!.textContent).toContain('上线后继续做了性能优化')
+    const fragment = root!.querySelector('[data-segment-id="second"]')!
+    vi.mocked(correctLiveSegmentRole).mockResolvedValue([{ ...saved[1]!, role: 'interviewer', speakerConfirmed: true }] as never)
+    vi.mocked(analyzeLiveSegment).mockReturnValue(deferred<never>().promise)
+    ;[...fragment.querySelectorAll('button')].find(row => row.textContent === '面试官')!.click(); await flush()
+    expect(root!.querySelectorAll('.utterance')).toHaveLength(2)
+    expect(root!.querySelector('.refined-answer')).toBeNull()
+  })
+
   it('does not analyze old answers when reopening a completed interview', async () => {
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'completed' }, segments: [
       { ...speech('answer', '我负责需求分析并完成系统开发和验收。', 3000, 'candidate'), confidence: .9 },
@@ -497,6 +696,75 @@ describe('live interview chronological transcript', () => {
     expect(analyzeLiveSegment).not.toHaveBeenCalled()
     expect(root!.querySelector('.analysis-panel')!.textContent).toContain('我负责需求分析并完成系统开发和验收。')
     expect(root!.querySelector('.analysis-panel')!.textContent).toContain('未配对与待确认发言')
+  })
+
+  it('manually analyzes the complete merged answer after completion without restarting recording', async () => {
+    const saved = [
+      { ...speech('first', '我用微付务完成系统开发。', 2000, 'candidate'), speakerId: 'voice_a', confidence: 1, speakerConfirmed: true },
+      { ...speech('second', '然后完成上线验收和性能优化。', 3500, 'candidate'), speakerId: 'voice_b', confidence: 1, speakerConfirmed: true },
+    ]
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'completed' }, segments: saved } as never)
+    const pending = deferred<never>()
+    vi.mocked(analyzeLiveSegment).mockReturnValue(pending.promise)
+    await mount()
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+    expect(button('分析完整回答').disabled).toBe(false)
+    button('分析完整回答').click(); await flush()
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+    expect(analyzeLiveSegment).toHaveBeenCalledWith('first', '', ['first', 'second'])
+    expect(button('分析中...').disabled).toBe(true)
+    expect(button('分析中...').getAttribute('aria-busy')).toBe('true')
+    expect(root!.querySelector('.utterance [role="status"]')!.textContent).toContain('正在整理并分析完整回答')
+    button('分析中...').click(); await flush()
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+    pending.resolve({ summary: '完成开发和上线。', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: { text: '我用微服务完成系统开发，然后完成上线验收和性能优化。', corrections: [{ original: '微付务', corrected: '微服务' }], uncertainties: [] },
+    } as never)
+    await flush()
+    expect(root!.querySelector('.refined-answer')!.textContent).toContain('微服务')
+    expect(root!.querySelector('.answer-original')!.textContent).toContain('微付务')
+    expect(root!.querySelector('.utterance [role="status"]')).toBeNull()
+    await tick(30000)
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+    expect(createLiveInterviewSession).not.toHaveBeenCalled()
+    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
+    expect(endLiveInterviewSession).not.toHaveBeenCalled()
+  })
+
+  it('shows completed-answer analysis failures next to the answer and allows manual retry', async () => {
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'completed' }, segments: [
+      { ...speech('answer', '我负责需求分析并完成系统开发和验收。', 3000, 'candidate'), confidence: 1 },
+    ] } as never)
+    vi.mocked(analyzeLiveSegment).mockRejectedValueOnce(new Error('模型暂时不可用'))
+    await mount()
+    button('分析完整回答').click(); await flush()
+    expect(root!.querySelector('.utterance [role="alert"]')!.textContent).toBeTruthy()
+    expect(button('重新分析完整回答').disabled).toBe(false)
+    await tick(30000)
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
+    vi.mocked(analyzeLiveSegment).mockResolvedValue({ summary: '已完成分析', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: { text: '我负责需求分析、系统开发和验收。', corrections: [], uncertainties: [] },
+    } as never)
+    button('重新分析完整回答').click(); await flush()
+    expect(analyzeLiveSegment).toHaveBeenCalledTimes(2)
+    expect(root!.querySelector('.utterance [role="alert"]')).toBeNull()
+    expect(root!.querySelector('.refined-answer')!.textContent).toContain('系统开发和验收')
+  })
+
+  it('shows a retry notice instead of accepting analysis of outdated completed-answer text', async () => {
+    const saved = { ...speech('answer', '我负责需求分析并完成系统开发和验收。', 3000, 'candidate'), confidence: 1 }
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'completed' }, segments: [saved] } as never)
+    vi.mocked(analyzeLiveSegment).mockResolvedValue({ summary: '旧结果', evidence: [], scores: [], concerns: [], confidence: .9, nextQuestion: '',
+      transcriptRefinement: { text: '不应展示的旧回答。', corrections: [], uncertainties: [] },
+      sourceSegments: [{ id: saved.id, text: '已经变更的原文', role: saved.role, speakerId: saved.speakerId }],
+    } as never)
+    await mount()
+    button('分析完整回答').click(); await flush()
+    expect(root!.querySelector('.refined-answer')).toBeNull()
+    expect(root!.querySelector('.utterance [role="status"]')!.textContent).toContain('回答内容或说话人已变更')
+    expect(button('重新分析完整回答').disabled).toBe(false)
+    await tick(30000)
+    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
   })
 
   it('shows no score rather than zero or confidence when evidence is insufficient', async () => {
@@ -932,12 +1200,12 @@ describe('streaming reconnection lifecycle', () => {
 
 const navigationQuestions = ['请介绍你的招聘项目。', '如何制定招聘计划？', '如何处理候选人反馈？'].map(question => ({ question, category: 'experience', difficulty: 'medium', rationale: '', groundedIn: [], scoringRubric: [] }))
 function questionSet() { vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: navigationQuestions, engine: 'llm' } as never) }
-function questionText() { return root!.querySelector('.current-question')!.textContent }
-async function openReference(group: 'ai' | 'hr' | 'department') {
+function questionText() { return root!.querySelector('.question-select[aria-pressed="true"]')?.textContent ?? '' }
+async function openReference(group: 'ai' | 'hr' | 'department' | 'boss') {
   root!.querySelector<HTMLButtonElement>('[aria-label="关闭参考表"]')?.click(); await flush()
   root!.querySelector<HTMLButtonElement>(`[data-reference="${group}"]`)!.click(); await flush()
 }
-async function mountReference(interviewId = 'interview-1') { await mount(interviewId); await openReference('ai') }
+async function mountReference(interviewId = 'interview-1') { await mount(interviewId); await openReference(root!.querySelector('[data-reference="ai"]') ? 'ai' : 'department') }
 function selectResume(index: number) { root!.querySelectorAll<HTMLButtonElement>('[data-group="ai"] .question-item:not(.current-custom-question):not(.follow-up) .question-select')[index].click() }
 function regenerationButton() { return root!.querySelector<HTMLButtonElement>('.regenerate-question-bank')! }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done }); return { promise, resolve } }
@@ -994,126 +1262,63 @@ describe('live interview question navigation', () => {
     expect(capture.stop).not.toHaveBeenCalled()
     expect(analyzeLiveSegment).not.toHaveBeenCalled()
   })
-  it('shows the boss template for a final interview and persists direct AI selection as adopted',async()=>{
-    questionSet();vi.mocked(getInterview).mockResolvedValue({id:'interview-1',applicationId:'app-1',round:2,application:{candidateId:'candidate-1',jobId:'job-1'}} as never)
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({session:{id:'session-1',currentQuestion:navigationQuestions[0].question,status:'active'},segments:[]} as never)
-    await mountReference();await openReference('department');expect(root!.querySelectorAll('[data-group="boss"] .question-select')).toHaveLength(5);await openReference('ai')
-    const last=root!.querySelectorAll<HTMLButtonElement>('[data-group="ai"] .question-select')[2];last.click();await flush();expect(questionText()).toBe(navigationQuestions[2].question);expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1',navigationQuestions[2].question,'ai_adopted',undefined)
-  })
-  it('allows browsing the complete bank after interview end without writing new question events',async()=>{
-    questionSet();vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({session:{id:'session-1',currentQuestion:navigationQuestions[0].question,status:'completed'},segments:[]} as never)
-    await mountReference();await openReference('hr');const hr=root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!;expect(hr.disabled).toBe(true);hr.click();await flush();await openReference('ai');selectResume(1);await flush();expect(updateLiveInterviewQuestion).not.toHaveBeenCalled();expect(createLiveInterviewSession).not.toHaveBeenCalled();expect(questionText()).toBe(navigationQuestions[0].question)
-  })
-
-  it('renders the complete question bank and lets a direct HR selection become current without recording',async()=>{
-    questionSet();await mountReference();expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(3);await openReference('department');expect(root!.querySelectorAll('[data-group="department"] .question-select')).toHaveLength(5);await openReference('hr');expect(root!.querySelectorAll('[data-group="hr"] .question-select')).toHaveLength(15)
-    const hr=root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!;hr.click();await flush();expect(questionText()).toBe(hr.textContent);expect(root!.querySelector('[data-group="hr"] .question-select[aria-pressed="true"]')).not.toBeNull();expect(updateLiveInterviewQuestion).not.toHaveBeenCalled();expect(createInterviewAudioCapture).not.toHaveBeenCalled()
-  })
-  it('persists a selected department question as manual and retries with the same source',async()=>{
-    questionSet();vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({session:{id:'session-1',currentQuestion:navigationQuestions[0].question,status:'active'},segments:[]} as never)
-    vi.mocked(updateLiveInterviewQuestion).mockRejectedValueOnce(new Error('保存连接失败')).mockImplementation(async(_id,question)=>({currentQuestion:question}) as never)
-    await mountReference();await openReference('department');const department=root!.querySelector<HTMLButtonElement>('[data-group="department"] .question-select')!;department.click();await flush();expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1',department.textContent,'manual',undefined);expect(questionText()).toBe(department.textContent)
-    button('重试保存').click();await flush();expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1',department.textContent,'manual',undefined);expect(root!.textContent).not.toContain('题目已切换，但保存失败')
-  })
-  it('does not switch a template question to an AI follow-up after answer analysis',async()=>{
-    questionSet();const analysis=deferred<never>();vi.mocked(analyzeLiveSegment).mockReturnValue(analysis.promise)
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({session:{id:'session-1',currentQuestion:'你为什么离开上一家公司？',status:'active'},segments:[{id:'segment-1',sessionId:'session-1',role:'candidate',confidence:0.9,text:'我希望获得更多业务成长。',startMs:0,endMs:1000,status:'transcribed'}]} as never)
-    await mountReference();expect(analyzeLiveSegment).toHaveBeenCalledWith('segment-1','',['segment-1'])
-    analysis.resolve({nextQuestion:'请具体说明成长目标。',summary:'回答已分析',scores:[],evidence:[],concerns:[],confidence:0.9} as never);await flush();expect(questionText()).toBe('你为什么离开上一家公司？');expect(root!.querySelector('.follow-up')!.textContent).toContain('请具体说明成长目标。');expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
-    root!.querySelector<HTMLButtonElement>('.follow-up .question-select')!.click();await flush();expect(questionText()).toBe('请具体说明成长目标。');expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1','请具体说明成长目标。','ai_adopted',undefined)
-  })
-  it('does not overwrite a HR selection when a slow AI question load completes',async()=>{
-    const generated=deferred<never>();vi.mocked(generateInterviewQuestions).mockReturnValue(generated.promise);await mountReference();await openReference('hr');const hr=root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!;hr.click();await flush()
-    generated.resolve({questions:navigationQuestions,engine:'llm'} as never);await flush();expect(questionText()).toBe(hr.textContent);await openReference('ai');expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(3)
-  })
-
-  it('shows all questions directly without the duplicate card or previous/next controls', async () => {
-    questionSet(); await mountReference()
-    expect(questionText()).toBe(navigationQuestions[0].question)
-    expect(root!.querySelector('.single-question')).toBeNull()
-    expect(root!.querySelector('.question-progress')).toBeNull()
-    expect(root!.querySelector('.question-navigation')).toBeNull()
-    expect(button('上一个题')).toBeUndefined()
-    expect(button('下一个题')).toBeUndefined()
-    expect(root!.querySelectorAll('.regenerate-question-bank')).toHaveLength(1)
-    selectResume(1); await flush(); expect(questionText()).toBe(navigationQuestions[1].question)
-    selectResume(2); await flush(); expect(questionText()).toBe(navigationQuestions[2].question)
-    selectResume(1); await flush(); expect(questionText()).toBe(navigationQuestions[1].question)
+  it('selects a question only for editing, toggles it off and never writes a live question event', async () => {
+    questionSet()
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: navigationQuestions[0].question, status: 'active' }, segments: [] } as never)
+    await mountReference()
+    expect(questionText()).toBe('')
+    selectResume(1); await flush()
+    expect(questionText()).toBe(navigationQuestions[1].question)
+    expect(root!.querySelector('.conversation-header')!.textContent).toContain('仅修改 1 题')
+    selectResume(1); await flush()
+    expect(questionText()).toBe('')
+    expect(root!.querySelector('.conversation-header')!.textContent).toContain('全部题目')
+    expect(root!.querySelector('.current-question-strip')).toBeNull()
     expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
-    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
   })
-  it('keeps a restored custom question in the bank and allows direct selection', async () => {
-    questionSet()
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: '请先做一下自我介绍。', status: 'active' }, segments: [] } as never)
-    vi.mocked(updateLiveInterviewQuestion).mockImplementation(async (_id, question) => ({ currentQuestion: question }) as never)
-    await mountReference()
-    expect(questionText()).toBe('请先做一下自我介绍。')
-    expect(root!.querySelector('.current-question')!.textContent).toContain('请先做一下自我介绍。')
-    selectResume(0); await flush()
-    expect(questionText()).toBe(navigationQuestions[0].question)
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1', navigationQuestions[0].question, 'ai_adopted', undefined)
+  it('retains independent edit selections when switching reference sheets', async () => {
+    questionSet(); await mountReference(); selectResume(1); await flush()
+    await openReference('hr')
+    expect(questionText()).toBe('')
+    const hr = root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!
+    hr.click(); await flush(); expect(questionText()).toBe(hr.textContent)
+    await openReference('ai'); expect(questionText()).toBe(navigationQuestions[1].question)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
   })
-  it('switches immediately with no captured speech and saves fast clicks in order without rolling back the display', async () => {
-    questionSet()
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: navigationQuestions[0].question, status: 'active' }, segments: [] } as never)
-    const firstSave = deferred<never>()
-    vi.mocked(updateLiveInterviewQuestion).mockReturnValueOnce(firstSave.promise).mockImplementation(async (_id, question) => ({ currentQuestion: question }) as never)
-    await mountReference()
-    selectResume(1); await flush()
-    selectResume(2); await flush()
-    expect(questionText()).toBe(navigationQuestions[2].question)
-    expect(updateLiveInterviewQuestion).toHaveBeenCalledTimes(1)
-    firstSave.resolve({ currentQuestion: navigationQuestions[1].question } as never); await flush()
-    expect(questionText()).toBe(navigationQuestions[2].question)
-    expect(updateLiveInterviewQuestion).toHaveBeenCalledTimes(2)
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1', navigationQuestions[2].question, 'ai_adopted', undefined)
+  it('keeps final-round boss selection independent and editable without adopting a live question', async () => {
+    questionSet(); vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 2, application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    await mountReference(); await openReference('boss')
+    expect(root!.querySelectorAll('[data-group="boss"] .question-select')).toHaveLength(5)
+    expect(root!.querySelector('[data-reference="ai"]')).toBeNull()
+    root!.querySelector<HTMLButtonElement>('[data-group="boss"] .question-select')!.click(); await flush()
+    expect(root!.querySelector('.question-meta b')!.textContent).toBe('待修改')
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
   })
-  it('keeps the selected question on save failure and retries the current question', async () => {
-    questionSet()
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: navigationQuestions[0].question, status: 'active' }, segments: [] } as never)
-    vi.mocked(updateLiveInterviewQuestion).mockRejectedValueOnce(new Error('保存连接失败')).mockImplementation(async (_id, question) => ({ currentQuestion: question }) as never)
+  it('allows completed interviews to be browsed without enabling edit selection or model requests', async () => {
+    questionSet(); vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: navigationQuestions[0].question, status: 'completed' }, segments: [] } as never)
     await mountReference(); selectResume(1); await flush()
-    expect(questionText()).toBe(navigationQuestions[1].question)
-    expect(root!.textContent).toContain('题目已切换，但保存失败')
-    button('重试保存').click(); await flush()
-    expect(root!.textContent).not.toContain('题目已切换，但保存失败')
-    expect(updateLiveInterviewQuestion).toHaveBeenCalledTimes(2)
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1', navigationQuestions[1].question, 'ai_adopted', undefined)
+    expect(questionText()).toBe('')
+    expect(root!.querySelector<HTMLButtonElement>('.question-select')!.disabled).toBe(true)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
+    expect(generateInterviewQuestions).not.toHaveBeenCalled()
   })
-  it('does not let a late answer analysis overwrite the manually selected question', async () => {
-    questionSet()
-    const analysis = deferred<never>()
-    vi.mocked(analyzeLiveSegment).mockReturnValue(analysis.promise)
-    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: navigationQuestions[0].question, status: 'active' }, segments: [{ id: 'segment-1', sessionId: 'session-1', role: 'candidate', confidence: 0.9, text: '我曾负责招聘项目。', startMs: 0, endMs: 1000, status: 'transcribed' }] } as never)
-    vi.mocked(updateLiveInterviewQuestion).mockImplementation(async (_id, question) => ({ currentQuestion: question }) as never)
-    await mountReference()
-    expect(analyzeLiveSegment).toHaveBeenCalledOnce()
-    selectResume(1); await flush()
-    analysis.resolve({ nextQuestion: '请补充旧问题的细节。', summary: '回答已分析', scores: [], evidence: [], concerns: [], confidence: 0.9 } as never); await flush()
-    expect(questionText()).toBe(navigationQuestions[1].question)
-    expect(root!.textContent).toContain('回答已分析')
-    expect(updateLiveInterviewQuestion).toHaveBeenCalledOnce()
-  })
-  it('generates questions when the saved set is empty and exposes loading and retry feedback', async () => {
-    const generated = deferred<never>()
-    vi.mocked(generateInterviewQuestions).mockReturnValue(generated.promise)
-    await mountReference()
-    expect(root!.textContent).toContain('正在加载面试题')
-    expect(regenerationButton().disabled).toBe(true)
-    generated.resolve({ questions: navigationQuestions, engine: 'llm' } as never); await flush()
-    expect(questionText()).toBe(navigationQuestions[0].question)
+  it('does not preselect a generated question when loading finishes', async () => {
+    const pending = deferred<never>(); vi.mocked(generateInterviewQuestions).mockReturnValue(pending.promise)
+    await mountReference(); expect(regenerationButton().disabled).toBe(true)
+    pending.resolve({ questions: completeBank(), engine: 'llm' } as never); await flush()
+    expect(questionText()).toBe('')
+    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
     expect(regenerationButton().disabled).toBe(false)
   })
-  it('allows retry after the question set fails to load', async () => {
+  it('allows regeneration retry after a failed initial load without selecting a question', async () => {
     vi.mocked(getInterviewQuestions).mockRejectedValueOnce(new Error('题目加载失败'))
     vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never)
-    await mountReference()
-    expect(root!.textContent).toContain('题目加载失败')
+    await mountReference(); expect(root!.textContent).toContain('题目加载失败')
     regenerationButton().click(); await flush()
-    expect(questionText()).toBe(completeBank()[0].question)
     expect(root!.textContent).not.toContain('题目加载失败')
+    expect(questionText()).toBe('')
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
   })
-
 })
 
 
@@ -1132,11 +1337,11 @@ describe('AI generated capability bank lifecycle', () => {
     await openReference('hr')
     expect(root!.querySelectorAll('[data-group="hr"] .question-select')).toHaveLength(5)
     root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!.click(); await flush()
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1', bank[10].question, 'ai_adopted', undefined)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
     expect(root!.querySelector('[data-group="hr"] .question-select[aria-pressed="true"]')).not.toBeNull()
     await openReference('department')
     root!.querySelector<HTMLButtonElement>('[data-group="department"] .question-select')!.click(); await flush()
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-1', bank[15].question, 'ai_adopted', undefined)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
     await openReference('ai'); selectResume(0); await flush(); expect(questionText()).toBe(bank[0].question)
     expect(root!.querySelector('.question-progress')).toBeNull()
   })
@@ -1147,7 +1352,7 @@ describe('AI generated capability bank lifecycle', () => {
   it('keeps a legacy bank until explicit regeneration and protects the current question while generation is pending', async () => {
     questionSet(); const pending = deferred<never>(); vi.mocked(generateInterviewQuestions).mockReturnValue(pending.promise)
     await mountReference(); expect(generateInterviewQuestions).not.toHaveBeenCalled(); expect(root!.textContent).toContain('这是旧版题库')
-    button('重新生成题库（10 + 5 + 5 题）').click(); await flush(); await openReference('hr'); root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!.click(); await flush()
+    button('重新生成当前表').click(); await flush(); await openReference('hr'); root!.querySelector<HTMLButtonElement>('[data-group="hr"] .question-select')!.click(); await flush()
     const current = questionText(); pending.resolve({ questions: completeBank(), engine: 'llm' } as never); await flush()
     expect(questionText()).toBe(current); await openReference('ai'); expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
     expect(root!.textContent).not.toContain('这是旧版题库')
@@ -1157,26 +1362,60 @@ describe('AI generated capability bank lifecycle', () => {
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: bank[10].question, status: 'active' }, segments: [{ id: 'segment-1', sessionId: 'session-1', role: 'candidate', confidence: 0.9, text: '我会先澄清目标再提出方案。', startMs: 0, endMs: 1000, status: 'transcribed' }] } as never)
     await mountReference(); pending.resolve({ nextQuestion: '请补充行动证据。', summary: '已分析', scores: [], evidence: [], concerns: [], confidence: 0.9 } as never); await flush()
-    expect(questionText()).toBe(bank[10].question); expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
-    expect(root!.textContent).toContain('请补充行动证据。')
+    expect(questionText()).toBe(''); expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
+    expect(root!.querySelector('.reference-bank-panel')!.textContent).not.toContain('请补充行动证据。')
   })
   it('does not generate or overwrite a completed interview bank', async () => {
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', currentQuestion: '已完成的问题', status: 'completed' }, segments: [] } as never)
-    await mountReference(); expect(generateInterviewQuestions).not.toHaveBeenCalled(); expect(button('重新生成题库（10 + 5 + 5 题）').disabled).toBe(true)
+    await mountReference(); expect(generateInterviewQuestions).not.toHaveBeenCalled(); expect(button('重新生成当前表').disabled).toBe(true)
   })
 })
 
 describe('regeneration feedback and safeguards', () => {
+  it('only regenerates the open department sheet and preserves every other sheet', async () => {
+    const original = completeBank(true)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: original, engine: 'llm' } as never)
+    const changed = original.map(question => ({ ...question, question: '新生成：' + question.question }))
+    vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: changed, engine: 'llm' } as never)
+    await mountReference('interview-2'); await openReference('department'); regenerationButton().click(); await flush()
+    expect(generateInterviewQuestions).toHaveBeenCalledWith('interview-2', 10, true, expect.any(AbortSignal), 'department')
+    expect(root!.querySelector('[data-group="department"]')!.textContent).toContain(changed[15].question)
+    await openReference('boss')
+    expect(root!.querySelector('[data-group="boss"]')!.textContent).toContain(original[20].question)
+    expect(root!.querySelector('[data-group="boss"]')!.textContent).not.toContain(changed[20].question)
+    await openReference('hr')
+    expect(root!.querySelector('[data-group="hr"]')!.textContent).toContain(original[10].question)
+  })
+  it('rejects missing capability dimensions without replacing the open sheet', async () => {
+    const original = completeBank()
+    vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: original, engine: 'llm' } as never)
+    vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: original.map((question, index) => index === 19 ? { ...question, dimension: 'unknown_dimension' } : question), engine: 'llm' } as never)
+    await mountReference(); await openReference('department'); regenerationButton().click(); await flush()
+    expect(root!.querySelector('.generation-error')!.textContent).toContain('不完整')
+    expect(root!.querySelectorAll('[data-group="department"] .question-select')).toHaveLength(5)
+    expect(root!.querySelector('[data-group="department"]')!.textContent).toContain(original[19].question)
+  })
+  it('accepts AI success for the current sheet even when other sheets remain local', async () => {
+    const original = completeBank().map(question => ({ ...question, sourceEngine: 'local_fallback' as const }))
+    vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: original, engine: 'local_fallback' } as never)
+    const changed = original.map(question => question.group === 'department' ? { ...question, question: 'AI新题：' + question.question, sourceEngine: 'llm' as const } : question)
+    vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: changed, engine: 'local_fallback' } as never)
+    await mountReference(); await openReference('department'); regenerationButton().click(); await flush()
+    expect(root!.querySelector('.generation-success')!.textContent).toContain('其他表保持不变')
+    expect(root!.querySelector('[data-group="department"]')!.textContent).toContain('AI 生成 · 5 题')
+    expect(root!.querySelector('[data-group="department"] .fallback-note')).toBeNull()
+  })
   it('keeps one button, shows pending feedback, rejects duplicate clicks and reports success', async () => {
-    questionSet(); const pending = deferred<never>(); vi.mocked(generateInterviewQuestions).mockReturnValue(pending.promise)
+    vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never); const pending = deferred<never>(); vi.mocked(generateInterviewQuestions).mockReturnValue(pending.promise)
     await mountReference(); regenerationButton().click(); await flush()
     expect(regenerationButton().disabled).toBe(true)
     expect(root!.querySelector('.question-bank-toolbar')!.getAttribute('aria-busy')).toBe('true')
-    expect(root!.querySelector('[role="status"]')!.textContent).toContain('正在加载面试题')
+    expect(root!.querySelector('[role="status"]')!.textContent).toContain('正在生成当前面试表')
     regenerationButton().click(); await flush(); expect(generateInterviewQuestions).toHaveBeenCalledOnce()
     await tick(15000); expect(root!.textContent).toContain('模型仍在生成')
     pending.resolve({ questions: completeBank(), engine: 'llm' } as never); await flush()
-    expect(root!.querySelector('.generation-success')!.textContent).toContain('题库已重新生成')
+    expect(root!.querySelector('.generation-success')!.textContent).toContain('当前面试表已重新生成')
     expect(regenerationButton().disabled).toBe(false)
     expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
     await openReference('hr')
@@ -1189,7 +1428,7 @@ describe('regeneration feedback and safeguards', () => {
     await mountReference(); regenerationButton().click(); await flush()
     expect(root!.querySelector('.generation-error[role="alert"]')!.textContent).toContain('生成连接失败')
     expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(3)
-    expect(questionText()).toBe(navigationQuestions[0].question)
+    expect(questionText()).toBe('')
     expect(regenerationButton().disabled).toBe(false)
     regenerationButton().click(); await flush()
     expect(root!.querySelector('.generation-error')).toBeNull()
@@ -1198,7 +1437,7 @@ describe('regeneration feedback and safeguards', () => {
   it.each([
     { questions: [], engine: 'llm', message: '服务未返回可用题目' },
     { questions: navigationQuestions, engine: 'llm', message: '新版 API 已重启' },
-    { questions: completeBank().map((question, index) => index === 19 ? { ...question, dimension: 'results' } : question), engine: 'llm', message: '新版 API 已重启' },
+{ questions: completeBank().filter((_, index) => index !== 9), engine: 'llm', message: '新版 API 已重启' },
   ])('does not replace the bank or claim success on an empty or incomplete response: $message', async result => {
     questionSet(); vi.mocked(generateInterviewQuestions).mockResolvedValue(result as never)
     await mountReference(); regenerationButton().click(); await flush()
@@ -1207,12 +1446,12 @@ describe('regeneration feedback and safeguards', () => {
     expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(3)
     expect(regenerationButton().disabled).toBe(false)
   })
-  it('warns explicitly if the server falls back to local reference questions', async () => {
+  it('retains original questions and reports failure if regeneration returns local fallback', async () => {
     questionSet(); vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'local_fallback' } as never)
     await mountReference(); regenerationButton().click(); await flush()
-    expect(root!.querySelector('.generation-warning[role="alert"]')!.textContent).toContain('模型生成未成功')
+    expect(root!.querySelector('.generation-error[role="alert"]')!.textContent).toContain('模型生成未成功')
     expect(root!.querySelector('.generation-success')).toBeNull()
-    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
+    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(3)
   })
 })
 
@@ -1224,11 +1463,12 @@ describe('第二轮面试题库', () => {
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-2', currentQuestion: bank[20].question, status: 'active' }, segments: [{ id: 'segment-2', sessionId: 'session-2', role: 'candidate', confidence: 0.9, text: '我会拆分目标，明确关键风险和资源分配。', startMs: 0, endMs: 1000, status: 'transcribed' }] } as never)
     await mountReference('interview-2')
+    await openReference('boss')
     pending.resolve({ nextQuestion: '请补充业务结果。', summary: '已分析', scores: [], evidence: [], concerns: [], confidence: 0.9 } as never); await flush()
     expect(analyzeLiveSegment).toHaveBeenCalled()
-    expect(questionText()).toBe(bank[20].question)
+    expect(questionText()).toBe('')
     expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
-    expect(root!.textContent).toContain('请补充业务结果。')
+    expect(root!.querySelector('.question-select[aria-pressed="true"]')).toBeNull()
   })
   it('第二轮展示25道生成题，BOSS题可选并记录来源', async () => {
     vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
@@ -1237,22 +1477,25 @@ describe('第二轮面试题库', () => {
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-2', currentQuestion: bank[0].question, status: 'active' }, segments: [] } as never)
     await mountReference('interview-2')
     expect(generateInterviewQuestions).toHaveBeenCalledWith('interview-2', 10, true, expect.any(AbortSignal))
-    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
+    expect(root!.querySelector('[data-reference="ai"]')).toBeNull()
+    expect(bank).toHaveLength(25)
     await openReference('hr'); expect(root!.querySelectorAll('[data-group="hr"] .question-select')).toHaveLength(5)
-    await openReference('department'); for (const group of ['department', 'boss']) expect(root!.querySelectorAll('[data-group="' + group + '"] .question-select')).toHaveLength(5)
-    expect(regenerationButton().textContent).toContain('10 + 5 + 5 + 5')
+    await openReference('department'); expect(root!.querySelectorAll('[data-group="department"] .question-select')).toHaveLength(5)
+    expect(root!.querySelector('[data-group="boss"]')).toBeNull()
+    await openReference('boss'); expect(root!.querySelectorAll('[data-group="boss"] .question-select')).toHaveLength(5)
+expect(regenerationButton().textContent).toContain('重新生成当前表')
     root!.querySelector<HTMLButtonElement>('[data-group="boss"] .question-select')!.click(); await flush()
     expect(questionText()).toBe(bank[20].question)
-    expect(updateLiveInterviewQuestion).toHaveBeenLastCalledWith('session-2', bank[20].question, 'ai_adopted', undefined)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
   })
   it('第二轮不能用第一轮20题的重新生成响应替换现有25题', async () => {
     vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     const bank = completeBank(true)
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
     vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never)
-    await mountReference('interview-2'); regenerationButton().click(); await flush()
-    expect(root!.querySelector('.generation-error')?.textContent).toContain('不完整题库')
-    await openReference('department')
+await mountReference('interview-2'); await openReference('boss'); regenerationButton().click(); await flush()
+    expect(root!.querySelector('.generation-error')?.textContent).toContain('不完整')
+    await openReference('boss')
     expect(root!.querySelectorAll('[data-group="boss"] .question-select')).toHaveLength(5)
     expect(root!.querySelector('[data-group="boss"]')?.textContent).toContain(bank[20].question)
   })
@@ -1260,7 +1503,7 @@ describe('第二轮面试题库', () => {
 
 
 describe('题库等待与取消', () => {
-  it('135秒后停止等待，显示红色错误并保留原题库', async () => {
+  it('当前简历表255秒后停止等待，显示红色错误并保留原题库', async () => {
     questionSet(); const pending = deferred<never>()
     vi.mocked(generateInterviewQuestions).mockReturnValue(pending.promise)
     await mountReference(); regenerationButton().click(); await flush()
@@ -1268,6 +1511,10 @@ describe('题库等待与取消', () => {
     await tick(15000)
     expect(root!.textContent).toContain('15 秒')
     await tick(120000)
+    expect(signal.aborted).toBe(false)
+await tick(119999)
+    expect(signal.aborted).toBe(false)
+    await tick(1)
     expect(signal.aborted).toBe(true)
     expect(root!.querySelector('.generation-error[role="alert"]')?.textContent).toContain('等待超时')
     expect(regenerationButton().disabled).toBe(false)
@@ -1300,16 +1547,118 @@ describe('题库等待与取消', () => {
   it('降级为参考题时展示后端返回的具体失败原因', async () => {
     questionSet(); vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'local_fallback', generationWarning: '模型服务返回 HTTP 429，请稍后重试。' } as never)
     await mountReference(); regenerationButton().click(); await flush()
-    expect(root!.querySelector('.generation-warning[role="alert"]')?.textContent).toContain('HTTP 429')
+    expect(root!.querySelector('.generation-error[role="alert"]')?.textContent).toContain('HTTP 429')
     expect(root!.querySelector('.generation-success')).toBeNull()
   })
   it('复试等待提示正确显示四组问题，并显示已等待时间', async () => {
     vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     vi.mocked(generateInterviewQuestions).mockReturnValue(deferred<never>().promise)
     await mountReference('interview-2'); await tick(3000)
-    expect(root!.textContent).toContain('四组')
+expect(root!.textContent).toContain('简历题分批生成')
     expect(root!.textContent).toContain('3 秒')
     expect(button('取消生成')).toBeDefined()
+  })
+})
+
+describe('面试题对话恢复', () => {
+  it('单题连续改写始终传递所选位置和最新题文，取消后恢复整表模式', async () => {
+    const original = completeBank()
+    const first = original.map((q, i) => i === 0 ? { ...q, question: '创新能力问题' } : q)
+    const second = first.map((q, i) => i === 0 ? { ...q, question: '再次改写后的创新能力问题' } : q)
+    vi.mocked(refineInterviewQuestionGroup)
+      .mockResolvedValueOnce({ questions: first, engine: 'llm', assistantMessage: '只改选中题' } as never)
+      .mockResolvedValueOnce({ questions: second, engine: 'llm', assistantMessage: '再次改写' } as never)
+      .mockResolvedValueOnce({ questions: second, engine: 'llm', assistantMessage: '整表调整' } as never)
+    await open(); selectResume(0); await flush(); await send('改为创新能力')
+    expect(vi.mocked(refineInterviewQuestionGroup).mock.calls[0]![4]).toEqual({ index: 0, question: original[0].question })
+    expect(questionText()).toBe(first[0].question)
+    await send('再换一个')
+    expect(vi.mocked(refineInterviewQuestionGroup).mock.calls[1]![4]).toEqual({ index: 0, question: first[0].question })
+    expect(questionText()).toBe(second[0].question)
+    selectResume(0); await flush(); await send('整表更换情境')
+    expect(vi.mocked(refineInterviewQuestionGroup).mock.calls[2]![4]).toBeUndefined()
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
+  })
+  it('未选题默认整表修改，模型生成期间锁定选择且不会切换目标题', async () => {
+    const pending = deferred<never>()
+    vi.mocked(refineInterviewQuestionGroup).mockReturnValue(pending.promise)
+    await open(); await send()
+    expect(vi.mocked(refineInterviewQuestionGroup).mock.calls[0]![4]).toBeUndefined()
+    expect(root!.querySelector<HTMLButtonElement>('.question-select')!.disabled).toBe(true)
+    selectResume(1); await flush(); expect(questionText()).toBe('')
+    pending.resolve({ questions: completeBank(), engine: 'llm', assistantMessage: '已完成' } as never); await flush()
+    expect(root!.querySelector<HTMLButtonElement>('.question-select')!.disabled).toBe(false)
+    expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
+  })
+  it('重新生成题库清除旧编辑选择，不让旧题文误指向新题', async () => {
+    vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never)
+    await open(); selectResume(0); await flush(); expect(questionText()).not.toBe('')
+    regenerationButton().click(); await flush()
+    expect(questionText()).toBe('')
+    expect(root!.querySelector('.conversation-header')!.textContent).toContain('全部题目')
+  })
+  async function send(content = '请调整为应届生情境题') {
+    const input = root!.querySelector<HTMLTextAreaElement>('#question-conversation-input')!
+    input.value = content; input.dispatchEvent(new Event('input')); await flush()
+    root!.querySelector('form.conversation-composer')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await flush()
+  }
+  async function open() {
+    vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never)
+    await mountReference()
+  }
+  it('调整成功展示回复并保存新题，生成期间禁止同时整套重新生成', async () => {
+    const pending = deferred<never>()
+    vi.mocked(refineInterviewQuestionGroup).mockReturnValue(pending.promise)
+    await open(); await send()
+    expect(regenerationButton().disabled).toBe(true)
+    const bank = completeBank().map(q => q.group === 'ai' ? { ...q, question: '已调整：' + q.question } : q)
+    pending.resolve({ questions: bank, engine: 'llm', assistantMessage: '已改为适合应届生的情境题。' } as never); await flush()
+    expect(root!.querySelector('.conversation-messages')!.textContent).toContain('已改为适合应届生')
+    expect(root!.querySelector('[data-group="ai"]')!.textContent).toContain('已调整：')
+    expect(regenerationButton().disabled).toBe(false)
+  })
+  it('失败保留原题库，一键重试不重复加入用户消息', async () => {
+    vi.mocked(refineInterviewQuestionGroup).mockRejectedValueOnce(new Error('模型输出被截断')).mockResolvedValueOnce({ questions: completeBank(), engine: 'llm', assistantMessage: '已调整' } as never)
+    await open(); await send()
+    expect(root!.querySelector('.conversation-error')!.textContent).toContain('模型输出被截断')
+    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
+    root!.querySelector<HTMLButtonElement>('.conversation-retry')!.click(); await flush()
+    expect(refineInterviewQuestionGroup).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(refineInterviewQuestionGroup).mock.calls[1]![2]).toHaveLength(1)
+    expect(root!.querySelector('.conversation-error')).toBeNull()
+  })
+  it('取消后立即解锁，即使网络忽略取消也不会覆盖后续成功结果', async () => {
+    const pending = deferred<never>()
+    const bank = completeBank().map(q => ({ ...q, question: '新题：' + q.question }))
+    vi.mocked(refineInterviewQuestionGroup).mockReturnValueOnce(pending.promise).mockResolvedValueOnce({ questions: bank, engine: 'llm', assistantMessage: '新回复' } as never)
+    await open(); await send()
+    const signal = vi.mocked(refineInterviewQuestionGroup).mock.calls[0]![3]!
+    button('取消生成').click(); await flush()
+    expect(signal.aborted).toBe(true)
+    expect(regenerationButton().disabled).toBe(false)
+    root!.querySelector<HTMLButtonElement>('.conversation-retry')!.click(); await flush()
+    pending.resolve({ questions: completeBank(), engine: 'local_fallback', assistantMessage: '旧回复' } as never); await flush()
+    expect(root!.querySelector('[data-group="ai"]')!.textContent).toContain('新题：')
+    expect(root!.querySelector('.conversation-messages')!.textContent).not.toContain('旧回复')
+  })
+  it('对话135秒无响应后结束等待、保留原题并允许重试', async () => {
+    vi.mocked(refineInterviewQuestionGroup).mockReturnValue(deferred<never>().promise)
+    await open(); await send(); await tick(135000)
+    expect(root!.querySelector('.conversation-error')!.textContent).toContain('等待超时')
+    expect(root!.querySelector('#question-conversation-input')!.hasAttribute('disabled')).toBe(false)
+    expect(root!.querySelector('.conversation-retry')).not.toBeNull()
+    expect(root!.querySelectorAll('[data-group="ai"] .question-select')).toHaveLength(10)
+  })
+  it('连续多轮对话只发送有效限额内的近期历史，不中断后续调整', async () => {
+    vi.mocked(refineInterviewQuestionGroup).mockResolvedValue({ questions: completeBank(), engine: 'llm', assistantMessage: '回复'.repeat(250) } as never)
+    await open()
+    for (let i = 0; i < 15; i++) await send(i + '要求'.repeat(250))
+    expect(refineInterviewQuestionGroup).toHaveBeenCalledTimes(15)
+    const messages = vi.mocked(refineInterviewQuestionGroup).mock.calls.at(-1)![2]
+    expect(messages.length).toBeLessThanOrEqual(12)
+    expect(messages.reduce((size, message) => size + message.content.length, 0)).toBeLessThanOrEqual(6000)
+    expect(messages.at(-1)?.content).toContain('14')
+    expect(root!.querySelectorAll('.conversation-message.user')).toHaveLength(15)
   })
 })
 

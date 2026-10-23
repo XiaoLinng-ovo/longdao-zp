@@ -1,6 +1,16 @@
 export type InterviewRole = 'interviewer' | 'candidate' | 'unknown'
 
+export interface TranscriptComparison {
+  streamingText: string
+  offlineText: string
+  streamingComplete: boolean
+  selectedSource: 'streaming' | 'offline'
+  startMs: number
+  endMs: number
+}
+
 export interface SpeakerSegment {
+  transcriptComparison?: TranscriptComparison
   audioSource?: 'microphone' | 'meeting'
   id: string
   speakerId: string

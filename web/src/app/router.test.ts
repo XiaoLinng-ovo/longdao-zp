@@ -48,8 +48,8 @@ const expectedRoutes = [
     icon: '⑦',
   },
   {path: '/enterprise/ai',title:'企业 AI 配置',navLabel:'企业 AI 配置',icon:'✦'},
-  {path:'/enterprise/billing-sandbox',title:'订单与支付测试',navLabel:'订单与支付测试',icon:'◇'},
-  {path:'/enterprise/payments',title:'套餐与支付',navLabel:'套餐与支付',icon:'◇'},
+  {path:'/enterprise/billing-sandbox',title:'支付流程测试',navLabel:'支付流程测试',icon:'◇'},
+  {path:'/enterprise/payments',title:'套餐订购与续费',navLabel:'套餐订购与续费',icon:'◇'},
   {path:'/platform/payments',title:'支付与商品管理',navLabel:'支付与商品管理',icon:'¥'},
   {path: '/enterprise/ai-usage',title:'企业 AI 用量',navLabel:'企业 AI 用量',icon:'▤'},
   {

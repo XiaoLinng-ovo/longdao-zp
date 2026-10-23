@@ -4,6 +4,7 @@ import { QuestionSheetService, STAGE_DEFAULT_WEIGHTS, aggregateQuestionSheet, re
 import type { QuestionSheetRepository } from './question-sheet-repository.js'
 import type { InterviewQuestionRecord, InterviewQuestionSheetRecord } from './question-sheet-repository.js'
 import type { QuestionWriteInput } from './question-sheet-repository.js'
+import { ASSESSMENT_RUBRIC_VERSION, questionMaximum } from './question-sheet-rubrics.js'
 
 function question(overrides: Partial<InterviewQuestionRecord>): InterviewQuestionRecord {
   return {
@@ -47,6 +48,59 @@ describe('面试表汇总', () => {
     assert.equal(aggregate.score, null)
     assert.deepEqual(aggregate.ratings, {})
   })
+})
+
+describe('读取评分表时兼容旧版内容', () => {
+  it('五种面试表分别升级为对应固定考察点，不调用AI且只刷新一次', async () => {
+    const originals = [
+      sheet({ id: '1', stage: 'initial', sheetType: 'hr_screen', status: 'draft' }),
+      sheet({ id: '2', stage: 'initial', sheetType: 'hiring_department', status: 'scoring' }),
+      sheet({ id: '3', stage: 'final', sheetType: 'business', status: 'scoring' }),
+      sheet({ id: '4', stage: 'final', sheetType: 'hr', status: 'scoring' }),
+      sheet({ id: '5', stage: 'final', sheetType: 'boss', status: 'scoring' }),
+    ]
+    let reads = 0
+    const updated: string[] = []
+    const repository = {
+      listForApplication: async () => { reads++; return { sheets: originals, reviews: [] } },
+      upgradeAssessmentRubric: async (id: string, items: QuestionWriteInput[], version: string) => {
+        assert.equal(version, ASSESSMENT_RUBRIC_VERSION)
+        assert.equal(items.length, 5)
+        const expected = ['hr', 'department', 'department', 'hr', 'boss'][Number(id) - 1]
+        assert.ok(items.every(item => item.category?.startsWith('rubric:' + expected + ':')))
+        originals.find(item => item.id === id)!.promptVersion = version
+        updated.push(id)
+        return true
+      },
+      listCompletedLiveRecordingScores: async () => [], findNextRound: async () => null,
+    } as unknown as QuestionSheetRepository
+    const service = new QuestionSheetService(repository, { resolveAiEnv: async () => { throw new Error('禁止调用AI') } })
+    await service.getApplicationView('app-1')
+    assert.deepEqual(updated, ['1', '2', '3', '4', '5'])
+    assert.equal(reads, 2)
+    await service.getApplicationView('app-1')
+    assert.equal(reads, 3)
+    assert.equal(updated.length, 5)
+  })
+
+  for (const overrides of [
+    { promptVersion: ASSESSMENT_RUBRIC_VERSION },
+    { status: 'generating' }, { status: 'submitted' }, { status: 'locked' },
+    { questions: [question({ finalScore: 0 })] },
+    { questions: [question({ finalTier: 'pass' })] },
+    { questions: [question({ comment: '' })] },
+  ] as Partial<InterviewQuestionSheetRecord>[]) {
+    it('保留当前模板、处理中状态与已有人工记录：' + JSON.stringify(overrides), async () => {
+      const original = sheet({ status: 'scoring', ...overrides })
+      const repository = {
+        listForApplication: async () => ({ sheets: [original], reviews: [] }),
+        upgradeAssessmentRubric: async () => { throw new Error('不应覆盖原表') },
+        listCompletedLiveRecordingScores: async () => [], findNextRound: async () => null,
+      } as unknown as QuestionSheetRepository
+      const view = await new QuestionSheetService(repository).getApplicationView('app-1')
+      assert.equal(view.sheets[0]!.questions, original.questions)
+    })
+  }
 })
 
 describe('阶段权重与公式', () => {
@@ -176,7 +230,7 @@ describe('按角色生成通用人工考察点评分表', () => {
         assert.ok(written.every(row => row.aiScore === null && row.aiTier === null && row.aiRationale === null && !row.aiEvidence?.length && row.answerText === null))
         assert.match(notice, /人工评分/)
         const expectedMax = type === 'boss' ? 20 : type === 'hiring_department' || type === 'business' ? 12 : 8
-        assert.ok(written.every(row => Math.max(...(row.tiers ?? []).map(tier => tier.max)) === expectedMax))
+        assert.ok(written.every(row => questionMaximum({ category: row.category ?? null, tiers: row.tiers ?? [] }) === expectedMax))
       })
     }
   }
@@ -258,7 +312,7 @@ describe('考察点评分表载入', () => {
       find: async () => sheet({ status: 'scoring', questions: [question({ finalScore: null, comment: null })] }),
       loadAssessmentRubric: async (...[applicationId, stage, type, actorId, questions, version]: Parameters<QuestionSheetRepository['loadAssessmentRubric']>) => {
         assert.deepEqual([applicationId, stage, type, actorId], ['app-1', 'initial', 'hr_screen', 'user-1'])
-        assert.equal(version, 'manual-rubric-v1')
+        assert.equal(version, ASSESSMENT_RUBRIC_VERSION)
         assert.equal(questions.length, 5)
         assert.ok(questions.every(item => item.category?.startsWith('rubric:hr:')))
         marked = true

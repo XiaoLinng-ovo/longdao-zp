@@ -9,6 +9,7 @@ import SecurityNotice from '../components/SecurityNotice.vue'
 import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings.vue'
 import ResumeScoringSkills from '../components/ResumeScoringSkills.vue'
 import AiModelSelector from '../components/AiModelSelector.vue'
+import AccountCreation from '../components/AccountCreation.vue'
 import { actionLabel, statusLabel } from '../../../shared/utils/labels'
 import { formatAnalysisError } from '../../../shared/utils/analysis-error'
 import { administrationModules, isAdministrationModuleKey, platformAdministrationModules, type AdministrationModuleKey } from '../moduleConfig'
@@ -530,6 +531,8 @@ onMounted(refresh)
         </tbody></table>
       </div>
     </section>
+
+    <AccountCreation v-else-if="activeModule === 'account-creation'" :roles="roles" :departments="departments" @created="users.unshift($event)" />
 
     <section v-else-if="activeModule === 'departments'" class="section">
       <div class="section-heading">

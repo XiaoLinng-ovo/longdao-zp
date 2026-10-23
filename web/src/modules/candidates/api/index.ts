@@ -8,6 +8,9 @@ export interface ApiApplication { interviewProgress?: Candidate['interviewProgre
 export interface ApiCandidate { id: string; code: string; fullName: string; email?: string; phone?: string; source?: string; company?: string; skills?: string[]; tags?: string[]; status: string; updatedAt: string; aiStatus?: string; score?: number | null; analysisStatus?: string; analysisProgress?: number; analysisAttempts?: number; analysisError?: string; applications: ApiApplication[] }
 export interface ApiResume { id: string; candidateId: string; applicationId?: string; originalFilename: string; mimeType: string; sizeBytes: number; contentHash: string; scanStatus: string; createdAt: string }
 export interface ApiResumeDocument { originalFilename: string; mimeType: string; content: string; previewHtml?: string }
+export async function getApplicationResume(applicationId: string): Promise<ApiResume | null> {
+  return (await apiClient.getJson<ApiResume | null>('/applications/' + encodeURIComponent(applicationId) + '/resume')).data
+}
 export async function getResumeDocument(candidateId: string, resumeId: string): Promise<ApiResumeDocument> {
   return (await apiClient.getJson<ApiResumeDocument>('/candidates/' + encodeURIComponent(candidateId) + '/resumes/' + encodeURIComponent(resumeId) + '/original')).data
 }

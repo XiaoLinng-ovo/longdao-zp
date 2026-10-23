@@ -2,18 +2,23 @@
 import { computed } from 'vue'
 import type { GeneratedInterviewQuestion } from '../api'
 import { commonGroupsForRound } from '../utils/common-question-templates'
-const props = withDefaults(defineProps<{ questions: GeneratedInterviewQuestion[]; currentQuestion: string; round: number; disabled?: boolean; engine?: string; followUps?: string[]; group?: 'ai' | 'hr' | 'department' | 'boss' }>(), { disabled: false, engine: '', followUps: () => [] })
+const props = withDefaults(defineProps<{ questions: GeneratedInterviewQuestion[]; currentQuestion: string; round: number; selectionMode?: 'reference' | 'edit'; disabled?: boolean; engine?: string; followUps?: string[]; group?: 'ai' | 'hr' | 'department' | 'boss' }>(), { disabled: false, engine: '', followUps: () => [] })
 const emit = defineEmits<{ select: [question: string, source: 'manual' | 'ai_adopted'] }>()
 const resumeQuestions = computed(() => props.questions.filter(question => !question.group || question.group === 'ai'))
+const hasLocalQuestions = (group: string) => {
+  const questions = props.questions.filter(question => (question.group ?? 'ai') === group)
+  return questions.length ? questions.some(question => (question.sourceEngine ?? props.engine) === 'local_fallback') : props.engine === 'local_fallback'
+}
 const groups = computed(() => commonGroupsForRound(props.round).filter(group => !props.group || group.id === props.group).map(group => {
   const generated = props.questions.filter(question => question.group === group.id)
   if (!generated.length) return { ...group, generated: false }
-  return { ...group, title: group.id === 'department' && props.round >= 2 ? '业务通用提问' : group.id === 'boss' ? 'BOSS 通用提问' : group.title, generated: true, description: props.engine === 'local_fallback' ? '本地规则能力参考题，每个维度一道。大模型恢复后可重新生成。' : 'AI 按能力维度生成通用考核题，每个维度一道。模板仅作为能力与评分参考，重新生成可换一批问题。', dimensions: group.dimensions.map(dimension => ({ ...dimension, questions: generated.filter(question => question.dimension === dimension.id).map(question => question.question) })) }
+  return { ...group, title: group.id === 'department' && props.round >= 2 ? '业务通用提问' : group.id === 'boss' ? 'BOSS 通用提问' : group.title, generated: true, description: hasLocalQuestions(group.id) ? '本地规则能力参考题，每个维度一道。大模型恢复后可重新生成。' : 'AI 按能力维度生成通用考核题，每个维度一道。模板仅作为能力与评分参考，重新生成可换一批问题。', dimensions: group.dimensions.map(dimension => ({ ...dimension, questions: generated.filter(question => question.dimension === dimension.id).map(question => question.question) })) }
 }))
 const modelQuestion = (text: string) => props.questions.find(question => normalized(question.question) === normalized(text))
 const questionSource = (text: string) => modelQuestion(text) ? 'ai_adopted' as const : 'manual' as const
 const normalized = (value: string) => value.replace(/\s+/g, ' ').trim()
 const selected = (question: string) => normalized(question) === normalized(props.currentQuestion)
+const selectionLabel = computed(() => props.selectionMode === 'edit' ? '待修改' : '已选参考')
 const activeGroup = computed(() => groups.value.find(group => group.dimensions.some(dimension => dimension.questions.some(selected))))
 const unlistedCurrentQuestion = computed(() => props.currentQuestion.trim() && !props.questions.some(question => selected(question.question)) && !groups.value.some(group => group.dimensions.some(dimension => dimension.questions.some(selected))) && !props.followUps.some(selected))
 const categoryLabels = { technical: '专业技能', behavioral: '行为表现', experience: '经历核实', job_specific: '岗位匹配' }
@@ -27,26 +32,26 @@ const categoryLabels = { technical: '专业技能', behavioral: '行为表现', 
     <section v-if="!group || group === 'ai'" id="interview-ai-questions" class="question-group group-ai" data-group="ai" aria-label="AI 简历针对性提问">
       <header><h3>AI 简历针对性提问</h3><span>{{ resumeQuestions.length }} 题</span></header>
       <p class="group-description">依据候选人简历证据与岗位要求生成，重点核实经历、成果、能力与待确认信息。</p>
-      <p v-if="engine === 'local_fallback'" class="fallback-note">当前使用本地规则生成，并非大模型结果。</p>
+      <p v-if="hasLocalQuestions('ai')" class="fallback-note">当前使用本地规则生成，并非大模型结果。</p>
       <p v-if="!resumeQuestions.length" class="group-empty">{{ props.group ? '简历针对性题目尚未就绪。' : '简历针对性题目尚未就绪，下面的通用模板仍可使用。' }}</p>
       <article v-for="(question, index) in resumeQuestions" :key="index + ':' + question.question" class="question-item" :class="{ selected: selected(question.question) }">
-        <div class="question-meta"><span>AI · {{ index + 1 }} · {{ categoryLabels[question.category] }}</span><b v-if="selected(question.question)">已选参考</b></div>
+        <div class="question-meta"><span>AI · {{ index + 1 }} · {{ categoryLabels[question.category] }}</span><b v-if="selected(question.question)">{{ selectionLabel }}</b></div>
         <button class="question-select" type="button" :disabled="disabled" :aria-pressed="selected(question.question)" @click="emit('select', question.question, 'ai_adopted')">{{ question.question }}</button>
         <details v-if="question.groundedIn.length || question.rationale || question.scoringRubric.length" class="question-reference" :open="Boolean(props.group)"><summary>简历依据与考察点</summary><p v-if="question.groundedIn.length"><strong>依据：</strong>{{ question.groundedIn.join('；') }}</p><p v-if="question.rationale">{{ question.rationale }}</p><ul v-if="question.scoringRubric.length"><li v-for="(rubric, rubricIndex) in question.scoringRubric" :key="rubricIndex">{{ rubric.criterion }}（{{ rubric.points }} 分）</li></ul></details>
       </article>
-      <article v-for="(question, index) in followUps" :key="question" class="question-item follow-up" :class="{ selected: selected(question) }"><div class="question-meta"><span>AI 追问建议 · {{ index + 1 }}</span><b v-if="selected(question)">已选参考</b></div><button class="question-select" type="button" :disabled="disabled" :aria-pressed="selected(question)" @click="emit('select', question, 'ai_adopted')">{{ question }}</button></article>
+      <article v-for="(question, index) in followUps" :key="question" class="question-item follow-up" :class="{ selected: selected(question) }"><div class="question-meta"><span>AI 追问建议 · {{ index + 1 }}</span><b v-if="selected(question)">{{ selectionLabel }}</b></div><button class="question-select" type="button" :disabled="disabled" :aria-pressed="selected(question)" @click="emit('select', question, 'ai_adopted')">{{ question }}</button></article>
     </section>
     <section v-for="group in groups" :id="'interview-' + group.id + '-questions'" :key="group.id" class="question-group" :class="'group-' + group.id" :data-group="group.id" :aria-label="group.title">
-      <header><h3>{{ group.title }}</h3><span>{{ group.generated ? (engine === 'local_fallback' ? '本地规则 · 5 题' : 'AI 生成 · 5 题') : '模板参考' }} · 满分 {{ group.maxScore }}</span></header><p class="group-description">{{ group.description }}</p>
+      <header><h3>{{ group.title }}</h3><span>{{ group.generated ? (hasLocalQuestions(group.id) ? '本地规则 · 5 题' : 'AI 生成 · 5 题') : '模板参考' }} · 满分 {{ group.maxScore }}</span></header><p class="group-description">{{ group.description }}</p>
       <p v-if="!group.generated" class="fallback-note">这里是原模板参考题，并非 AI 随机生成。请点击重新生成题库获取新的能力考核题。</p>
-      <p v-if="group.generated && engine === 'local_fallback'" class="fallback-note">模型生成未成功，当前为本地规则参考题，并非大模型随机结果。</p>
+      <p v-if="group.generated && hasLocalQuestions(group.id)" class="fallback-note">模型生成未成功，当前为本地规则参考题，并非大模型随机结果。</p>
       <article v-for="(dimension, index) in group.dimensions" :key="dimension.id" class="template-dimension">
         <h4>{{ index + 1 }}. {{ dimension.title }}<small>{{ dimension.maxScore }} 分</small></h4><p class="dimension-focus">考察：{{ dimension.focus }}</p>
-        <div v-for="(question, questionIndex) in dimension.questions" :key="question" class="question-item" :class="{ selected: selected(question) }"><div class="question-meta"><span>{{ group.generated ? (engine === 'local_fallback' ? '本地规则题' : 'AI 能力考核题') : dimension.questions.length > 1 ? '备选 ' + (questionIndex + 1) : '模板题' }}</span><b v-if="selected(question)">已选参考</b></div><button class="question-select" type="button" :disabled="disabled" :aria-pressed="selected(question)" @click="emit('select', question, questionSource(question))">{{ question }}</button><details v-if="modelQuestion(question)" class="question-reference" :open="Boolean(props.group)"><summary>本题生成依据与评分要点</summary><p>{{ modelQuestion(question)?.rationale }}</p><p>依据：{{ modelQuestion(question)?.groundedIn.join('；') }}</p><ul><li v-for="(rubric, rubricIndex) in modelQuestion(question)?.scoringRubric" :key="rubricIndex">{{ rubric.criterion }}（{{ rubric.points }} 分）</li></ul></details></div>
+        <div v-for="(question, questionIndex) in dimension.questions" :key="question" class="question-item" :class="{ selected: selected(question) }"><div class="question-meta"><span>{{ group.generated ? (hasLocalQuestions(group.id) ? '本地规则题' : 'AI 能力考核题') : dimension.questions.length > 1 ? '备选 ' + (questionIndex + 1) : '模板题' }}</span><b v-if="selected(question)">{{ selectionLabel }}</b></div><button class="question-select" type="button" :disabled="disabled" :aria-pressed="selected(question)" @click="emit('select', question, questionSource(question))">{{ question }}</button><details v-if="modelQuestion(question)" class="question-reference" :open="Boolean(props.group)"><summary>本题生成依据与评分要点</summary><p>{{ modelQuestion(question)?.rationale }}</p><p>依据：{{ modelQuestion(question)?.groundedIn.join('；') }}</p><ul><li v-for="(rubric, rubricIndex) in modelQuestion(question)?.scoringRubric" :key="rubricIndex">{{ rubric.criterion }}（{{ rubric.points }} 分）</li></ul></details></div>
         <details class="question-reference" :open="Boolean(props.group)"><summary>评分参考（不自动计分）</summary><p class="reference-range">{{ group.id === 'hr' ? '优秀 8 分 · 合格 6～7 分 · 待核实 ≤5 分' : group.id === 'department' ? '优秀 8～10 分 · 合格 6～7 分 · 待核实 ≤5 分；原模板每维度满分 12 分' : '优秀 17～20 分 · 合格 12～16 分 · 待核实 ≤11 分' }}</p><p><strong>优秀：</strong>{{ dimension.excellent }}</p><p><strong>合格：</strong>{{ dimension.pass }}</p><p><strong>待核实：</strong>{{ dimension.warning }}</p></details>
       </article>
     </section>
-    <article v-if="!group && unlistedCurrentQuestion" class="question-item selected current-custom-question"><div class="question-meta"><span>当前参考问题</span><b>已选参考</b></div><button class="question-select" type="button" :disabled="disabled" aria-pressed="true" @click="emit('select', currentQuestion, questionSource(currentQuestion))">{{ currentQuestion }}</button></article>
+    <article v-if="!group && unlistedCurrentQuestion" class="question-item selected current-custom-question"><div class="question-meta"><span>当前参考问题</span><b>{{ selectionLabel }}</b></div><button class="question-select" type="button" :disabled="disabled" aria-pressed="true" @click="emit('select', currentQuestion, questionSource(currentQuestion))">{{ currentQuestion }}</button></article>
   </div>
 </template>
 <style scoped>

@@ -149,7 +149,14 @@ export class QuestionSheetService {
   }
 
   async getApplicationView(applicationId: string): Promise<ApplicationQuestionSheetsView> {
-    const { sheets, reviews } = await this.repository.listForApplication(applicationId)
+    let { sheets, reviews } = await this.repository.listForApplication(applicationId)
+    let upgraded = false
+    for (const sheet of sheets) {
+      if (sheet.promptVersion === ASSESSMENT_RUBRIC_VERSION || sheet.status === 'generating' || sheet.status === 'submitted' || sheet.status === 'locked') continue
+      if (sheet.questions.some(question => question.finalScore !== null || question.finalTier !== null || question.comment !== null)) continue
+      upgraded = await this.repository.upgradeAssessmentRubric(sheet.id, this.buildQuestions(sheet.stage, sheet.sheetType), ASSESSMENT_RUBRIC_VERSION) || upgraded
+    }
+    if (upgraded) ({ sheets, reviews } = await this.repository.listForApplication(applicationId))
     const completedRecordingScores = await this.repository.listCompletedLiveRecordingScores(applicationId)
     const stages = (Object.keys(STAGE_SHEET_TYPES) as InterviewStage[]).map((stage) => {
       const submitted = sheets.filter((sheet) => sheet.stage === stage && (sheet.status === 'submitted' || sheet.status === 'locked'))

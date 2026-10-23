@@ -26,6 +26,7 @@ import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
 import OfferTable from '../components/OfferTable.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
+import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
 
 const rows = ref<OfferRow[]>([])
 const loading = ref(true)
@@ -393,6 +394,7 @@ onMounted(refresh)
   <div v-if="showDetail" class="overlay" role="presentation" @click.self="showDetail = false">
     <div class="dialog" role="dialog" aria-modal="true" style="max-width:560px">
       <h3>Offer 详情</h3>
+      <ApplicationResumeButton v-if="detail" :application-id="detail.offer.applicationId" />
       <div v-if="detail" class="detail-card" style="margin-top:12px">
         <div class="detail-grid">
           <div class="detail-item"><span>状态</span><StatusTag :status="detail.offer.status" /></div>

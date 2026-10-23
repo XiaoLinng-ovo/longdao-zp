@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { ASSESSMENT_RUBRICS, assessmentCriterion, rubricTypeForSheet, tiersForCriterion } from './question-sheet-rubrics.js'
+import { ASSESSMENT_RUBRICS, assessmentCriterion, questionMaximum, rubricTypeForSheet, tiersForCriterion } from './question-sheet-rubrics.js'
 import { aggregateQuestionSheet } from './question-sheet-service.js'
 import type { InterviewQuestionSheetRecord } from './question-sheet-repository.js'
 
@@ -12,10 +12,13 @@ describe('角色考察点标准', () => {
       assert.equal(criteria.reduce((sum, item) => sum + item.maxScore, 0), total)
       for (const criterion of criteria) {
         assert.equal(criterion.maxScore, maximum)
-        assert.ok(criterion.title && criterion.focus)
+        assert.ok(criterion.title)
+        assert.equal(Boolean(criterion.focus), group === 'hr')
         assert.equal(assessmentCriterion('rubric:' + group + ':' + criterion.id), criterion)
         const tiers = tiersForCriterion(group, criterion)
-        for (let score = 0; score <= maximum; score++) {
+        assert.equal(questionMaximum({ category: 'rubric:' + group + ':' + criterion.id, tiers }), maximum)
+        assert.equal(tiers[0]!.max, group === 'department' ? 10 : maximum)
+        for (let score = 0; score <= tiers[0]!.max; score++) {
           assert.equal(tiers.filter(tier => score >= tier.min && score <= tier.max).length, 1)
         }
         assert.ok(tiers.every(tier => tier.description.length > 0))

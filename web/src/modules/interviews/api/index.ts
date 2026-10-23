@@ -212,14 +212,22 @@ export async function deleteInterview(id: string): Promise<void> {
 }
 
 export interface GeneratedInterviewQuestion {
-  group?: 'ai' | 'hr' | 'department' | 'boss'
+  group?: InterviewQuestionGroup
   dimension?: string
+  sourceEngine?: 'llm' | 'local_fallback'
   category: 'technical' | 'behavioral' | 'experience' | 'job_specific'
   difficulty: 'easy' | 'medium' | 'hard'
   question: string
   rationale: string
   groundedIn: string[]
   scoringRubric: Array<{ criterion: string; points: number }>
+}
+
+export type InterviewQuestionGroup = 'ai' | 'hr' | 'department' | 'boss'
+
+export interface InterviewQuestionConversationMessage {
+  role: 'user' | 'assistant'
+  content: string
 }
 
 export interface InterviewQuestionSet {
@@ -230,16 +238,26 @@ export interface InterviewQuestionSet {
   applicationStatusMutation: 'none'
 }
 
+export interface InterviewQuestionRefinementResult extends InterviewQuestionSet {
+  assistantMessage?: string
+}
+
 export async function getInterviewQuestions(id: string, signal?: AbortSignal): Promise<(InterviewQuestionSet & { updatedAt: string }) | null> {
   return (await apiClient.getJson<(InterviewQuestionSet & { updatedAt: string }) | null>(`/interviews/${id}/questions`, ...(signal ? [{ signal }] : []))).data
 }
 
-export async function generateInterviewQuestions(id: string, questionCount = 10, includeCommonQuestions = true, signal?: AbortSignal): Promise<InterviewQuestionSet> {
-  return (await apiClient.postJson<InterviewQuestionSet>(`/interviews/${id}/questions`, { questionCount, includeCommonQuestions }, ...(signal ? [{ signal }] : []))).data
+export async function generateInterviewQuestions(id: string, questionCount = 10, includeCommonQuestions = true, signal?: AbortSignal, group?: InterviewQuestionGroup): Promise<InterviewQuestionSet> {
+  return (await apiClient.postJson<InterviewQuestionSet>(`/interviews/${id}/questions`, { questionCount, includeCommonQuestions, ...(group ? { group } : {}) }, ...(signal ? [{ signal }] : []))).data
 }
 
-export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string; questionQuote?: string; evidence?: string[] }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none' }
-export interface LiveInterviewSegment { audioSource?: 'microphone' | 'meeting'; id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
+export async function refineInterviewQuestionGroup(id: string, group: InterviewQuestionGroup, messages: InterviewQuestionConversationMessage[], signal?: AbortSignal, target?: { index: number; question: string }): Promise<InterviewQuestionRefinementResult> {
+  return (await apiClient.postJson<InterviewQuestionRefinementResult>(`/interviews/${id}/questions`, { refinement: { group, messages, ...(target ? { target } : {}) } }, ...(signal ? [{ signal }] : []))).data
+}
+
+export interface AnalysisSourceSegment { id: string; text: string; role: string; speakerId: string }
+export interface TranscriptRefinement { text: string; corrections: Array<{ original: string; corrected: string }>; uncertainties: string[]; editedAt?: string; editedBy?: string }
+export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string; questionQuote?: string; evidence?: string[] }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none'; transcriptRefinement?: TranscriptRefinement; sourceSegments?: AnalysisSourceSegment[] }
+export interface LiveInterviewSegment { transcriptComparison?: { streamingText: string; offlineText: string; streamingComplete: boolean; selectedSource: 'streaming' | 'offline'; startMs: number; endMs: number }; audioSource?: 'microphone' | 'meeting'; speakerConfirmed?: boolean; id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
 export interface LiveInterviewSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string; questionSheetGeneration?: { queued: boolean; reason?: string }; summaryGeneration?: { queued: boolean; reason?: string } }
 export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[] }
 export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data }
@@ -251,3 +269,4 @@ export async function endLiveInterviewSession(sessionId: string): Promise<LiveIn
 export async function updateLiveInterviewQuestion(sessionId: string, question: string, source: 'manual' | 'ai_adopted' = 'manual', segmentId?: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/question`, { question, source, ...(segmentId ? { segmentId } : {}) })).data }
 export async function correctLiveSegmentRole(segmentId: string, role: 'interviewer' | 'candidate', segmentIds: string[] = [segmentId]): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-segments/${segmentId}/role`, { role, segmentIds })).data }
 export async function analyzeLiveSegment(segmentId: string, question: string, segmentIds: string[] = [segmentId], priorContext: string[] = []): Promise<LiveAnswerAnalysis> { return (await apiClient.postJson<LiveAnswerAnalysis>(`/interview-live-segments/${segmentId}/analyze`, { question, segmentIds, priorContext })).data }
+export async function saveLiveTranscriptRefinement(segmentId: string, text: string, expectedText: string, sourceSegments: AnalysisSourceSegment[]): Promise<TranscriptRefinement> { return (await apiClient.postJson<TranscriptRefinement>(`/interview-live-segments/${segmentId}/refinement`, { text, expectedText, sourceSegments })).data }

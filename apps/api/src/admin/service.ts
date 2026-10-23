@@ -1,5 +1,5 @@
 import { EnterpriseAiStore } from '@smartrecruit-pro/enterprise-ai';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashPassword } from '../auth/password.js';
 import { readDingTalkEnvSettings, readResumeVirusScanSetting, updateDingTalkEnvSettings, updateResumeVirusScanSetting, type DingTalkEnvPatch } from './dingtalk-env-settings.js';
@@ -107,6 +107,36 @@ export interface AdminUserUpdate {
   departmentCode?: string | null;
   role?: string;
   password?: string;
+}
+
+export interface AdminUserCreate {
+  email?: string;
+  displayName?: string;
+  organizationId?: string;
+  departmentCode?: string;
+  role?: string;
+  password?: string;
+}
+
+export interface AdminUserCreateResult {
+  user: AdminUserRecord;
+  initialPassword: string;
+  generatedPassword: boolean;
+}
+
+const ACCOUNT_ROLES = new Set(['recruiter', 'hiring_manager', 'approver', 'interviewer', 'hr_admin', 'admin']);
+
+function generateAccountPassword(): string {
+  const groups = ['ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnopqrstuvwxyz', '23456789', '!@#$%*-_'];
+  const pick = (characters: string) => characters[randomInt(characters.length)]!;
+  const characters = groups.join('');
+  const password = groups.map(pick);
+  while (password.length < 16) password.push(pick(characters));
+  for (let i = password.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [password[i], password[j]] = [password[j]!, password[i]!];
+  }
+  return password.join('');
 }
 
 export interface AdminRoleUpdate {
@@ -225,6 +255,60 @@ export class AdminService {
   async listUsers(): Promise<AdminUserRecord[]> {
     const result = await this.pool.query(`${USER_SELECT} ORDER BY u.created_at DESC, u.email`);
     return result.rows.map(toUser);
+  }
+
+  async listAccountOrganizations(): Promise<Array<{ id: string; name: string }>> {
+    const result = await this.pool.query('SELECT id, name FROM organizations WHERE organization_service_available(id) ORDER BY name, id');
+    return result.rows.map(row => ({ id: String(row.id), name: String(row.name) }));
+  }
+
+  async createUser(input: AdminUserCreate, actorId: string, requestId?: string): Promise<AdminUserCreateResult> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AdminValidationError('账号信息格式无效');
+    const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+    const displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
+    const organizationId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
+    const departmentCode = typeof input.departmentCode === 'string' ? input.departmentCode.trim() : '';
+    const role = input.role ?? 'recruiter';
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) throw new AdminValidationError('请输入有效的登录邮箱');
+    if (!displayName || displayName.length > 80) throw new AdminValidationError('姓名不能为空且不能超过 80 个字符');
+    if (!UUID_PATTERN.test(organizationId)) throw new AdminValidationError('请选择有效企业');
+    if (!departmentCode || departmentCode.length > 100) throw new AdminValidationError('请选择有效部门');
+    if (!ACCOUNT_ROLES.has(role)) throw new AdminValidationError('请选择有效的业务角色，不能创建平台管理员');
+    if (input.password !== undefined && typeof input.password !== 'string') throw new AdminValidationError('密码格式无效');
+    const generatedPassword = input.password === undefined || input.password === '';
+    const initialPassword = generatedPassword ? generateAccountPassword() : input.password!;
+    if (initialPassword.length < 8 || initialPassword.length > 128 || !initialPassword.trim()) throw new AdminValidationError('密码须为 8 至 128 个字符，不能全部为空格');
+    const passwordHash = await hashPassword(initialPassword);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Lock the organization before membership insertion to serialize seat allocation.
+      const organization = await client.query('SELECT id FROM organizations WHERE id = $1 AND organization_service_available(id) FOR NO KEY UPDATE', [organizationId]);
+      if (!organization.rows[0]) throw new AdminValidationError('企业不存在或服务不可用');
+      const department = await client.query('SELECT id FROM departments WHERE code = $1 AND is_active = true FOR SHARE', [departmentCode]);
+      if (!department.rows[0]) throw new AdminValidationError('部门不存在或已停用');
+      const roleResult = await client.query('SELECT id FROM roles WHERE code = $1', [role]);
+      if (!roleResult.rows[0]) throw new AdminValidationError('业务角色不存在');
+      const existing = await client.query('SELECT id FROM users WHERE lower(email) = $1', [email]);
+      if (existing.rows[0]) throw new AdminConflictError('该邮箱已存在，请使用其他邮箱');
+      const id = randomUUID();
+      await client.query('INSERT INTO users (id, email, display_name, password_hash, department_id, is_active) VALUES ($1, $2, $3, $4, $5, true)', [id, email, displayName, passwordHash, department.rows[0].id]);
+      await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [id, roleResult.rows[0].id]);
+      await client.query("INSERT INTO organization_members (organization_id, user_id, role, business_role, department_id) VALUES ($1, $2, 'member', $3, $4)", [organizationId, id, role, department.rows[0].id]);
+      await this.appendAudit(actorId, 'admin.user.create', 'user', id, requestId, { email, organizationId, departmentCode, role, generatedPassword }, client);
+      const result = await client.query(`${USER_SELECT} WHERE u.id = $1`, [id]);
+      const user = toUser(result.rows[0]);
+      await client.query('COMMIT');
+      return { user, initialPassword, generatedPassword };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      const code = (error as { code?: string })?.code;
+      if (code === '23505') throw new AdminConflictError('该邮箱已存在，请使用其他邮箱');
+      if (code === 'P5501') throw new AdminConflictError('企业可用席位不足，请先增加席位或移除不再使用的成员');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getUser(id: string): Promise<AdminUserRecord> {
@@ -719,6 +803,11 @@ export class AdminService {
       [actorId, action, resourceType, resourceId, requestId ?? null, JSON.stringify(metadata), this.organizationId ?? null]
     );
   }
+}
+
+export class AdminConflictError extends Error {
+  readonly statusCode = 409;
+  constructor(message: string) { super(message); this.name = 'AdminConflictError'; }
 }
 
 export class AdminNotFoundError extends Error {

@@ -66,7 +66,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <dialog ref="dialog" class="resume-document-dialog" aria-labelledby="resume-document-title" @cancel.prevent="emit('close')" @click="event => { if (event.target === dialog) emit('close') }">
+  <dialog ref="dialog" class="resume-document-dialog" aria-labelledby="resume-document-title" @keydown.stop @cancel.prevent="emit('close')" @click="event => { if (event.target === dialog) emit('close') }">
     <section class="document-layout">
       <header class="document-header">
         <div class="document-heading"><h2 id="resume-document-title">原始简历</h2><p :title="document?.originalFilename || filename">{{ document?.originalFilename || filename }}</p></div>

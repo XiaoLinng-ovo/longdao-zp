@@ -160,8 +160,9 @@ async function openArrange(applicationId = '', interviewId = '') {
   showArrange.value = true
   scheduleLoading.value = true
   try {
-    const options: InterviewScheduleData = await loadInterviewScheduleData()
+    const [options, latestRows]: [InterviewScheduleData, InterviewView[]] = await Promise.all([loadInterviewScheduleData(), loadInterviews()])
     if (version !== scheduleVersion) return
+    rows.value = latestRows
     candidates.value = options.candidates
     jobs.value = options.jobs
     applications.value = options.applications

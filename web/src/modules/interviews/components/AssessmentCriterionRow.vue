@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ApiInterviewQuestion, QuestionTierName } from '../api/question-sheets'
+import { questionMaximum } from '../utils/stage-score'
 
 defineProps<{
   question: ApiInterviewQuestion
@@ -25,7 +26,7 @@ const labels = { excellent: '优秀', pass: '合格', below: '淘汰信号' }
         <h4>{{ question.question }}</h4>
         <p v-if="question.assessmentFocus">{{ question.assessmentFocus }}</p>
       </div>
-      <span class="criterion-maximum">满分 <strong>{{ Math.max(...question.tiers.map(tier => tier.max)) }}</strong> 分</span>
+      <span class="criterion-maximum">满分 <strong>{{ questionMaximum(question) }}</strong> 分</span>
     </header>
     <div class="criterion-scoring">
       <div class="criterion-tiers" role="group" :aria-label="question.question + '评分标准'">
@@ -40,7 +41,7 @@ const labels = { excellent: '优秀', pass: '合格', below: '淘汰信号' }
         <label :for="'criterion-score-' + question.id">人工得分</label>
         <div class="score-input">
           <input :id="'criterion-score-' + question.id" type="number" min="0" step="1"
-            :max="Math.max(...question.tiers.map(tier => tier.max))" :value="score" :disabled="disabled"
+            :max="questionMaximum(question)" :value="score" :disabled="disabled"
             :aria-label="question.question + '得分'" placeholder="--"
             @input="emit('scoreInput', ($event.target as HTMLInputElement).value)" @change="emit('scoreCommit')" />
           <span>分</span>
