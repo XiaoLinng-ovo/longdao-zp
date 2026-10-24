@@ -34,12 +34,14 @@ export async function probeFunAsrService(
   probeTimeoutMs = 1500,
 ): Promise<boolean> {
   try {
-    await fetchImpl(config.baseUrl, {
+    const response = await fetchImpl(config.baseUrl, {
       method: 'GET',
       headers: config.token ? { authorization: `Bearer ${config.token}` } : {},
       signal: AbortSignal.timeout(Math.max(1, Math.min(config.timeoutMs, probeTimeoutMs))),
     })
-    return true
+    // The transcribe endpoint commonly answers GET with 405. That still proves
+    // the service is reachable, while server errors mean it is not ready.
+    return response.ok || response.status === 405
   } catch {
     return false
   }

@@ -9,7 +9,8 @@ export function parseSpeakerSegment(value: unknown): SpeakerSegment | undefined 
   const text = simplifyTranscript(typeof row.text === 'string' ? row.text.trim() : typeof row.sentence === 'string' ? row.sentence.trim() : '')
   const speakerId = typeof row.speakerId === 'string' ? row.speakerId : typeof row.spk === 'string' || typeof row.spk === 'number' ? `speaker_${row.spk}` : ''
   const startMs = Number(row.startMs ?? row.start ?? 0); const endMs = Number(row.endMs ?? row.end ?? 0)
-  if (!text || !speakerId || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return undefined
+  if (!text || !speakerId || !Number.isFinite(startMs) || !Number.isFinite(endMs)
+    || startMs < 0 || endMs < startMs) return undefined
   return { id: typeof row.id === 'string' ? row.id : `${speakerId}:${startMs}`, speakerId, text, startMs, endMs,
     ...(validSpeakerEmbedding(row.speakerEmbedding) ? { speakerEmbedding: row.speakerEmbedding } : {}),
     speakerVerified: row.speakerVerified === true,

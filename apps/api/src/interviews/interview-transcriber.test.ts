@@ -5,8 +5,7 @@ import { FunAsrError } from './funasr-client.js'
 import { mapInterviewRoles } from './role-mapper.js'
 
 const primaryUrl = 'http://primary.test/transcribe'
-const fallbackUrl = 'http://fallback.test/transcribe'
-const env = { FUNASR_BASE_URL: primaryUrl, FASTER_WHISPER_BASE_URL: fallbackUrl, FASTER_WHISPER_TOKEN: 'test-token' }
+const env = { FUNASR_BASE_URL: primaryUrl }
 const audio = new Uint8Array([1, 2, 3])
 const rows = [{ speakerId: 'speaker_0', text: '我负责平台开发。', startMs: 0, endMs: 300000, speakerVerified: false, speakerMixed: true }]
 const json = (segments: unknown[]) => Response.json({ segments })
@@ -36,7 +35,7 @@ describe('FunASR-only interview transcription', () => {
     assert.equal(mapInterviewRoles(result, {})[0]?.role, 'unknown')
   })
 
-  it('does not fall back on HTTP, network or invalid response failures even when configured', async () => {
+  it('does not switch engines when FunASR is unavailable', async () => {
     for (const failure of ['http', 'network', 'payload']) {
       const calls: string[] = []
       await assert.rejects(transcribeInterviewChunk(audio, 'audio/webm;codecs=opus', env, async input => {
@@ -49,7 +48,7 @@ describe('FunASR-only interview transcription', () => {
   })
 
   it('rejects missing or invalid FunASR configuration without contacting any recognizer', async () => {
-    for (const config of [{ FASTER_WHISPER_BASE_URL: fallbackUrl }, { ...env, FUNASR_BASE_URL: 'invalid' }, { ...env, FUNASR_TIMEOUT_MS: '0' }, {}]) {
+    for (const config of [{ FUNASR_BASE_URL: 'invalid' }, { ...env, FUNASR_TIMEOUT_MS: '0' }, {}]) {
       const calls: string[] = []
       await assert.rejects(transcribeInterviewChunk(audio, 'audio/webm', config, async input => {
         calls.push(String(input)); return json(rows)

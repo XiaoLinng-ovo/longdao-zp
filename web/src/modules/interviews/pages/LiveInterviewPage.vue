@@ -93,6 +93,7 @@ const sourceSettings = ref<Record<InterviewAudioSource, InterviewAudioSourceConf
 })
 const sourceLabels: Record<InterviewAudioSource, string> = { microphone: '本机麦克风', meeting: '会议音频' }
 const activeSources = computed<InterviewAudioSource[]>(() => audioMode.value === 'meeting' ? ['microphone', 'meeting'] : ['microphone'])
+const sourceRolePresetApplied = ref(false)
 const sourceText = ref({ microphone: '', meeting: '' })
 const sourceWarnings = ref({ microphone: '', meeting: '' })
 const sourceStates = ref<Record<InterviewAudioSource, SourceStreamingState>>({ microphone: 'idle', meeting: 'idle' })
@@ -129,7 +130,7 @@ const sourceStreaming = Object.fromEntries((['microphone', 'meeting'] as const).
   onText: text => { sourceText.value[source] = text },
   onWarning: message => { sourceWarnings.value[source] = message },
 })])) as Record<InterviewAudioSource, ReturnType<typeof createSourceStreaming>>
-const externalServiceWarning = computed(() => { const unavailable = Object.entries(externalServices.value).filter(([key, value]) => key !== 'fasterWhisper' && value === 'unavailable').map(([key]) => key); if (!unavailable.length) return ''; const labels: Record<string, string> = { funasr: '语音转写', llm: 'AI 回答分析', ocr: '简历 OCR 解析' }; return `外部服务提示：${unavailable.map(key => labels[key] ?? key).join('、')}不可用或未配置；录音采集不受影响，待处理音频将缓存。` })
+const externalServiceWarning = computed(() => { const unavailable = Object.entries(externalServices.value).filter(([, value]) => value === 'unavailable').map(([key]) => key); if (!unavailable.length) return ''; const labels: Record<string, string> = { funasr: '语音转写', llm: 'AI 回答分析', ocr: '简历 OCR 解析' }; return `外部服务提示：${unavailable.map(key => labels[key] ?? key).join('、')}不可用或未配置；录音采集不受影响，待处理音频将缓存。` })
 let recorder: SourceRecorderGroup | undefined
 
 
@@ -659,10 +660,23 @@ function beginRecordingClock() {
   recordingStartedAt = performance.now() - recordingNowMs.value
   timer = setInterval(() => { recordingNowMs.value = Math.round(performance.now() - recordingStartedAt); elapsedSeconds.value = Math.floor(recordingNowMs.value / 1000) }, 1000)
 }
+function applyStableSourcePreset() {
+  if (audioMode.value !== 'meeting' || sourceRolePresetApplied.value) return
+  const microphone = sourceSettings.value.microphone
+  const meeting = sourceSettings.value.meeting
+  if (microphone.role === 'unknown' && meeting.role === 'unknown') {
+    sourceSettings.value = {
+      microphone: { ...microphone, role: 'interviewer', multipleSpeakers: false },
+      meeting: { ...meeting, role: 'candidate', multipleSpeakers: false },
+    }
+  }
+  sourceRolePresetApplied.value = true
+}
 async function start() {
   if (!detail.value || !recordingConsent.value || ['starting', 'recording', 'stopping', 'completed'].includes(status.value)) return
   const version = ++captureVersion
   error.value = ''; audioWarning.value = ''; status.value = 'starting'
+  applyStableSourcePreset()
   clearRecordingTimers()
   stopStreamingAudio()
   releaseAudioCapture()
@@ -931,6 +945,7 @@ onUnmounted(() => {
             </select></label>
             <label class="source-multiple"><input v-model="sourceSettings[source].multipleSpeakers" type="checkbox" :aria-label="sourceLabels[source] + '包含多人'" :disabled="audioSettingsLocked">该路包含多人</label>
             <small v-if="sourceSettings[source].multipleSpeakers && sourceSettings[source].role !== 'unknown'" class="source-multiple">多人音轨需逐人确认角色；仅一人时请取消勾选。</small>
+            <small v-if="audioMode === 'meeting' && !sourceRolePresetApplied" class="source-multiple">双路采集开始时默认按本机为面试官、会议音频为候选人；暂停后可调整。</small>
           </div>
         </div>
         <div class="audio-source-status" aria-live="polite">

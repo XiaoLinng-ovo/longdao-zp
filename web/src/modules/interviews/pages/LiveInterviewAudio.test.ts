@@ -1005,7 +1005,7 @@ describe('streaming reconnection lifecycle', () => {
     expect(vi.mocked(uploadLiveInterviewChunk).mock.calls[0]![6]?.id).toBe('meeting')
     mic.message({ type: 'final', text: '本机的完整回答' }); await flush()
     for (const call of vi.mocked(uploadLiveInterviewChunk).mock.calls) {
-      expect(call[5]?.audioSource).toBe(call[6]?.id); expect(call[6]?.role).toBe('unknown'); expect(call[7]).toBe(15000)
+      expect(call[5]?.audioSource).toBe(call[6]?.id); expect(call[6]?.role).toBe(call[6]?.id === 'microphone' ? 'interviewer' : 'candidate'); expect(call[7]).toBe(15000)
     }
     const row = (id: string, audioSource: 'microphone' | 'meeting', startMs: number, endMs: number, text: string) => ({ id, sessionId: 'session-1', speakerId: audioSource + ':one', audioSource, startMs, endMs, text, role: 'unknown' as const, confidence: .35, status: 'transcribed' })
     uploads.meeting.resolve([row('meeting-row', 'meeting', 250, 3000, '会议的插话提问')]); await flush()
@@ -1031,7 +1031,7 @@ describe('streaming reconnection lifecycle', () => {
   it('snapshots explicit role mappings per chunk and allows changing them only while paused', async () => {
     const { mic, meeting } = await dualSources()
     const role = root!.querySelector<HTMLSelectElement>('[aria-label="本机麦克风角色"]')!
-    expect(role.value).toBe('unknown'); expect(role.disabled).toBe(true)
+    expect(role.value).toBe('interviewer'); expect(role.disabled).toBe(true)
     await tick(1000); button('暂停').click(); await flush()
     mic.message({ type: 'final', text: '' }); meeting.message({ type: 'final', text: '' }); await flush()
     expect(role.disabled).toBe(false)
@@ -1040,7 +1040,7 @@ describe('streaming reconnection lifecycle', () => {
     button('继续').click(); await flush(); await tick(1000); button('暂停').click(); await flush()
     mic.message({ type: 'final', text: '' }); meeting.message({ type: 'final', text: '' }); await flush()
     const micCalls = vi.mocked(uploadLiveInterviewChunk).mock.calls.filter(call => call[6]?.id === 'microphone')
-    expect(micCalls.map(call => call[6])).toEqual([{ id: 'microphone', role: 'unknown', multipleSpeakers: true }, { id: 'microphone', role: 'candidate', multipleSpeakers: false }])
+    expect(micCalls.map(call => call[6])).toEqual([{ id: 'microphone', role: 'interviewer', multipleSpeakers: false }, { id: 'microphone', role: 'candidate', multipleSpeakers: true }])
     expect(micCalls.map(call => [call[3], call[7]])).toEqual([[0, 1000], [1000, 2000]])
   })
   it('continues saving new meeting chunks while the microphone upload is awaiting manual retry', async () => {
@@ -1659,23 +1659,5 @@ describe('面试题对话恢复', () => {
     expect(messages.reduce((size, message) => size + message.content.length, 0)).toBeLessThanOrEqual(6000)
     expect(messages.at(-1)?.content).toContain('14')
     expect(root!.querySelectorAll('.conversation-message.user')).toHaveLength(15)
-  })
-})
-
-
-describe('transcription fallback status', () => {
-  it('does not advertise the disabled faster-whisper fallback', async () => {
-    vi.mocked(apiClient.getJson).mockImplementation(async path => ({ data: path === '/candidates' ? [] : path === '/jobs' ? [] : { checks: { externalServices: { funasr: 'unavailable', fasterWhisper: 'ok' } } } }) as never)
-    await mount()
-    expect(root!.textContent).not.toContain('正在使用后备分段转写')
-    expect(root!.textContent).toContain('转写服务暂不可用')
-    await start()
-    expect(createInterviewAudioCapture).toHaveBeenCalled()
-  })
-  it('does not warn about an optional fallback that is not configured', async () => {
-    vi.mocked(apiClient.getJson).mockImplementation(async path => ({ data: path === '/candidates' ? [] : path === '/jobs' ? [] : { checks: { externalServices: { funasr: 'ok', fasterWhisper: 'not_configured' } } } }) as never)
-    await mount()
-    expect(root!.textContent).not.toContain('后备语音转写不可用')
-    expect(root!.textContent).not.toContain('fasterWhisper')
   })
 })

@@ -34,9 +34,10 @@ export function createSourceRecorderGroup(tracks: InterviewAudioTrack[], options
     },
   }
   try {
+    const groupStart = Math.round(options.now())
     for (const track of tracks) {
       const recorder = new MediaRecorder(track.stream)
-      const row = { source: track.source, recorder, start: Math.round(options.now()), end: undefined as number | undefined }
+      const row = { source: track.source, recorder, start: groupStart, end: undefined as number | undefined }
       recorder.ondataavailable = event => {
         if (!stopping) group.stop()
         boundary(row, Math.round(options.now()))

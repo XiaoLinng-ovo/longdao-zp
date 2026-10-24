@@ -40,3 +40,39 @@ it('does not resume PCM when a ready frame arrives between stopping one chunk an
   expect(Socket.instance.send).toHaveBeenCalledOnce()
 })
 
+it('keeps resampling phase across high-rate input callbacks', async () => {
+  class Socket extends EventTarget {
+    static OPEN = 1; static CLOSING = 2
+    static instance: Socket
+    readyState = 0; bufferedAmount = 0
+    onmessage?: (event: { data: string }) => void
+    sent: ArrayBuffer[] = []
+    send = vi.fn((value: ArrayBuffer) => { this.sent.push(value) })
+    close() { this.readyState = 3 }
+    constructor() { super(); Socket.instance = this }
+  }
+  const processor = { connect: vi.fn(), disconnect: vi.fn(), onaudioprocess: undefined as ((event: { inputBuffer: { getChannelData: () => Float32Array } }) => void) | undefined }
+  const node = () => ({ connect: vi.fn(), disconnect: vi.fn(), gain: { value: 0 } })
+  vi.stubGlobal('WebSocket', Socket)
+  vi.stubGlobal('AudioContext', class {
+    state = 'running'; sampleRate = 48000; destination = {}
+    resume = vi.fn(async () => undefined); close = vi.fn(async () => undefined)
+    createMediaStreamSource = node; createGain = node; createScriptProcessor = () => processor
+  })
+  const channel = createSourceStreaming({ isRecording: () => true, onState: vi.fn(), onText: vi.fn(), onWarning: vi.fn() })
+  channels.push(channel)
+  channel.start({} as MediaStream)
+  Socket.instance.readyState = Socket.OPEN; Socket.instance.dispatchEvent(new Event('open'))
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+  expect(processor.onaudioprocess).toBeTypeOf('function')
+  const sendPcm = (length: number) => processor.onaudioprocess!({ inputBuffer: { getChannelData: () => new Float32Array(length) } })
+  Socket.instance.onmessage!({ data: JSON.stringify({ type: 'status', status: 'ready' }) })
+  sendPcm(480)
+  sendPcm(480)
+  const sampleCount = Socket.instance.sent.reduce((total, bytes) => total + bytes.byteLength / 2, 0)
+  // 960 samples at 48 kHz produce 320 samples at 16 kHz, with at most one
+  // sample held back for interpolation at the end of the stream.
+  expect(sampleCount).toBeGreaterThanOrEqual(319)
+  expect(sampleCount).toBeLessThanOrEqual(320)
+})
+

@@ -14,6 +14,13 @@ describe('FunASR client', () => {
     await assert.rejects(client.transcribe(new Uint8Array([1])), (error: unknown) => error instanceof FunAsrError && error.code === 'INVALID_RESPONSE')
   })
 
+  it('rejects segments with negative acoustic timestamps', async () => {
+    const client = createFunAsrClient({ baseUrl: 'http://asr.local', timeoutMs: 1000 }, async () => new Response(JSON.stringify({ segments: [
+      { spk: 0, text: '越界片段', start: -100, end: 900 },
+    ] })))
+    await assert.rejects(client.transcribe(new Uint8Array([1])), (error: unknown) => error instanceof FunAsrError && error.code === 'INVALID_RESPONSE')
+  })
+
   it('probes network reachability without requiring a successful HTTP method', async () => {
     let requested = ''
     const reachable = await probeFunAsrService(
@@ -25,6 +32,12 @@ describe('FunASR client', () => {
     )
     assert.equal(reachable, true)
     assert.equal(requested, 'http://asr.local/transcribe')
+
+    const unhealthy = await probeFunAsrService(
+      { baseUrl: 'http://asr.local/transcribe', timeoutMs: 1000 },
+      async () => new Response('', { status: 503 }),
+    )
+    assert.equal(unhealthy, false)
 
     const unreachable = await probeFunAsrService(
       { baseUrl: 'http://asr.local/transcribe', timeoutMs: 1000 },

@@ -73,11 +73,11 @@ describe('streaming transcript preservation', () => {
     assert.equal(result[2]?.text, '也承担测试。')
     assert.equal(result[2]?.speakerVerified, false)
   })
-  it('keeps one complete stream instead of duplicating recognition disagreements', () => {
+  it('keeps the complete offline turn when it has comparable coverage', () => {
     const rows = [sentence('我负责平台开发。')]
     const result = reconcileTranscript(rows, { text: '我负责平台的开发。', endMs: 15000, complete: true }, 0)
-    assert.deepEqual(result.map(row => row.text), ['我负责平台的开发。'])
-    assert.equal(result[0]?.speakerVerified, false)
+    assert.deepEqual(result.map(row => row.text), ['我负责平台开发。'])
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
   })
   it('does not interleave two divergent versions of the same audio', () => {
     const rows = [sentence('我负责平台开发和测试。')]

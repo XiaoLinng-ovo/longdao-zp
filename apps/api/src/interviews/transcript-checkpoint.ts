@@ -47,6 +47,7 @@ export function reconcileTranscript(segments: SpeakerSegment[], checkpoint: Tran
   const duration = Math.max(0, checkpoint.endMs - offsetMs)
   const ordered = [...segments].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
   const offline = content(ordered.map(row => row.text).join(''))
+  const offlineLikelyComplete = Boolean(offline) && offline.length >= Math.max(4, Math.floor(streamed.length * 0.75))
   const recovery = (text: string, startMs: number, endMs: number, index = 0): SpeakerSegment => ({
     id: `stream:${offsetMs}:${index}`, speakerId: `stream_${offsetMs}`, text,
     // Bounds come from the audio chunk or adjacent acoustic turns, never guessed word times.
@@ -59,7 +60,12 @@ export function reconcileTranscript(segments: SpeakerSegment[], checkpoint: Tran
       streamingComplete: checkpoint.complete, selectedSource, startMs: offsetMs, endMs: checkpoint.endMs,
     } }, ...rows.slice(1)]
   }
-  const whole = () => withComparison([recovery(checkpoint.text.trim(), 0, duration)], 'streaming')
+  // A completed streaming checkpoint is only a preview. If the offline decoder
+  // produced valid timed turns, prefer it when the two recognizers disagree.
+  // Keep the stream as a recovery path for incomplete or unusable acoustic output.
+  const whole = () => checkpoint.complete && chronological && ordered.length && offlineLikelyComplete
+    ? withComparison(ordered, 'offline')
+    : withComparison([recovery(checkpoint.text.trim(), 0, duration)], 'streaming')
   const chronological = ordered.every((row, index) => row.startMs >= 0 && row.endMs <= duration
     && row.endMs >= row.startMs && (!index || row.startMs >= ordered[index - 1]!.endMs))
   // A longer result is useful only if it actually contains the preview. Length alone

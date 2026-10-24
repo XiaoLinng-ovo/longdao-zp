@@ -225,22 +225,6 @@ function localFunAsrEndpoint(env) {
   return undefined
 }
 
-function localFasterWhisperEndpoint(env) {
-  const configured = env.get('FASTER_WHISPER_BASE_URL')?.trim()
-  if (!configured) return undefined
-  try {
-    const endpoint = new URL(configured)
-    const localHost = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(endpoint.hostname)
-    const port = Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80))
-    if (localHost && port === 10096 && endpoint.pathname.replace(/\/$/u, '') === '/transcribe') {
-      return 'http://127.0.0.1:10096/health'
-    }
-  } catch {
-    // Invalid URLs are reported by the API configuration/readiness checks.
-  }
-  return undefined
-}
-
 async function isExpectedFunAsr(url) {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
@@ -366,28 +350,6 @@ async function main() {
     log('FunASR points to a non-local service; local FunASR startup is not needed')
   }
 
-  const fasterWhisperHealthUrl = localFasterWhisperEndpoint(env)
-  const fasterWhisperHeaders = env.get('FASTER_WHISPER_TOKEN')?.trim()
-    ? { authorization: `Bearer ${env.get('FASTER_WHISPER_TOKEN').trim()}` }
-    : {}
-  const fasterWhisperScript = resolve(root, 'faster-whisper-service', 'start-faster-whisper.ps1')
-  let fasterWhisperAlreadyRunning = false
-  let fasterWhisperShouldStart = false
-  if (fasterWhisperHealthUrl) {
-    if (await isExpectedJsonService(fasterWhisperHealthUrl, 'faster-whisper', fasterWhisperHeaders)) {
-      fasterWhisperAlreadyRunning = true
-      log('faster-whisper is already running on port 10096')
-    } else if (await isPortOpen(10096)) {
-      warn('Port 10096 is occupied by another service; skipping optional local faster-whisper startup')
-    } else if (!existsSync(fasterWhisperScript) || !existsSync(resolve(root, 'faster-whisper-service', '.venv', 'Scripts', 'python.exe'))) {
-      warn('Local faster-whisper is configured, but its startup script or Python environment is missing; skipping optional startup')
-    } else {
-      fasterWhisperShouldStart = true
-    }
-  } else if (env.get('FASTER_WHISPER_BASE_URL')?.trim()) {
-    log('faster-whisper points to a non-local service; local faster-whisper startup is not needed')
-  }
-
   const components = [
     {
       name: 'API',
@@ -426,13 +388,6 @@ async function main() {
       command: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\start-funasr.ps1`,
       alreadyRunning: funAsrAlreadyRunning,
     }] : []),
-    ...(fasterWhisperShouldStart ? [{
-      name: 'faster-whisper',
-      title: 'SmartRecruit faster-whisper',
-      cwd: resolve(root, 'faster-whisper-service'),
-      command: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\start-faster-whisper.ps1`,
-      alreadyRunning: fasterWhisperAlreadyRunning,
-    }] : []),
   ]
 
   for (const component of components) {
@@ -449,13 +404,12 @@ async function main() {
     ['Worker', `http://127.0.0.1:${workerPort.port}/ready`, 30_000, async (response) => (await response.json()).service === 'smartrecruit-pro-worker'],
     ['Web', `http://127.0.0.1:${webPort.port}/`, 30_000, async (response) => (await response.text()).includes('龙道招聘系统')],
     ...(funAsrShouldStart ? [['FunASR', funAsrHealthUrl, 60_000, async (response) => (await response.json()).service === 'funasr']] : []),
-    ...(fasterWhisperShouldStart ? [['faster-whisper', fasterWhisperHealthUrl, 30_000, async (response) => (await response.json()).service === 'faster-whisper', fasterWhisperHeaders]] : []),
   ]
   for (const [name, url, timeoutMs, verify, headers] of checks) {
     const ready = await waitForHttp(url, timeoutMs, verify, headers)
     if (ready) log(`${name} is ready: ${url}`)
     else {
-      if (name !== 'FunASR' && name !== 'faster-whisper') startupFailed = true
+      if (name !== 'FunASR') startupFailed = true
       warn(`${name} did not become ready within ${Math.round(timeoutMs / 1000)} seconds: ${url}`)
     }
   }
@@ -469,10 +423,6 @@ async function main() {
   if (funAsrHealthUrl && (funAsrAlreadyRunning || funAsrShouldStart)) {
     log('FunASR transcription is available; model weights load on the first transcription request')
   }
-  if (fasterWhisperHealthUrl && (fasterWhisperAlreadyRunning || fasterWhisperShouldStart)) {
-    log('faster-whisper fallback is available; model weights load on the first fallback request')
-  }
-
   openUrl(`http://127.0.0.1:${webPort.port}`)
   log('Startup request complete. Keep the three service windows open.')
 }

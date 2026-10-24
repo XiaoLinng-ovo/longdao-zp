@@ -36,6 +36,19 @@ describe('source recording clock', () => {
     expect(stopped).toHaveBeenCalledOnce()
     group.stop(); expect(boundaries).toHaveLength(2)
   })
+
+  it('uses one start boundary for all independent sources', () => {
+    vi.stubGlobal('MediaRecorder', Recorder)
+    let now = 500
+    const boundaries: SourceAudioBoundary[] = []
+    createSourceRecorderGroup(tracks, {
+      now: () => now++, onBoundary: row => boundaries.push(row), onChunk: vi.fn(), onStopped: vi.fn(), onError: vi.fn(),
+    })
+    expect(boundaries).toEqual([])
+    now = 3500
+    Recorder.instances.forEach(recorder => recorder.deliver())
+    expect(boundaries.map(row => row.offsetMs)).toEqual([500, 500])
+  })
   it('finishes the other source if one recorder stops spontaneously', async () => {
     vi.stubGlobal('MediaRecorder', Recorder)
     const boundary = vi.fn(), stopped = vi.fn()

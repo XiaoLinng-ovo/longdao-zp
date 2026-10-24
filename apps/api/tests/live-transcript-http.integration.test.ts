@@ -14,7 +14,7 @@ import type { InterviewAnswerAnalysis, InterviewAnswerAnalysisInput } from '../s
 import { EnterpriseAiStore } from '@smartrecruit-pro/enterprise-ai'
 
 const envKeys = ['NODE_ENV', 'AUTH_STORE_PATH', 'REQUIRE_CSRF', 'ALLOWED_ORIGINS', 'ALLOW_DEV_BOOTSTRAP_AUTH',
-  'FUNASR_BASE_URL', 'FUNASR_TIMEOUT_MS', 'FASTER_WHISPER_BASE_URL', 'FASTER_WHISPER_TIMEOUT_MS', 'FASTER_WHISPER_TOKEN', 'S3_ENDPOINT', 'RECRUITING_QUARANTINE_ROOT',
+  'FUNASR_BASE_URL', 'FUNASR_TIMEOUT_MS', 'S3_ENDPOINT', 'RECRUITING_QUARANTINE_ROOT',
   'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_TIMEOUT_MS'] as const
 const previousEnv = new Map(envKeys.map(key => [key, process.env[key]]))
 const origin = 'https://transcript.example.test'
@@ -22,7 +22,7 @@ const fullText = 'Please describe your project. I developed the platform and com
 let directory: string, baseUrl: string, interviewId: string
 let server: Server | undefined, asr: Server | undefined
 let credentials: { session: string; csrf: string }
-let upstreamStatus = 200, upstreamCalls = 0, fallbackCalls = 0
+let upstreamStatus = 200, upstreamCalls = 0
 let upstreamRows: unknown[] = []
 const modelInputs: InterviewAnswerAnalysisInput[] = []
 const analyses: Array<{ question: string; analysis: InterviewAnswerAnalysis }> = []
@@ -52,8 +52,6 @@ const segmentPath = '/interview-live-sessions/checkpoint-session/segments'
 
 before(async () => {
   process.env.NODE_ENV = 'test'
-  process.env.FASTER_WHISPER_BASE_URL = ''
-  process.env.FASTER_WHISPER_TOKEN = ''
   process.env.REQUIRE_CSRF = 'true'
   process.env.ALLOWED_ORIGINS = origin
   process.env.ALLOW_DEV_BOOTSTRAP_AUTH = 'false'
@@ -78,13 +76,6 @@ before(async () => {
       return
     }
     for await (const _ of req) { /* Consume the uploaded audio. */ }
-    if (req.url === '/fallback') {
-      fallbackCalls++
-      assert.equal(req.headers.authorization, 'Bearer fallback-test-token')
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ segments: [{ speakerId: 'speaker_0', text: fullText, startMs: 0, endMs: 301000, speakerVerified: false, speakerMixed: true }] }))
-      return
-    }
     upstreamCalls++
     res.writeHead(upstreamStatus, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ segments: upstreamRows }))
@@ -415,43 +406,6 @@ test('a reference alone cannot create zero scores when no actual question was ca
 })
 
 
-test('FunASR failure never calls configured faster-whisper and preserves streaming recovery', async () => {
-  process.env.FASTER_WHISPER_BASE_URL = `${process.env.FUNASR_BASE_URL}/fallback`
-  process.env.FASTER_WHISPER_TOKEN = 'fallback-test-token'
-  upstreamStatus = 503
-  try {
-    const callsBefore = fallbackCalls
-    const savedBefore = saved.length
-    const { streamingTranscript: _, ...audioOnly } = payload()
-    const response = await send('POST', segmentPath, audioOnly)
-    assert.equal(response.status, 502, JSON.stringify(response.body))
-    assert.equal(response.body.error.code, 'FUNASR_UPSTREAM')
-    assert.equal(fallbackCalls, callsBefore)
-    assert.equal(saved.length, savedBefore)
-    assert.ok(recordings.size > 0)
-    const recovered = await send('POST', segmentPath, payload())
-    assert.equal(recovered.status, 201, JSON.stringify(recovered.body))
-    assert.equal(fallbackCalls, callsBefore)
-    const row = recovered.body.data[0]
-    assert.equal(row.text, fullText)
-    assert.deepEqual([row.startMs, row.endMs], [15000, 30000])
-    assert.equal(row.role, 'unknown')
-    assert.ok(row.confidence < .6)
-    assert.ok(saved.find(segment => segment.id === row.id))
-    assert.equal((await send('POST', `/interview-live-segments/${row.id}/analyze`)).status, 409)
-  } finally {
-    process.env.FASTER_WHISPER_BASE_URL = ''
-    process.env.FASTER_WHISPER_TOKEN = ''
-    upstreamStatus = 200
-  }
-})
-
-test('optional unconfigured fallback is reported separately from failed services', async () => {
-  const response = await send('GET', '/ready')
-  assert.equal(response.status, 200)
-  assert.equal(response.body.data.checks.externalServices.fasterWhisper, 'not_configured')
-})
-
 test('separate audio sources persist independent originals and keep overlapping real timestamps on reload', async () => {
   upstreamRows = [{ text: '我完成了测试。', speakerId: 'speaker_0', startMs: 100, endMs: 2200, speakerVerified: true }]
   const before = recordings.size
@@ -476,9 +430,8 @@ test('separate audio sources persist independent originals and keep overlapping 
   assert.ok(newRows.every((row: InterviewAudioRecording) => row.endMs === 101000 && row.sourceMultipleSpeakers === false))
 })
 
-test('source recovery retains provenance without inventing a role and never calls faster-whisper', async () => {
+test('source recovery retains provenance without inventing a role', async () => {
   upstreamStatus = 503
-  const before = fallbackCalls
   try {
     const response = await send('POST', segmentPath, { ...payload(), chunkEndMs: 30000,
       audioSource: { id: 'meeting', role: 'candidate', multipleSpeakers: true },
@@ -488,7 +441,6 @@ test('source recovery retains provenance without inventing a role and never call
     assert.ok(response.body.data.length)
     assert.ok(response.body.data.every((row: LiveSegment) => row.audioSource === 'meeting' && row.role === 'unknown'))
     assert.equal(response.body.data.map((row: LiveSegment) => row.text).join(''), fullText)
-    assert.equal(fallbackCalls, before)
   } finally { upstreamStatus = 200 }
 })
 

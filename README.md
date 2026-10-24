@@ -54,7 +54,7 @@ Windows 源码环境可以直接双击仓库根目录的 `一键启动.bat`，�
 .\start-all.bat
 ```
 
-该脚本会检查并尝试启动本机 PostgreSQL、准备 `.env`、启动 API/Worker/Web，然后打开浏览器。若 `.env` 将 `FUNASR_BASE_URL` 配置为本机 `http://127.0.0.1:10095/transcribe`，一键启动也会自动启动本地 FunASR；如果服务已运行则复用。若同时配置本机 `FASTER_WHISPER_BASE_URL=http://127.0.0.1:10096/transcribe`，一键启动也会按需启动 faster-whisper 后备服务。两个服务都采用懒加载，模型在第一次实际转写时加载。源码模式下如果未配置 MinIO，会自动使用本地 `data/resumes/quarantine` 目录保存简历文件。
+该脚本会检查并尝试启动本机 PostgreSQL、准备 `.env`、启动 API/Worker/Web，然后打开浏览器。若 `.env` 将 `FUNASR_BASE_URL` 配置为本机 `http://127.0.0.1:10095/transcribe`，一键启动也会自动启动本地 FunASR；如果服务已运行则复用。FunASR 模型采用懒加载，在第一次实际转写时加载。源码模式下如果未配置 MinIO，会自动使用本地 `data/resumes/quarantine` 目录保存简历文件。
 如果 `3100`、`4001` 或 `5174` 已被其他项目占用，启动脚本会校验服务身份，并为龙道招聘系统自动选择后续可用端口，避免误打开其他应用。
 
 ## Docker 部署
@@ -104,20 +104,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ### 面试语音转写
 
 - `FUNASR_BASE_URL`、`FUNASR_TIMEOUT_MS`、`FUNASR_TOKEN`：面试实时 WebSocket 和音频分段的主转写服务配置。实时页面仍由 FunASR WebSocket 提供流式结果。
-- `FASTER_WHISPER_BASE_URL`、`FASTER_WHISPER_TIMEOUT_MS`、`FASTER_WHISPER_TOKEN`：可选的本地 faster-whisper HTTP 后备服务。API 先调用 FunASR；FunASR 未配置或分段请求失败时才调用 faster-whisper。
-
-安装并启动后备服务：
-
-```powershell
-Set-Location faster-whisper-service
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\start-faster-whisper.ps1
-```
-
-然后在根目录 `.env` 中配置 `FASTER_WHISPER_BASE_URL=http://127.0.0.1:10096/transcribe`，重启 API。`pnpm run start:all` 在发现该地址为本机服务且虚拟环境已存在时会自动启动它；未配置时不会增加任何启动步骤。faster-whisper 首次实际转写会下载/加载模型，默认模型为 `small`，可用 `FASTER_WHISPER_MODEL`、`FASTER_WHISPER_DEVICE`、`FASTER_WHISPER_COMPUTE_TYPE`、`FASTER_WHISPER_LANGUAGE` 调整。本机已验证 `base + cpu + int8` 的后备组合，详细参数和验证命令见 `faster-whisper-service/README.md`。
-
-后备服务不做说话人分离，返回的音频片段会标记为 `speaker_0`、未验证且可能混合说话人。因此它适合作为 FunASR 故障回退，不会替代当前实时转录和已有面试评分、角色确认逻辑。
+FunASR 是面试实时流式识别和音频分段识别的唯一语音识别服务。服务不可用时，原始录音仍会保存并进入已有重试/缓存流程，不会切换到另一套识别模型。
 
 ### 招聘渠道接入
 
@@ -154,5 +141,5 @@ OPENAI_TIMEOUT_MS=30000
 - 上传简历失败并提示对象存储不可用：确认 MinIO 容器在运行（`docker compose -f deploy/docker-compose.yml up -d minio`）且 `S3_ENDPOINT` 指向的地址可达；`.\start-local.ps1` 会在启动 API 前自动完成这步检查。
 - 简历库没有数据：确认 API 与前端使用同一个 PostgreSQL 数据库，且 Web 的 `/api` 代理指向实际 API；不要只启动 Web。
 - API 返回 502：通常是代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/api/v1/health`，再检查 Web 的 `VITE_API_PROXY_TARGET`。
-- 面试分段转写失败：先检查 `http://127.0.0.1:3100/api/v1/ready` 中 `externalServices.funasr` 和 `externalServices.fasterWhisper`；后备服务未配置时，FunASR 仍是唯一分段转写来源。
+- 面试分段转写失败：先检查 `http://127.0.0.1:3100/api/v1/ready` 中 `externalServices.funasr`；原始录音会保留，确认 FunASR 恢复后再重试。
 - 数据库连接失败：检查 PostgreSQL 是否启动、端口和账号是否正确；可先执行 `node scripts/check-postgres-ready.mjs`。

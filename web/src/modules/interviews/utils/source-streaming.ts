@@ -26,6 +26,9 @@ export function createSourceStreaming(options: {
   let audioWorklet: AudioWorkletNode | undefined
   let audioMuteGain: GainNode | undefined
   let streamAudioReady = false
+  let resampleBuffer: number[] = []
+  let resamplePosition = 0
+  let resampleRate = 0
   let paused = false
   let resolveStreamFinal: (() => void) | undefined
   let streamRetryTimer: ReturnType<typeof setTimeout> | undefined
@@ -36,17 +39,31 @@ export function createSourceStreaming(options: {
 
 function appendStreamingPcm(samples: Float32Array, inputRate: number): void {
   if (!streamAudioReady || streamSocket?.readyState !== WebSocket.OPEN) return
-  const outputLength = Math.floor(samples.length * 16000 / inputRate)
-  if (!outputLength) return
-  const pcm = new Int16Array(outputLength)
-  const ratio = inputRate / 16000
-  for (let index = 0; index < outputLength; index++) {
-    const position = index * ratio
-    const left = Math.floor(position)
-    const fraction = position - left
-    const sample = (samples[left] ?? 0) * (1 - fraction) + (samples[Math.min(left + 1, samples.length - 1)] ?? 0) * fraction
-    pcm[index] = Math.max(-1, Math.min(1, sample)) * (sample < 0 ? 32768 : 32767)
+  if (!Number.isFinite(inputRate) || inputRate <= 0) return
+  if (resampleRate && resampleRate !== inputRate) {
+    resampleBuffer = []
+    resamplePosition = 0
   }
+  resampleRate = inputRate
+  for (const sample of samples) resampleBuffer.push(sample)
+  const ratio = inputRate / 16000
+  const output: number[] = []
+  while (resamplePosition + 1 < resampleBuffer.length) {
+    const left = Math.floor(resamplePosition)
+    const fraction = resamplePosition - left
+    output.push(resampleBuffer[left]! * (1 - fraction) + resampleBuffer[left + 1]! * fraction)
+    resamplePosition += ratio
+  }
+  // Keep one source sample as interpolation look-ahead. The phase may point
+  // past that retained sample until the next callback supplies more input.
+  const consumed = Math.min(Math.max(0, Math.floor(resamplePosition)), Math.max(0, resampleBuffer.length - 1))
+  if (consumed) {
+    resampleBuffer = resampleBuffer.slice(consumed)
+    resamplePosition -= consumed
+  }
+  if (!output.length) return
+  const pcm = new Int16Array(output.length)
+  output.forEach((sample, index) => { pcm[index] = Math.max(-1, Math.min(1, sample)) * (sample < 0 ? 32768 : 32767) })
   if (streamSocket.bufferedAmount > 1_920_000) {
     failStreamingAudio(streamingVersion, '实时流式发送积压，录音及分段保存继续，将自动重连。')
     return
@@ -59,6 +76,9 @@ function stopStreamingAudio(): void {
   streamingVersion++
   streamingTranscript.disconnect()
   streamAudioReady = false
+  resampleBuffer = []
+  resamplePosition = 0
+  resampleRate = 0
   if (streamRetryTimer) clearTimeout(streamRetryTimer)
   streamRetryTimer = undefined
   if (streamReadyTimer) clearTimeout(streamReadyTimer)

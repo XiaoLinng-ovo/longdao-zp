@@ -42,7 +42,6 @@ import { selectUtteranceSegments } from './interviews/utterance-segments.js';
 import { createJobSpecGenerator, generateLocalJobSpec, JobSpecGenerationError, loadJobSpecGeneratorConfig } from './recruiting/job-spec-generator.js';
 import { createJobDescriptionGenerator, generateLocalJobDescription, JobDescriptionGenerationError, loadJobDescriptionGeneratorConfig } from './recruiting/job-description-generator.js';
 import { FunAsrError, loadFunAsrConfig, probeFunAsrService } from './interviews/funasr-client.js';
-import { FasterWhisperError, loadFasterWhisperConfig, probeFasterWhisperService } from './interviews/faster-whisper-client.js';
 import { transcribeInterviewChunk } from './interviews/interview-transcriber.js';
 import { mapInterviewRoles, scopeSpeakersToChunk, stableRoleSpeakerId, type ConfirmedSpeakerRoles, type SpeakerSegment } from './interviews/role-mapper.js';
 import { SessionVoiceprintTracker } from './interviews/voiceprint-tracker.js';
@@ -279,15 +278,6 @@ const routeMiddleware: Middleware = async (context, next) => {
         return 'unavailable'
       }
     })()
-    const fasterWhisperStatus = await (async () => {
-      if (!process.env.FASTER_WHISPER_BASE_URL?.trim()) return 'not_configured'
-      try {
-        const config = loadFasterWhisperConfig()
-        return await probeFasterWhisperService(config) ? 'ok' : 'unavailable'
-      } catch {
-        return 'unavailable'
-      }
-    })()
     sendSuccess(context, {
       status: 'ready',
       checks: {
@@ -295,7 +285,6 @@ const routeMiddleware: Middleware = async (context, next) => {
         auth: context.auth ? 'ok' : 'anonymous',
         externalServices: {
           funasr: funasrStatus,
-          fasterWhisper: fasterWhisperStatus,
           llm: 'requires_workspace_configuration',
           ocr: process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable',
         },
@@ -1072,7 +1061,7 @@ const routeMiddleware: Middleware = async (context, next) => {
         await interviewAudioRecordings.save(recording);
         let recognized: SpeakerSegment[];
         try { recognized = await transcribeInterviewChunk(audio, contentType); }
-        catch (error) { if (!(error instanceof FunAsrError) && !(error instanceof FasterWhisperError) || !checkpoint) throw error; recognized = []; }
+        catch (error) { if (!(error instanceof FunAsrError) || !checkpoint) throw error; recognized = []; }
         if (chunkEndMs !== undefined) {
           const duration = chunkEndMs - chunkOffsetMs;
           recognized = recognized.filter(row => row.startMs >= 0 && row.startMs <= duration)
@@ -1098,7 +1087,6 @@ const routeMiddleware: Middleware = async (context, next) => {
         sendSuccess(context, saved, 201);
       } catch (error) {
         if (error instanceof FunAsrError) throw new HttpError(error.code === 'NOT_CONFIGURED' ? 503 : 502, `FUNASR_${error.code}`, error.message);
-        if (error instanceof FasterWhisperError) throw new HttpError(error.code === 'NOT_CONFIGURED' ? 503 : 502, `FASTER_WHISPER_${error.code}`, error.message);
         throw error;
       }
       return;
