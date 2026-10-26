@@ -59,6 +59,7 @@ const expectedRoutes = [
     icon: '⚙',
   },
   { path: '/platform/customers', title: '企业客户管理', navLabel: '企业客户管理', icon: '▧' },
+  { path: '/platform/users', title: '用户管理', navLabel: '用户管理', icon: '◎' },
   {
     path: '/workspaces',
     title: '企业工作空间',
@@ -294,7 +295,7 @@ describe('企业 AI 配置权限边界',()=>{
     authSession.user={id:'u',name:'企业',email:'u@example.invalid',role:'admin',departmentId:'',workspaceId:'w'}
     authSession.workspaces=[{id:'w',name:'企业',kind:'test',status:'active',role:'owner',createdAt:'2026-10-12'}]
     expect(getNavigationItemsForRole('admin','owner').some(item=>item.platformOnly)).toBe(false)
-    expect(getNavigationItemsForRole('recruiter',undefined,'viewer').filter(item=>item.platformOnly).map(item=>item.path).sort()).toEqual(['/platform/customers','/platform/payments'])
+    expect(getNavigationItemsForRole('recruiter',undefined,'viewer').filter(item=>item.platformOnly).map(item=>item.path).sort()).toEqual(['/platform/customers','/platform/payments','/platform/users'])
     const router=createAppRouter();installAuthGuard(router);await router.push('/platform/customers');expect(router.currentRoute.value.name).toBe('forbidden')
   })
 })

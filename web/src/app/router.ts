@@ -23,6 +23,7 @@ export function installAuthGuard(router: Router): void {
     // Legacy enterprise AI bookmarks redirect before platform-only authorization.
     // The destination still enforces enterprise owner/admin permissions.
     if (to.name === 'administration' && to.query.module === 'ai') return { name: 'enterprise-ai' }
+    if (to.name === 'administration' && to.query.module === 'users') return { name: 'platform-users' }
     if (to.meta.platformOnly && !authSession.user.platformRole) return { name: 'forbidden', query: { from: to.fullPath } }
     if (to.meta.platformAdminOnly && authSession.user.platformRole !== 'admin') return { name: 'forbidden', query: { from: to.fullPath } }
     if (!authSession.user.workspaceId && to.name !== 'workspaces' && to.name !== 'forbidden' && !to.meta.platformOnly && !to.meta.billingOnly) return { name: 'workspaces' }

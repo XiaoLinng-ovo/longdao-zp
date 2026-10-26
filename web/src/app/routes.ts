@@ -218,6 +218,12 @@ export const appRoutes: AppRouteRecord[] = [
     meta: { title: '企业客户管理', navLabel: '企业客户管理', icon: '▧', group: '平台运营', crumb: '平台运营 / 企业客户管理', platformOnly: true },
   },
   {
+    path: '/platform/users',
+    name: 'platform-users',
+    component: () => import('../modules/platform/users/pages/PlatformUsersPage.vue'),
+    meta: { title: '用户管理', navLabel: '用户管理', icon: '◎', group: '平台运营', crumb: '平台运营 / 用户管理', platformOnly: true },
+  },
+  {
     path: '/administration',
     name: 'administration',
     component: () => import('../modules/administration/pages/AdministrationPage.vue'),
