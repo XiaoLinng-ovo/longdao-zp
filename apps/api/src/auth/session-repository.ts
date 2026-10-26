@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import type { AuthSession, RegisterInput, SessionUser, WorkspaceCreateInput, WorkspaceSummary } from './types.js'
+import type { AuthSession, RegisterInput, RegisterResult, SessionUser, WorkspaceCreateInput, WorkspaceSummary } from './types.js'
 import { hashPassword, verifyPassword } from './password.js'
+import { normalizeRegistrationInput } from './registration.js'
 
 export interface SessionRepository {
   findUserByEmailPassword(email: string, password: string): Promise<SessionUser | undefined>
@@ -9,7 +10,7 @@ export interface SessionRepository {
   revokeSession(sessionId: string): Promise<void>
   deleteSession(sessionId: string): Promise<void>
   cleanupExpiredSessions(): Promise<number>
-  registerUser(input: RegisterInput): Promise<SessionUser>
+  registerUser(input: RegisterInput): Promise<RegisterResult>
   listWorkspaces(userId: string): Promise<WorkspaceSummary[]>
   createWorkspace(userId: string, input: WorkspaceCreateInput): Promise<WorkspaceSummary>
   archiveWorkspace(userId: string, workspaceId: string): Promise<void>
@@ -17,7 +18,15 @@ export interface SessionRepository {
   selectWorkspace(sessionId: string, userId: string, workspaceId: string): Promise<SessionUser>
 }
 
-interface Queryable { query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }> }
+interface QueryableClient {
+  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>
+  release(): void
+}
+
+interface Queryable {
+  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>
+  connect?(): Promise<QueryableClient>
+}
 const TTL_MS = 1000 * 60 * 60 * 12
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const iso = (value: unknown) => value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString()
@@ -38,27 +47,88 @@ export class PostgresSessionRepository implements SessionRepository {
   }
 
 
-  async registerUser(input: RegisterInput): Promise<SessionUser> {
-    const name = input.name.trim(); const email = input.email.trim().toLowerCase(); const password = String(input.password)
-    if (name.length < 2 || name.length > 80) throw Object.assign(new Error('姓名长度需为 2 到 80 个字符'), { code: 'VALIDATION_ERROR', status: 400 })
-    if (!/^\S+@\S+\.\S+$/.test(email)) throw Object.assign(new Error('请输入有效邮箱'), { code: 'VALIDATION_ERROR', status: 400 })
-    if (password.length < 8) throw Object.assign(new Error('密码至少需要 8 个字符'), { code: 'VALIDATION_ERROR', status: 400 })
-    const passwordHash = await hashPassword(password)
-    const id = randomUUID()
-    const result = await this.db.query<any>(
-      `WITH inserted AS (
-         INSERT INTO users (id, email, display_name, password_hash, is_active)
-         VALUES ($1::uuid, $2, $3, $4, true)
-         ON CONFLICT DO NOTHING
-         RETURNING id, email, display_name
-       )
-       SELECT i.id, i.email, i.display_name, COALESCE(d.code, '') AS department_id
-       FROM inserted i LEFT JOIN departments d ON false`, [id, email, name, passwordHash])
-    const row = result.rows[0]
-    if (!row) throw Object.assign(new Error('该邮箱已注册，请直接登录'), { code: 'EMAIL_ALREADY_EXISTS', status: 409 })
-    const role = await this.db.query<any>(`SELECT id FROM roles WHERE code = 'recruiter' LIMIT 1`)
-    if (role.rows[0]?.id) await this.db.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, [id, role.rows[0].id])
-    return { id: row.id, name: row.display_name, email: row.email, role: 'recruiter', departmentId: row.department_id ?? '' }
+  async registerUser(input: RegisterInput): Promise<RegisterResult> {
+    const data = normalizeRegistrationInput(input)
+    if (!this.db.connect) throw new Error('Registration requires a transactional database connection')
+    const client = await this.db.connect()
+    let began = false
+    try {
+      const counts = await client.query<{ email_count: string; ip_count: string }>(
+        `SELECT
+           (SELECT count(*) FROM registration_attempts WHERE lower(email)=lower($1) AND attempted_at > now()-interval '1 hour') AS email_count,
+           (SELECT count(*) FROM registration_attempts WHERE $2::inet IS NOT NULL AND ip_address=$2::inet AND attempted_at > now()-interval '1 hour') AS ip_count`,
+        [data.email, input.ipAddress ?? null],
+      )
+      if (Number(counts.rows[0]?.email_count ?? 0) >= 3 || Number(counts.rows[0]?.ip_count ?? 0) >= 10) {
+        throw Object.assign(new Error('注册尝试过于频繁，请稍后再试'), { code: 'REGISTRATION_RATE_LIMITED', status: 429 })
+      }
+      const attempt = await client.query<{ id: string }>(
+        `INSERT INTO registration_attempts (email, ip_address, succeeded) VALUES ($1,$2::inet,false) RETURNING id`,
+        [data.email, input.ipAddress ?? null],
+      )
+      const passwordHash = await hashPassword(data.password)
+      await client.query('BEGIN')
+      began = true
+      const user = await client.query<any>(
+        `INSERT INTO users (email, display_name, phone, password_hash, registration_source, is_active)
+         VALUES ($1,$2,$3,$4,'open_registration',true)
+         RETURNING id, email, display_name`,
+        [data.email, data.name, data.phone, passwordHash],
+      )
+      const userRow = user.rows[0]
+      const workspace = await client.query<any>(
+        `INSERT INTO organizations (name, kind, created_by, service_status, trial_ends_at)
+         VALUES ($1,'production',$2::uuid,'trial',now()+interval '14 days')
+         RETURNING id, name, kind, status, created_at, service_status, trial_ends_at`,
+        [data.companyName, userRow.id],
+      )
+      const workspaceRow = workspace.rows[0]
+      await client.query(
+        `INSERT INTO organization_members (organization_id,user_id,role,business_role)
+         VALUES ($1::uuid,$2::uuid,'owner','recruiter')`,
+        [workspaceRow.id, userRow.id],
+      )
+      await client.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         SELECT $1::uuid, id FROM roles WHERE code='recruiter'
+         ON CONFLICT DO NOTHING`,
+        [userRow.id],
+      )
+      await client.query(
+        `INSERT INTO audit_logs (organization_id,actor_user_id,action,resource_type,resource_id,metadata)
+         VALUES ($1::uuid,$2::uuid,'workspace.member.owner_created','organization_member',$2::uuid,$3::jsonb)`,
+        [workspaceRow.id, userRow.id, JSON.stringify({ source: 'open_registration' })],
+      )
+      await client.query(
+        `INSERT INTO platform_audit_logs (actor_user_id,organization_id,action,metadata)
+         VALUES ($1::uuid,$2::uuid,'platform.user.registered',$3::jsonb)`,
+        [userRow.id, workspaceRow.id, JSON.stringify({ source: 'open_registration' })],
+      )
+      await client.query(`UPDATE registration_attempts SET succeeded=true WHERE id=$1::bigint`, [attempt.rows[0]!.id])
+      await client.query('COMMIT')
+      began = false
+      return {
+        user: { id: userRow.id, name: userRow.display_name, email: userRow.email, role: 'recruiter', departmentId: '' },
+        workspace: {
+          id: workspaceRow.id,
+          name: workspaceRow.name,
+          kind: workspaceRow.kind,
+          status: workspaceRow.status,
+          role: 'owner',
+          createdAt: iso(workspaceRow.created_at),
+          serviceStatus: workspaceRow.service_status,
+          trialEndsAt: workspaceRow.trial_ends_at ? iso(workspaceRow.trial_ends_at) : null,
+          serviceAvailable: true,
+        },
+      }
+    } catch (error) {
+      if (began) await client.query('ROLLBACK')
+      const code = (error as { code?: string })?.code
+      if (code === '23505') throw Object.assign(new Error('该邮箱已注册，请直接登录'), { code: 'EMAIL_ALREADY_EXISTS', status: 409 })
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async listWorkspaces(userId: string): Promise<WorkspaceSummary[]> {

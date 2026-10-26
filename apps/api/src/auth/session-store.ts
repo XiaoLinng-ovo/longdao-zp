@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import type { AuthSession, RegisterInput, SessionUser, WorkspaceCreateInput, WorkspaceSummary, WorkspaceRole } from './types.js'
+import type { AuthSession, RegisterInput, RegisterResult, SessionUser, WorkspaceCreateInput, WorkspaceSummary, WorkspaceRole } from './types.js'
 import { hashPassword, verifyPassword } from './password.js'
+import { normalizeRegistrationInput } from './registration.js'
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12
 const DEFAULT_PATH = resolve(process.cwd(), 'data/auth-sessions.json')
@@ -12,9 +13,10 @@ interface StoredWorkspace extends WorkspaceSummary { createdBy: string; updatedA
 interface SessionFile {
   version: 1
   sessions: AuthSession[]
-  users: Array<SessionUser & { passwordHash: string }>
+  users: Array<SessionUser & { passwordHash: string; phone?: string | null; registrationSource?: string }>
   workspaces?: StoredWorkspace[]
   workspaceMembers?: Array<{ workspaceId: string; userId: string; role: WorkspaceRole }>
+  registrationAttempts?: Array<{ email: string; attemptedAt: string }>
 }
 
 const DEV_USERS: Array<SessionUser & { password: string }> = [
@@ -79,6 +81,7 @@ function createSeedFile(): SessionFile {
     users: DEV_USERS.map(({ password, ...user }) => ({ ...user, passwordHash: sha256(password) })),
     workspaces: [],
     workspaceMembers: [],
+    registrationAttempts: [],
   }
 }
 
@@ -118,6 +121,7 @@ export class LocalAuthSessionStore {
         users: mergedUsers,
         workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [],
         workspaceMembers: Array.isArray(parsed.workspaceMembers) ? parsed.workspaceMembers : [],
+        registrationAttempts: Array.isArray(parsed.registrationAttempts) ? parsed.registrationAttempts : [],
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return createSeedFile()
@@ -137,20 +141,51 @@ export class LocalAuthSessionStore {
     return { token, tokenHash: sha256(token) }
   }
 
-  async registerUser(input: RegisterInput): Promise<SessionUser> {
+  async registerUser(input: RegisterInput): Promise<RegisterResult> {
     return this.exclusive(async () => {
       const file = await this.readFile()
-      const name = input.name.trim()
-      const email = input.email.trim().toLowerCase()
-      const password = String(input.password)
-      if (name.length < 2 || name.length > 80) throw Object.assign(new Error('姓名长度需为 2 到 80 个字符'), { code: 'VALIDATION_ERROR', status: 400 })
-      if (!/^\S+@\S+\.\S+$/.test(email)) throw Object.assign(new Error('请输入有效邮箱'), { code: 'VALIDATION_ERROR', status: 400 })
-      if (password.length < 8) throw Object.assign(new Error('密码至少需要 8 个字符'), { code: 'VALIDATION_ERROR', status: 400 })
-      if (file.users.some((user) => user.email.toLowerCase() === email)) throw Object.assign(new Error('该邮箱已注册，请直接登录'), { code: 'EMAIL_ALREADY_EXISTS', status: 409 })
-      const user: SessionUser = { id: randomUUID(), name, email, role: 'recruiter', departmentId: '' }
-      file.users.push({ ...user, passwordHash: await hashPassword(password) })
+      const data = normalizeRegistrationInput(input)
+      const recent = (file.registrationAttempts ?? []).filter((item) => item.email === data.email && Date.parse(item.attemptedAt) > Date.now() - 60 * 60 * 1000)
+      if (recent.length >= 3) throw Object.assign(new Error('注册尝试过于频繁，请稍后再试'), { code: 'REGISTRATION_RATE_LIMITED', status: 429 })
+      file.registrationAttempts = [...(file.registrationAttempts ?? []), { email: data.email, attemptedAt: timestamp() }]
+      if (file.users.some((user) => user.email.toLowerCase() === data.email)) {
+        await this.writeFile(file)
+        throw Object.assign(new Error('该邮箱已注册，请直接登录'), { code: 'EMAIL_ALREADY_EXISTS', status: 409 })
+      }
+      const now = timestamp()
+      const user: SessionUser = { id: randomUUID(), name: data.name, email: data.email, role: 'recruiter', departmentId: '' }
+      const workspace: StoredWorkspace = {
+        id: randomUUID(),
+        name: data.companyName,
+        kind: 'production',
+        status: 'active',
+        role: 'owner',
+        createdAt: now,
+        createdBy: user.id,
+        serviceStatus: 'trial',
+        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+        serviceAvailable: true,
+      }
+      file.users.push({ ...user, phone: data.phone, registrationSource: 'open_registration', passwordHash: await hashPassword(data.password) })
+      file.workspaces = file.workspaces ?? []
+      file.workspaceMembers = file.workspaceMembers ?? []
+      file.workspaces.push(workspace)
+      file.workspaceMembers.push({ workspaceId: workspace.id, userId: user.id, role: 'owner' })
       await this.writeFile(file)
-      return user
+      return {
+        user,
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          kind: workspace.kind,
+          status: workspace.status,
+          role: 'owner',
+          createdAt: workspace.createdAt,
+          serviceStatus: workspace.serviceStatus ?? 'trial',
+          trialEndsAt: workspace.trialEndsAt ?? null,
+          serviceAvailable: true,
+        },
+      }
     })
   }
 

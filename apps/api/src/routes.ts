@@ -344,8 +344,15 @@ const routeMiddleware: Middleware = async (context, next) => {
 
   if (path === '/api/v1/auth/register' && method === 'POST') {
     const body = await readJson(context)
-    const user = await authService.register({ name: String(body.name ?? ''), email: String(body.email ?? ''), password: String(body.password ?? '') })
-    sendSuccess(context, { user }, 201)
+    const registered = await authService.register({
+      name: String(body.name ?? ''),
+      email: String(body.email ?? ''),
+      password: String(body.password ?? ''),
+      companyName: String(body.companyName ?? ''),
+      ...(body.phone === undefined ? {} : { phone: String(body.phone) }),
+      ...(context.req.socket.remoteAddress ? { ipAddress: context.req.socket.remoteAddress } : {}),
+    })
+    sendSuccess(context, registered, 201)
     return
   }
 

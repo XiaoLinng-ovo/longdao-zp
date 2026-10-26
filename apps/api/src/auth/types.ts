@@ -50,6 +50,14 @@ export interface RegisterInput {
   name: string
   email: string
   password: string
+  companyName: string
+  phone?: string
+  ipAddress?: string
+}
+
+export interface RegisterResult {
+  user: SessionUser
+  workspace: WorkspaceSummary
 }
 
 export interface WorkspaceCreateInput {

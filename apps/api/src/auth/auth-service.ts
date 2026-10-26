@@ -1,5 +1,5 @@
 import { LocalAuthSessionStore } from './session-store.js'
-import type { AuthContext, AuthSession, LoginInput, RegisterInput, Role, SessionUser, WorkspaceCreateInput, WorkspaceSummary } from './types.js'
+import type { AuthContext, AuthSession, LoginInput, RegisterInput, RegisterResult, Role, SessionUser, WorkspaceCreateInput, WorkspaceSummary } from './types.js'
 import { LoginRateLimiter } from './rate-limit.js'
 import type { SessionRepository } from './session-repository.js'
 import { PostgresSessionRepository } from './session-repository.js'
@@ -59,7 +59,7 @@ export class AuthService {
     if (sessionId) await this.sessionStore.deleteSession(sessionId)
   }
 
-  async register(input: RegisterInput): Promise<SessionUser> {
+  async register(input: RegisterInput): Promise<RegisterResult> {
     return this.sessionStore.registerUser(input)
   }
 
