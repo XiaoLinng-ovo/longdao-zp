@@ -6,6 +6,8 @@
 
 当前最终总设计请参阅 [`docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md`](docs/superpowers/specs/2026-09-17-smartrecruit-platform-final-design.md)；最初产品设计基线请参阅 [`docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md`](docs/superpowers/specs/2026-09-08-commercial-recruiting-platform-detailed-design.md)。
 
+开放注册和平台用户目录见 [`docs/open-registration-user-management.md`](docs/open-registration-user-management.md)。
+
 ## 需要安装什么
 
 必须安装：
