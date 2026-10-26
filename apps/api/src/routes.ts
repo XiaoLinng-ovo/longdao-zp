@@ -4,6 +4,7 @@ import { AiUsageService, usageKey } from './platform/ai-usage.js';
 import { parseUsageFilters } from './platform/ai-usage-diagnostics.js';
 import { EntitlementService } from './platform/entitlements.js';
 import { PlatformService } from './platform/service.js';
+import { PlatformUsersService } from './platform/users/service.js';
 import { EnterpriseAiStore, EnterpriseAiError, validateEnterpriseAiPatch, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
 import { testAiConnection } from './admin/ai-settings.js';
 import type { Middleware } from './http.js';
@@ -69,6 +70,7 @@ const interviewQuestionSets = process.env.NODE_ENV === 'test'
   ? new MemoryInterviewQuestionSetRepository()
   : new PostgresInterviewQuestionSetRepository(createDatabasePool());
 const platformService = new PlatformService(createDatabasePool());
+const platformUsers = new PlatformUsersService(createDatabasePool());
 const billingSandboxService = new BillingSandboxService(createDatabasePool());
 const aiUsageService = new AiUsageService(createDatabasePool());
 const entitlementService = new EntitlementService(createDatabasePool());
@@ -444,6 +446,21 @@ const routeMiddleware: Middleware = async (context, next) => {
 
   if (path.startsWith('/api/v1/platform/')) {
     const auth = requireAuth(context)
+    if (path === '/api/v1/platform/users' && method === 'GET') { sendSuccess(context, await platformUsers.list(auth.user.id, context.url.searchParams)); return }
+    const platformUserMatch = path.match(/^\/api\/v1\/platform\/users\/([^/]+)$/)
+    if (platformUserMatch && method === 'GET') { sendSuccess(context, await platformUsers.detail(auth.user.id, platformUserMatch[1]!)); return }
+    const platformUserStatus = path.match(/^\/api\/v1\/platform\/users\/([^/]+)\/status$/)
+    if (platformUserStatus && method === 'PATCH') { sendSuccess(context, await platformUsers.updateStatus(auth.user.id, platformUserStatus[1]!, await readJson(context), context.requestId)); return }
+    const platformUserProfile = path.match(/^\/api\/v1\/platform\/users\/([^/]+)\/profile$/)
+    if (platformUserProfile && method === 'PATCH') { sendSuccess(context, await platformUsers.profile(auth.user.id, platformUserProfile[1]!, await readJson(context), context.requestId)); return }
+    const platformUserRevoke = path.match(/^\/api\/v1\/platform\/users\/([^/]+)\/revoke-sessions$/)
+    if (platformUserRevoke && method === 'POST') { sendSuccess(context, await platformUsers.revokeSessions(auth.user.id, platformUserRevoke[1]!, await readJson(context), context.requestId)); return }
+    const platformUserReset = path.match(/^\/api\/v1\/platform\/users\/([^/]+)\/reset-password$/)
+    if (platformUserReset && method === 'POST') {
+      context.res.setHeader('Cache-Control', 'no-store')
+      sendSuccess(context, await platformUsers.resetPassword(auth.user.id, platformUserReset[1]!, await readJson(context), context.requestId))
+      return
+    }
     if (path === '/api/v1/platform/customers' && method === 'GET') { sendSuccess(context, await platformService.listCustomers(auth.user.id, context.url.searchParams)); return }
     if (path === '/api/v1/platform/audit-logs' && method === 'GET') { sendSuccess(context, await platformService.listAudit(auth.user.id)); return }
     if (path === '/api/v1/platform/plans' && method === 'GET') { sendSuccess(context, await entitlementService.listPlans(auth.user.id)); return }
