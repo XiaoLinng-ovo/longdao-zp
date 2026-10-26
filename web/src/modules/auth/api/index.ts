@@ -47,8 +47,16 @@ export interface MeResponse {
   workspaces: WorkspaceSummary[]
 }
 
-export async function register(name: string, email: string, password: string): Promise<{ user: AuthUser }> {
-  return (await apiClient.postJson<{ user: AuthUser }>('/auth/register', { name, email, password })).data
+export interface RegisterInput {
+  name: string
+  email: string
+  password: string
+  companyName: string
+  phone?: string
+}
+
+export async function register(input: RegisterInput): Promise<{ user: AuthUser; workspace: WorkspaceSummary }> {
+  return (await apiClient.postJson<{ user: AuthUser; workspace: WorkspaceSummary }>('/auth/register', input)).data
 }
 
 export async function login(email: string, password: string): Promise<AuthLoginResponse> {

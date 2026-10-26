@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getCurrentUser, login, logout, listSavedAccounts, switchSavedAccount } from './index'
+import { getCurrentUser, login, logout, listSavedAccounts, register, switchSavedAccount } from './index'
 
 function mockFetch(response: Record<string, unknown>, ok = true) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response), {
@@ -26,6 +26,34 @@ describe('auth api', () => {
     const result = await login('recruiter@smartrecruit.local', 'recruiter123')
     expect(result.user.role).toBe('recruiter')
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/v1/auth/login', expect.objectContaining({ method: 'POST', credentials: 'include' }))
+  })
+
+  it('registers an enterprise administrator with enterprise information', async () => {
+    mockFetch({
+      ok: true,
+      data: {
+        user: { id: 'user-1', name: '陈婉清', email: 'owner@example.com', role: 'recruiter', departmentId: '' },
+        workspace: { id: 'workspace-1', name: '龙道科技', kind: 'production', status: 'active', role: 'owner', createdAt: '2026-10-26' },
+      },
+      requestId: 'request-1',
+    })
+    await expect(register({
+      companyName: '龙道科技',
+      name: '陈婉清',
+      email: 'owner@example.com',
+      phone: '13800000000',
+      password: 'strong-password',
+    })).resolves.toMatchObject({ workspace: { role: 'owner' } })
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/v1/auth/register', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        companyName: '龙道科技',
+        name: '陈婉清',
+        email: 'owner@example.com',
+        phone: '13800000000',
+        password: 'strong-password',
+      }),
+    }))
   })
 
   it('reads current user and accepts development bootstrap method', async () => {
