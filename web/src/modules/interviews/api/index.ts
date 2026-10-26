@@ -1,5 +1,6 @@
 import { apiClient } from '../../../shared/api'
 import type { Interview } from '../../../shared/types/recruiting'
+import { notifyTrialQuotaChanged } from '../../../shared/api/trial-usage'
 
 export type InterviewType = 'phone_screen' | 'technical' | 'behavioral' | 'case_study' | 'onsite' | 'other'
 export type FeedbackRecommendation = 'strong_yes' | 'yes' | 'mixed' | 'no' | 'strong_no'
@@ -196,7 +197,9 @@ export async function updateInterviewSchedule(id: string, input: InterviewSchedu
 }
 
 export async function submitFeedback(id: string, input: SubmitFeedbackInput): Promise<unknown> {
-  return (await apiClient.postJson(`/interviews/${id}/feedback`, input)).data
+  const result = (await apiClient.postJson(`/interviews/${id}/feedback`, input)).data
+  notifyTrialQuotaChanged()
+  return result
 }
 
 export async function lockFeedback(id: string, interviewerId: string): Promise<unknown> {
@@ -260,7 +263,11 @@ export interface LiveAnswerAnalysis { summary: string; evidence: string[]; score
 export interface LiveInterviewSegment { transcriptComparison?: { streamingText: string; offlineText: string; streamingComplete: boolean; selectedSource: 'streaming' | 'offline'; startMs: number; endMs: number }; audioSource?: 'microphone' | 'meeting'; speakerConfirmed?: boolean; id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
 export interface LiveInterviewSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string; questionSheetGeneration?: { queued: boolean; reason?: string }; summaryGeneration?: { queued: boolean; reason?: string } }
 export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[] }
-export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data }
+export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> {
+  const result = (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data
+  notifyTrialQuotaChanged()
+  return result
+}
 export async function findActiveLiveInterviewSession(interviewId: string): Promise<LiveInterviewView | null> { return (await apiClient.getJson<LiveInterviewView | null>(`/interviews/${interviewId}/live-sessions`)).data }
 export async function loadLiveInterviewSession(sessionId: string): Promise<LiveInterviewView> { return (await apiClient.getJson<LiveInterviewView>(`/interview-live-sessions/${sessionId}`)).data }
 export async function uploadLiveInterviewChunk(sessionId: string, audioBase64: string, contentType: string, chunkOffsetMs: number, chunkId?: string, streamingTranscript?: { text: string; endMs: number; complete: boolean; audioSource?: 'microphone' | 'meeting' }, audioSource?: { id: 'microphone' | 'meeting'; role: 'candidate' | 'interviewer' | 'unknown'; multipleSpeakers: boolean }, chunkEndMs?: number): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-sessions/${sessionId}/segments`, { audioBase64, contentType, chunkOffsetMs, ...(streamingTranscript ? { streamingTranscript } : {}), ...(audioSource ? { audioSource } : {}), ...(chunkEndMs !== undefined ? { chunkEndMs } : {}) }, chunkId ? { headers: { 'Idempotency-Key': chunkId } } : undefined)).data }

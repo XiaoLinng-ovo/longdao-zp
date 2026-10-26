@@ -18,6 +18,11 @@ test('resume POST accepts a base64 encoded 10 MiB file and caches the consumed b
   assert.equal((await readJson(ctx)).content, JSON.parse(raw).content)
   assert.equal((await readBody(ctx)).raw, raw)
 })
+test('resume import item content accepts the same base64 envelope as a normal resume upload', async () => {
+  const raw = JSON.stringify({ content: Buffer.alloc(10 * 1024 * 1024).toString('base64'), encoding: 'base64' })
+  const ctx = context('/api/v1/resume-import-batches/batch-1/items/item-1/content', 'POST', raw)
+  assert.equal((await readJson(ctx)).content, JSON.parse(raw).content)
+})
 test('resume POST still rejects unbounded request bodies', async () => {
   await assert.rejects(readBody(context('/api/v1/resumes', 'POST', JSON.stringify({ content: 'x'.repeat(15 * 1024 * 1024) }))), (error: unknown) => error instanceof HttpError && error.status === 413)
 })

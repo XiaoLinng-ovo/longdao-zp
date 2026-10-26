@@ -5,6 +5,7 @@ import type { Candidate, Job } from '../../../shared/types/recruiting'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { normalizeSearchText } from '../../../shared/utils/search'
 import StatusTag from '../../../shared/components/StatusTag.vue'
+import { notifyTrialQuotaChanged } from '../../../shared/api/trial-usage'
 
 const props = defineProps<{ candidates: readonly Candidate[]; jobs: readonly Job[]; initialCandidateId?: string; initialApplicationId?: string; canArrange?: boolean }>()
 const emit = defineEmits<{ close: []; changed: []; created: [payload: { application: ApiApplication; taskId?: string; resumeName?: string }]; view: [application: ApiApplication]; arrange: [applicationId: string] }>()
@@ -118,6 +119,7 @@ async function submit(withAnalysis = true) {
       const result = await uploadResume({ candidateId: candidateId.value, applicationId: application.id, originalFilename: file.name, mimeType: file.type || 'application/octet-stream', content: await fileToBase64(file), encoding: 'base64' })
       taskId = result.task.id
       resumeName = file.name
+      notifyTrialQuotaChanged()
     }
     emit('created', { application, taskId, resumeName })
   } catch (cause) {

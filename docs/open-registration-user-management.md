@@ -13,6 +13,22 @@
 
 注册者登录后成为该企业 `owner`，可以进入企业工作空间并邀请其他成员。
 
+## 试用功能额度
+
+14 天试用期内有两个独立额度：
+
+- 简历上传：最多 3 份
+- 真实面试：最多 3 场
+
+简历额度在创建 `resumes` 记录时扣减。面试额度只在真实面试开始时扣减：创建实时面试会话，或者提交/锁定面试反馈。创建、修改和改期面试记录不消耗额度。前端隐藏按钮不能绕过。删除已创建的简历或面试不会恢复额度。企业转为正式启用后不再受试用额度限制。
+
+达到上限时接口返回：
+
+- `TRIAL_RESUME_LIMIT_REACHED`
+- `TRIAL_INTERVIEW_LIMIT_REACHED`
+
+工作空间页面会显示当前已用次数和剩余次数。
+
 ## 注册表单
 
 - 企业名称，必填，2 至 120 个字符
@@ -77,6 +93,8 @@ node scripts/migrate-postgres.mjs
 迁移文件：
 
 `db/migrations/0050_open_registration_user_management.sql`
+
+`db/migrations/0052_trial_feature_quotas.sql`
 
 迁移不会重置既有用户、企业、成员或招聘数据。既有账号的 `registration_source` 会回填为 `legacy`。
 

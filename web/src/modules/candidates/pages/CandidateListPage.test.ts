@@ -4,29 +4,29 @@ import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import CandidateListPage from './CandidateListPage.vue'
 import { authSession } from '../../auth/session'
-import { createApplication, createCandidate, deleteCandidate, loadCandidateTags, loadCandidates, loadJobs, uploadResume } from '../api'
+import { createResumeImportBatch, deleteCandidate, getResumeImportBatch, loadCandidateTags, loadCandidates, loadJobs, uploadResumeImportItem } from '../api'
 
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>()
   return {
     ...actual,
-    createApplication: vi.fn(),
-    createCandidate: vi.fn(),
+    createResumeImportBatch: vi.fn(),
     deleteCandidate: vi.fn(),
     getAnalysisTask: vi.fn(),
+    getResumeImportBatch: vi.fn(),
     loadCandidateTags: vi.fn(),
     loadCandidates: vi.fn(),
     loadJobs: vi.fn(),
-    uploadResume: vi.fn(),
+    uploadResumeImportItem: vi.fn(),
   }
 })
 
-const mockedCreateApplication = vi.mocked(createApplication)
-const mockedCreateCandidate = vi.mocked(createCandidate)
+const mockedCreateBatch = vi.mocked(createResumeImportBatch)
+const mockedReadBatch = vi.mocked(getResumeImportBatch)
 const mockedLoadCandidateTags = vi.mocked(loadCandidateTags)
 const mockedLoadCandidates = vi.mocked(loadCandidates)
 const mockedLoadJobs = vi.mocked(loadJobs)
-const mockedUploadResume = vi.mocked(uploadResume)
+const mockedUploadItem = vi.mocked(uploadResumeImportItem)
 
 let app: App | undefined
 let root: HTMLDivElement | undefined
@@ -60,6 +60,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.resetAllMocks()
   authSession.user = null
+  window.localStorage.clear()
   vi.useRealTimers()
 })
 
@@ -68,11 +69,22 @@ describe('CandidateListPage resume upload', () => {
     mockedLoadCandidates.mockResolvedValue([])
     mockedLoadJobs.mockResolvedValue([{ id: 'JOB-1', entityId: 'job-1', title: '后端工程师' } as never])
     mockedLoadCandidateTags.mockResolvedValue([])
-    mockedCreateCandidate.mockResolvedValue({ id: 'candidate-1', code: 'CAN-1', fullName: '待解析候选人', status: 'active', updatedAt: '2026-09-20T00:00:00Z', applications: [] })
-    mockedCreateApplication.mockResolvedValue({ id: 'app-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'new', aiStatus: 'pending', updatedAt: '2026-09-20T00:00:00Z' })
-    mockedUploadResume.mockResolvedValue({
-      resume: { id: 'resume-1', candidateId: 'candidate-1', applicationId: 'app-1', originalFilename: 'resume.txt', mimeType: 'text/plain', sizeBytes: 6, contentHash: 'hash', scanStatus: 'clean', createdAt: '2026-09-20T00:00:00Z' },
-      task: { id: 'task-1', resumeId: 'resume-1', applicationId: 'app-1', status: 'queued', attempts: 0 },
+    mockedCreateBatch.mockResolvedValue({
+      id: 'batch-1', jobId: 'job-1', status: 'uploading',
+      items: [{ id: 'item-1', batchId: 'batch-1', ordinal: 1, clientFileId: 'local-1', originalFilename: 'resume.txt', mimeType: 'text/plain', sizeBytes: 6, status: 'pending_upload', attempts: 0, createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z' }],
+      counts: { total: 1, pendingUpload: 1, uploading: 0, uploaded: 0, analyzing: 0, completed: 0, failed: 0, cancelled: 0 },
+      createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z',
+    })
+    mockedUploadItem.mockResolvedValue({
+      id: 'item-1', batchId: 'batch-1', ordinal: 1, clientFileId: 'local-1', originalFilename: 'resume.txt', mimeType: 'text/plain', sizeBytes: 6,
+      status: 'queued', candidateId: 'candidate-1', applicationId: 'app-1', resumeId: 'resume-1', analysisTaskId: 'task-1', attempts: 1,
+      createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z',
+    })
+    mockedReadBatch.mockResolvedValue({
+      id: 'batch-1', jobId: 'job-1', status: 'completed',
+      items: [{ id: 'item-1', batchId: 'batch-1', ordinal: 1, clientFileId: 'local-1', originalFilename: 'resume.txt', mimeType: 'text/plain', sizeBytes: 6, status: 'queued', analysisStatus: 'queued', candidateId: 'candidate-1', applicationId: 'app-1', resumeId: 'resume-1', analysisTaskId: 'task-1', attempts: 1, createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z' }],
+      counts: { total: 1, pendingUpload: 0, uploading: 0, uploaded: 1, analyzing: 0, completed: 0, failed: 0, cancelled: 0 },
+      createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z',
     })
 
     root = document.createElement('div')
@@ -103,11 +115,8 @@ describe('CandidateListPage resume upload', () => {
 
     const uploadButton = [...root.querySelectorAll('button')].find((button) => button.textContent?.includes('上传并解析'))
     uploadButton!.click()
-    await waitFor(() => expect(mockedCreateApplication).toHaveBeenCalledWith({ candidateId: 'candidate-1', jobId: 'job-1' }))
-    await waitFor(() => expect(mockedUploadResume).toHaveBeenCalledWith(expect.objectContaining({
-      candidateId: 'candidate-1',
-      applicationId: 'app-1',
-    })))
+    await waitFor(() => expect(mockedCreateBatch).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-1' })))
+    await waitFor(() => expect(mockedUploadItem).toHaveBeenCalledWith('batch-1', 'item-1', expect.any(String), expect.any(Object)))
   })
 
   it('opens the new application form in a modal', async () => {

@@ -102,6 +102,8 @@
 
 平台管理员可以继续使用现有企业客户管理能力延长试用、暂停或恢复企业。
 
+试用期内简历上传限制为 3 份，真实面试限制为 3 场。创建、修改和改期面试记录不计入额度；首次开始实时面试或首次提交/锁定面试反馈时计数。限制在数据库写入阶段原子执行，删除记录不返还额度；企业转为正式启用后解除限制。
+
 ### 3.3 原子创建
 
 服务端在单个 PostgreSQL 事务中执行：
@@ -158,6 +160,7 @@
 ## 4. 数据模型
 
 新增迁移：`db/migrations/0050_open_registration_user_management.sql`
+试用额度迁移：`db/migrations/0052_trial_feature_quotas.sql`
 
 ### 4.1 `users` 扩展
 
@@ -204,7 +207,11 @@ CREATE INDEX IF NOT EXISTS sessions_user_last_seen_idx
   WHERE revoked_at IS NULL;
 ```
 
-### 4.4 现有表复用
+### 4.4 试用额度
+
+新增 `organization_trial_usage` 和 `organization_trial_interviews`。简历在 `resumes` 插入时计数；真实面试在首次创建 `interview_live_sessions` 或首次提交/锁定 `interview_feedback` 时按 `interview_id` 去重计数。触发器只对 `service_status = 'trial'` 的企业生效，任一步失败会连同业务写入一起回滚。
+
+### 4.5 现有表复用
 
 - `organizations`、`organization_members`、`organization_invitations` 保持现有职责。
 - `sessions` 复用现有 `ip_address`、`user_agent`、`last_seen_at`、`revoked_at`。

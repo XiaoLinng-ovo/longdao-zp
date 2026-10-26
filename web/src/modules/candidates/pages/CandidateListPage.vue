@@ -2,15 +2,16 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  createApplication,
-  createCandidate,
+  cancelResumeImportBatch,
+  createResumeImportBatch,
   deleteCandidate,
   deleteApplication,
   getAnalysisTask,
+  getResumeImportBatch,
   loadCandidateTags,
   loadCandidates,
   loadJobs,
-  uploadResume,
+  uploadResumeImportItem,
   updateResumeReview,
 } from '../api'
 import type { ApiApplication } from '../api'
@@ -23,6 +24,7 @@ import { aiResumeScore, canArrangeInitialInterview, canStartInitialInterview, sc
 import { authSession } from '../../auth/session'
 import { ApiClientError } from '../../../shared/api'
 import { normalizeSearchText } from '../../../shared/utils/search'
+import { runResumeUploadQueue } from '../utils/resume-upload-queue'
 
 const router = useRouter()
 const canArrange = computed(() => ['recruiter', 'hiring_manager', 'admin', 'hr_admin', 'interviewer'].includes(authSession.user?.role ?? ''))
@@ -197,47 +199,125 @@ async function handleDelete(row: Awaited<ReturnType<typeof loadCandidates>>[numb
 }
 
 const showCreateCandidate = ref(false)
+type ResumeUploadStatus = 'pending' | 'uploading' | 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
 type ResumeUploadEntry = {
   id: number
-  file: File
-  status: 'pending' | 'uploading' | 'queued' | 'failed'
+  file?: File
+  originalFilename: string
+  mimeType: string
+  sizeBytes: number
+  status: ResumeUploadStatus
+  progress: number
+  serverItemId?: string
   candidateId?: string
   applicationId?: string
   error?: string
 }
+const RESUME_IMPORT_BATCH_KEY = 'smartrecruit:active-resume-import-batch'
 const candidateResumeFiles = ref<ResumeUploadEntry[]>([])
 const uploadDialogError = ref('')
+const activeImportBatchId = ref('')
+const activeImportBatchStatus = ref<'uploading' | 'completed' | 'cancelled' | ''>('')
+const importBatchSummary = ref({ total: 0, finished: 0, processing: 0, failed: 0 })
+const importPollTimer = ref<ReturnType<typeof setTimeout>>()
+let uploadAbortController: AbortController | undefined
 let nextResumeEntryId = 0
-const uploadCompletedCount = computed(() => candidateResumeFiles.value.filter(item => item.status === 'queued').length)
+const uploadCompletedCount = computed(() => candidateResumeFiles.value.filter(item => ['queued', 'processing', 'completed'].includes(item.status)).length)
 const uploadRetryCount = computed(() => candidateResumeFiles.value.filter(item => item.status === 'failed').length)
 const uploadPendingCount = computed(() => candidateResumeFiles.value.filter(item => item.status === 'pending').length)
-const uploadStarted = computed(() => candidateResumeFiles.value.some(item => item.candidateId || item.status === 'uploading' || item.status === 'queued'))
+const uploadStarted = computed(() => !!activeImportBatchId.value)
 const uploadButtonLabel = computed(() => {
   if (creatingCandidate.value) return '上传中（' + uploadCompletedCount.value + '/' + candidateResumeFiles.value.length + '）...'
   if (uploadRetryCount.value && !uploadPendingCount.value) return '重试失败文件（' + uploadRetryCount.value + '）'
   return candidateResumeFiles.value.length > 1 ? '上传并解析（' + (uploadPendingCount.value + uploadRetryCount.value) + '份）' : '上传并解析'
 })
+
+function updateImportSummary() {
+  const entries = candidateResumeFiles.value
+  importBatchSummary.value = {
+    total: entries.length,
+    finished: entries.filter(item => ['completed', 'failed', 'cancelled'].includes(item.status)).length,
+    processing: entries.filter(item => ['queued', 'processing'].includes(item.status)).length,
+    failed: entries.filter(item => item.status === 'failed').length,
+  }
+}
+function rememberBatch(batchId: string) {
+  activeImportBatchId.value = batchId
+  try {
+    if (batchId) window.localStorage.setItem(RESUME_IMPORT_BATCH_KEY, batchId)
+    else window.localStorage.removeItem(RESUME_IMPORT_BATCH_KEY)
+  } catch { /* local persistence is optional; the server still owns progress */ }
+}
+function replaceEntriesFromBatch(batch: Awaited<ReturnType<typeof getResumeImportBatch>>) {
+  activeImportBatchStatus.value = batch.status
+  candidateJobId.value = batch.jobId
+  const previous = new Map(candidateResumeFiles.value.map(item => [item.serverItemId || `client:${item.id}`, item]))
+  candidateResumeFiles.value = batch.items.map(item => {
+    const prior = previous.get(item.id)
+    const status: ResumeUploadStatus = item.status === 'queued'
+      ? item.analysisStatus === 'processing' ? 'processing'
+        : item.analysisStatus === 'completed' ? 'completed'
+          : item.analysisStatus === 'failed' ? 'failed'
+            : 'queued'
+      : item.status === 'uploading' ? 'uploading'
+        : item.status === 'failed' ? 'failed'
+          : item.status === 'cancelled' ? 'cancelled'
+            : 'pending'
+    return {
+      id: prior?.id ?? ++nextResumeEntryId,
+      ...(prior?.file ? { file: prior.file } : {}),
+      originalFilename: item.originalFilename,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      status,
+      progress: status === 'uploading' ? 1 : ['queued', 'processing', 'completed'].includes(status) ? 100 : prior?.progress ?? 0,
+      serverItemId: item.id,
+      ...(item.candidateId ? { candidateId: item.candidateId } : {}),
+      ...(item.applicationId ? { applicationId: item.applicationId } : {}),
+      ...(item.error ? { error: item.error } : {}),
+    }
+  })
+  updateImportSummary()
+}
+
 function openResumeUpload() {
   if (creatingCandidate.value) return
-  if (candidateResumeFiles.value.length && candidateResumeFiles.value.every(item => item.status === 'queued')) {
+  if (activeImportBatchId.value && activeImportBatchStatus.value !== 'uploading') {
+    rememberBatch('')
+    activeImportBatchStatus.value = ''
     candidateResumeFiles.value = []
     candidateJobId.value = ''
+    updateImportSummary()
   }
   uploadDialogError.value = ''
   showCreateCandidate.value = true
+}
+function viewImportProgress() {
+  if (!creatingCandidate.value) showCreateCandidate.value = true
 }
 function closeResumeUpload() {
   if (!creatingCandidate.value) showCreateCandidate.value = false
 }
 function removeResumeFile(id: number) {
   if (creatingCandidate.value) return
-  candidateResumeFiles.value = candidateResumeFiles.value.filter(item => item.id !== id || item.status === 'queued')
+  candidateResumeFiles.value = candidateResumeFiles.value.filter(item => item.id !== id || ['queued', 'processing', 'completed'].includes(item.status))
+  updateImportSummary()
 }
 function resumeUploadStatus(entry: ResumeUploadEntry) {
-  return { pending: '待上传', uploading: '上传中...', queued: '已上传 · 已提交分析', failed: '上传失败' }[entry.status]
+  if (entry.status === 'uploading') return `上传中 ${entry.progress}%`
+  return {
+    pending: '等待上传',
+    uploading: `上传中 ${entry.progress}%`,
+    queued: '已上传 · 等待分析',
+    processing: 'AI 分析中',
+    completed: '已完成',
+    failed: '上传失败',
+    cancelled: '已取消',
+  }[entry.status]
 }
-function resumeFileSize(file: File) {
-  return file.size < 1024 * 1024 ? Math.max(1, Math.ceil(file.size / 1024)) + ' KB' : (file.size / (1024 * 1024)).toFixed(1) + ' MB'
+function resumeFileSize(file: { size?: number; sizeBytes?: number }) {
+  const size = file.size ?? file.sizeBytes ?? 0
+  return size < 1024 * 1024 ? Math.max(1, Math.ceil(size / 1024)) + ' KB' : (size / (1024 * 1024)).toFixed(1) + ' MB'
 }
 const candidateJobId = ref('')
 const creatingCandidate = ref(false)
@@ -303,9 +383,61 @@ function ensureProgressPolling() {
   }
 }
 
+function stopImportPolling() {
+  if (importPollTimer.value) clearTimeout(importPollTimer.value)
+  importPollTimer.value = undefined
+}
+function scheduleImportPolling(delay = 2000) {
+  stopImportPolling()
+  if (!activeImportBatchId.value || disposed) return
+  importPollTimer.value = setTimeout(() => { void refreshImportBatch(true) }, delay)
+}
+async function refreshImportBatch(scheduleNext = true) {
+  if (!activeImportBatchId.value) return
+  try {
+    const batch = await getResumeImportBatch(activeImportBatchId.value)
+    replaceEntriesFromBatch(batch)
+    const active = batch.items.some(item => ['pending_upload', 'uploading', 'queued'].includes(item.status) && item.analysisStatus !== 'completed' && item.analysisStatus !== 'failed')
+    if (scheduleNext && active) scheduleImportPolling(batch.items.some(item => item.status === 'queued') ? 5000 : 2000)
+    if (!active) stopImportPolling()
+    if (batch.counts.completed > 0) await refresh(true)
+  } catch (cause) {
+    if (cause instanceof ApiClientError && cause.status === 404) {
+      rememberBatch('')
+      candidateResumeFiles.value = []
+      updateImportSummary()
+      return
+    }
+    if (scheduleNext) scheduleImportPolling(5000)
+    uploadDialogError.value = cause instanceof Error ? cause.message : '读取导入进度失败'
+  }
+}
+async function restoreActiveImportBatch() {
+  let batchId = ''
+  try { batchId = window.localStorage.getItem(RESUME_IMPORT_BATCH_KEY) || '' } catch { /* storage disabled */ }
+  if (!batchId) return
+  activeImportBatchId.value = batchId
+  await refreshImportBatch()
+}
+async function cancelActiveImport() {
+  if (!activeImportBatchId.value) return
+  uploadAbortController?.abort()
+  try {
+    const batch = await cancelResumeImportBatch(activeImportBatchId.value)
+    replaceEntriesFromBatch(batch)
+    for (const entry of candidateResumeFiles.value) {
+      if (entry.status === 'pending' || entry.status === 'uploading') entry.status = 'cancelled'
+    }
+    updateImportSummary()
+    uploadDialogError.value = '已停止剩余上传；已上传成功的简历会继续处理。'
+    scheduleImportPolling(5000)
+  } catch (cause) {
+    uploadDialogError.value = cause instanceof Error ? cause.message : '取消上传失败'
+  }
+}
 async function submitCreateCandidate() {
   if (creatingCandidate.value) return
-  const entries = candidateResumeFiles.value.filter(item => item.status === 'pending' || item.status === 'failed')
+  const entries = candidateResumeFiles.value.filter(item => ['pending', 'failed'].includes(item.status) && item.file)
   if (!entries.length) {
     uploadDialogError.value = candidateResumeFiles.value.length ? '所选文件均已提交，无需重复上传' : '请选择简历文件'
     return
@@ -317,36 +449,63 @@ async function submitCreateCandidate() {
   uploadDialogError.value = ''
   error.value = ''
   feedback.value = ''
+  uploadAbortController = new AbortController()
   try {
-    // Sequential requests bound memory usage and avoid overwhelming the API.
-    for (const entry of entries) {
+    if (!activeImportBatchId.value) {
+      const batch = await createResumeImportBatch({
+        jobId,
+        files: entries.map(entry => ({
+          clientFileId: `local-${entry.id}`,
+          originalFilename: entry.originalFilename,
+          mimeType: entry.mimeType,
+          sizeBytes: entry.sizeBytes,
+        })),
+      })
+      rememberBatch(batch.id)
+      activeImportBatchStatus.value = batch.status
+      const byClientId = new Map(batch.items.map(item => [item.clientFileId, item]))
+      for (const entry of entries) entry.serverItemId = byClientId.get(`local-${entry.id}`)?.id
+    }
+    const batchId = activeImportBatchId.value
+    if (!batchId) throw new Error('导入批次创建失败')
+    await runResumeUploadQueue(entries, 3, async (entry) => {
+      if (!entry.file || !entry.serverItemId) throw new Error('文件缺少上传标识')
       entry.status = 'uploading'
+      entry.progress = 1
       entry.error = undefined
+      updateImportSummary()
       try {
-        // Read before creating records; retry reuses already-created IDs.
         const content = await fileToBase64(entry.file)
-        if (!entry.candidateId) {
-          const candidate = await createCandidate({ fullName: '待解析候选人', source: '简历导入' })
-          entry.candidateId = candidate.id
-        }
-        if (!entry.applicationId) {
-          const application = await createApplication({ candidateId: entry.candidateId, jobId })
-          entry.applicationId = application.id
-        }
-        await uploadResume({ candidateId: entry.candidateId, applicationId: entry.applicationId, originalFilename: entry.file.name, mimeType: entry.file.type || resumeMimeType(entry.file.name), content, encoding: 'base64' })
-        entry.status = 'queued'
+        const uploaded = await uploadResumeImportItem(batchId, entry.serverItemId, content, {
+          signal: uploadAbortController?.signal,
+          onProgress: progress => { entry.progress = progress },
+        })
+        entry.status = uploaded.status === 'queued' ? 'queued' : 'failed'
+        entry.progress = 100
       } catch (cause) {
         entry.status = 'failed'
         entry.error = cause instanceof Error ? cause.message : '上传失败，请重试'
+        throw cause
+      } finally {
+        updateImportSummary()
       }
-    }
+    }, uploadAbortController.signal)
     await refresh(true)
-    const submitted = uploadCompletedCount.value
-    const failed = uploadRetryCount.value
+    const batch = await getResumeImportBatch(batchId)
+    replaceEntriesFromBatch(batch)
+    const submitted = batch.counts.uploaded
+    const failed = batch.counts.failed
     feedback.value = submitted ? '已提交 ' + submitted + ' 份简历并关联“' + jobTitle + '”，AI 正在后台逐份解析和评分。' + (failed ? '另有 ' + failed + ' 份上传失败，可在窗口中重试。' : '') : ''
     if (failed) uploadDialogError.value = failed + ' 份简历上传失败，请查看各文件原因并重试；成功文件不会重复上传。'
-    if (candidateResumeFiles.value.length === 1 && !failed) showCreateCandidate.value = false
-  } finally { creatingCandidate.value = false }
+    if (batch.status !== 'cancelled') {
+      const stillUploading = batch.items.some(item => item.status === 'pending_upload' || item.status === 'uploading')
+      scheduleImportPolling(stillUploading ? 2000 : 5000)
+    }
+  } catch (cause) {
+    if (activeImportBatchStatus.value !== 'cancelled') uploadDialogError.value = cause instanceof Error ? cause.message : '批次创建失败'
+  } finally {
+    creatingCandidate.value = false
+  }
 }
 function resumeMimeType(filename: string): string {
   const extension = filename.split('.').pop()?.toLowerCase()
@@ -360,11 +519,20 @@ function selectResumeFile(event: Event) {
     if (!/\.(pdf|doc|docx|txt|md)$/i.test(file.name)) { rejected.push(file.name + '：不支持此文件格式'); continue }
     if (!file.size) { rejected.push(file.name + '：文件为空'); continue }
     if (file.size > 10 * 1024 * 1024) { rejected.push(file.name + '：单份简历不能超过 10 MB'); continue }
-    if (candidateResumeFiles.value.some(item => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified)) continue
-    candidateResumeFiles.value.push({ id: ++nextResumeEntryId, file, status: 'pending' })
+    if (candidateResumeFiles.value.some(item => item.originalFilename === file.name && item.sizeBytes === file.size && item.file?.lastModified === file.lastModified)) continue
+    candidateResumeFiles.value.push({
+      id: ++nextResumeEntryId,
+      file,
+      originalFilename: file.name,
+      mimeType: file.type || resumeMimeType(file.name),
+      sizeBytes: file.size,
+      status: 'pending',
+      progress: 0,
+    })
   }
   uploadDialogError.value = rejected.join('；')
   input.value = ''
+  updateImportSummary()
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -405,8 +573,17 @@ async function pollAnalysisInBackground(taskId: string): Promise<void> {
   }
 }
 
-onMounted(refresh)
-onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) clearTimeout(progressTimer) })
+onMounted(() => {
+  void refresh(true)
+  void restoreActiveImportBatch()
+})
+onUnmounted(() => {
+  disposed = true
+  refreshVersion += 1
+  uploadAbortController?.abort()
+  if (progressTimer) clearTimeout(progressTimer)
+  stopImportPolling()
+})
 </script>
 
 <template>
@@ -428,6 +605,11 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
       <button class="btn btn-primary" type="button" :disabled="creatingCandidate" @click="openApplication()">新建应聘申请</button>
     </div>
   </PageHeader>
+  <div v-if="activeImportBatchId && !showCreateCandidate" class="success-note resume-import-progress">
+    <span>简历导入进度：{{ importBatchSummary.finished }}/{{ importBatchSummary.total }}，{{ importBatchSummary.processing }} 份等待或正在分析</span>
+    <button class="btn btn-ghost" type="button" @click="viewImportProgress">查看进度</button>
+    <button v-if="activeImportBatchStatus === 'uploading'" class="btn btn-ghost" type="button" @click="cancelActiveImport">取消上传</button>
+  </div>
 
   <div class="entry-guide"><span><strong>上传简历并建档</strong> · 新人首次应聘，自动建档、关联岗位并分析</span><span><strong>新建应聘申请</strong> · 已有人才应聘新岗位，复用档案与简历、独立评分</span></div>
   <label class="talent-filter"><input v-model="talentFilter" type="checkbox" />只看人才库</label>
@@ -446,7 +628,7 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
         </div>
         <button class="resume-close" type="button" aria-label="关闭上传简历窗口" :disabled="creatingCandidate" @click="closeResumeUpload">×</button>
       </div>
-      <p class="resume-dialog-intro">支持上传单份或同时上传多份简历，系统会逐份识别候选人信息并完成建库。</p>
+      <p class="resume-dialog-intro">上传后由系统在后台建立候选人档案并发起分析，可关闭页面稍后查看进度。</p>
       <div v-if="uploadDialogError" class="error-note resume-upload-error" role="alert">{{ uploadDialogError }}</div>
       <div class="resume-form-grid">
         <div class="form-field resume-file-field">
@@ -464,8 +646,8 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
           </label>
           <ul v-if="candidateResumeFiles.length" class="resume-file-list" aria-label="已选择的简历">
             <li v-for="entry in candidateResumeFiles" :key="entry.id" class="resume-file-row" :data-status="entry.status">
-              <div class="resume-file-info"><strong :title="entry.file.name">{{ entry.file.name }}</strong><small>{{ resumeFileSize(entry.file) }} · {{ resumeUploadStatus(entry) }}</small><small v-if="entry.error" class="resume-file-error">{{ entry.error }}</small><small v-if="entry.status === 'failed' && entry.candidateId">候选人档案已创建，重试将复用，不会重复建档。</small></div>
-              <button v-if="entry.status !== 'queued'" class="resume-remove" type="button" :disabled="creatingCandidate" :aria-label="'移除 ' + entry.file.name" @click="removeResumeFile(entry.id)">移除</button>
+              <div class="resume-file-info"><strong :title="entry.originalFilename">{{ entry.originalFilename }}</strong><small>{{ resumeFileSize(entry) }} · {{ resumeUploadStatus(entry) }}</small><small v-if="entry.error" class="resume-file-error">{{ entry.error }}</small><small v-if="entry.status === 'failed' && entry.candidateId">候选人档案已创建，重试将复用，不会重复建档。</small></div>
+              <button v-if="['pending', 'failed', 'cancelled'].includes(entry.status)" class="resume-remove" type="button" :disabled="creatingCandidate" :aria-label="'移除 ' + entry.originalFilename" @click="removeResumeFile(entry.id)">移除</button>
             </li>
           </ul>
           <small class="muted resume-note">可多选文件或继续添加；每份简历单独建立候选人档案，解析姓名、邮箱和电话。</small>
@@ -485,6 +667,7 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
         <span class="resume-security"><span class="security-dot"></span> 文件仅用于候选人建档与分析</span>
         <div class="dialog-buttons">
           <button class="btn btn-ghost" type="button" :disabled="creatingCandidate" @click="closeResumeUpload">{{ uploadCompletedCount ? '完成' : '取消' }}</button>
+          <button v-if="activeImportBatchStatus === 'uploading'" class="btn btn-ghost resume-cancel-upload" type="button" @click="cancelActiveImport">取消上传</button>
           <button class="btn btn-primary resume-submit" type="button" :disabled="creatingCandidate || (candidateResumeFiles.length > 0 && !uploadPendingCount && !uploadRetryCount)" @click="submitCreateCandidate"><span class="button-spark" aria-hidden="true">✦</span>{{ uploadButtonLabel }}</button>
         </div>
       </div>
@@ -745,10 +928,15 @@ onUnmounted(() => { disposed = true; refreshVersion += 1; if (progressTimer) cle
 .resume-file-info strong { display: block; overflow-wrap: anywhere; color: #31566c; font-size: 12px; }
 .resume-file-info small { display: block; margin-top: 4px; color: #7b909d; font-size: 11px; }
 .resume-file-row[data-status="queued"] { border-color: #bce6d9; background: #f5fcf9; }
+.resume-file-row[data-status="processing"] { border-color: #c9ddf7; background: #f6faff; }
+.resume-file-row[data-status="completed"] { border-color: #bce6d9; background: #f0fbf7; }
 .resume-file-row[data-status="failed"] { border-color: #f3caca; background: #fffafa; }
+.resume-file-row[data-status="cancelled"] { border-color: #e2e8f0; background: #f8fafc; opacity: .78; }
 .resume-file-info .resume-file-error { color: #b91c1c; }
 .resume-remove { flex: 0 0 auto; padding: 4px 6px; background: transparent; border: 0; color: #8e6370; font-size: 11px; cursor: pointer; }
 .resume-remove:disabled, .resume-close:disabled { cursor: not-allowed; opacity: .5; }
+.resume-import-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.resume-import-progress .btn { padding: 5px 9px; }
 .resume-dialog .upload-box-copy small { white-space: normal; line-height: 1.6; }
 .resume-note { margin-top: 12px; line-height: 1.65; }
 .resume-select-wrap { position: relative; }

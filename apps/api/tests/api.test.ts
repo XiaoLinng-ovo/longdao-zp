@@ -1112,6 +1112,45 @@ describe('Phase 1 API', { concurrency: false }, () => {
     await login();
   });
 
+describe('resume import batches API', () => {
+  it('creates a batch, uploads one file internally, keeps it after cancel and restores progress', async () => {
+    await login()
+    const created = await requestJson('POST', '/api/v1/resume-import-batches', {
+      jobId: 'job-108',
+      files: [
+        { clientFileId: 'local-1', originalFilename: 'first.txt', mimeType: 'text/plain', sizeBytes: 27 },
+        { clientFileId: 'local-2', originalFilename: 'second.txt', mimeType: 'text/plain', sizeBytes: 28 },
+      ],
+    })
+    assert.equal(created.status, 201, JSON.stringify(created.body))
+    const batch = created.body.data
+    assert.equal(batch.items.length, 2)
+    assert.equal(batch.items[0].status, 'pending_upload')
+
+    const uploaded = await requestJson(
+      'POST',
+      `/api/v1/resume-import-batches/${batch.id}/items/${batch.items[0].id}/content`,
+      { content: Buffer.from('Synthetic resume for batch').toString('base64'), encoding: 'base64' },
+    )
+    assert.equal(uploaded.status, 200, JSON.stringify(uploaded.body))
+    assert.equal(uploaded.body.data.status, 'queued')
+    assert.ok(uploaded.body.data.candidateId)
+    assert.ok(uploaded.body.data.applicationId)
+    assert.ok(uploaded.body.data.analysisTaskId)
+
+    const cancelled = await requestJson('POST', `/api/v1/resume-import-batches/${batch.id}/cancel`)
+    assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body))
+    assert.equal(cancelled.body.data.status, 'cancelled')
+    assert.equal(cancelled.body.data.items[0].status, 'queued')
+    assert.equal(cancelled.body.data.items[1].status, 'cancelled')
+
+    const restored = await get(`/api/v1/resume-import-batches/${batch.id}`)
+    assert.equal(restored.status, 200, JSON.stringify(restored.body))
+    assert.equal(restored.body.data.items[0].candidateId, uploaded.body.data.candidateId)
+    assert.equal(restored.body.data.items[1].status, 'cancelled')
+  })
+})
+
 describe('candidate deletion API', () => {
   it('rejects invalid CSRF tokens without deleting the candidate', async () => {
     await login()

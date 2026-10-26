@@ -40,10 +40,11 @@ const resumeUploadOriginRelaxedPaths = new Set([
   '/api/v1/applications',
   '/api/v1/resumes'
 ])
+const resumeImportItemContentPath = /^\/api\/v1\/resume-import-batches\/[^/]+\/items\/[^/]+\/content$/
 
 /**
  * Resume onboarding may be opened from a temporary browser/tunnel origin.
- * Keep this opt-in and narrow: only the three POST endpoints used by import
+ * Keep this opt-in and narrow: only the POST endpoints used by resume import
  * allow a valid HTTP(S) origin outside the configured exact allowlist.
  */
 export function isAllowedResumeUploadOrigin(
@@ -55,7 +56,8 @@ export function isAllowedResumeUploadOrigin(
   allowDevelopmentOrigins = false
 ): boolean {
   if (isAllowedOrigin(origin, allowlist, allowDevelopmentOrigins)) return true
-  if (relaxOrigin !== 'true' || method?.toUpperCase() !== 'POST' || !resumeUploadOriginRelaxedPaths.has(path) || !origin) return false
+  const uploadPath = resumeUploadOriginRelaxedPaths.has(path) || resumeImportItemContentPath.test(path)
+  if (relaxOrigin !== 'true' || method?.toUpperCase() !== 'POST' || !uploadPath || !origin) return false
 
   try {
     const parsed = new URL(origin)

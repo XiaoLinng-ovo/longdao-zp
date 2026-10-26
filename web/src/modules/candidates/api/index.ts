@@ -1,4 +1,5 @@
 import { apiClient } from '../../../shared/api'
+import { getWorkspaceContext } from '../../../shared/api/workspace-context'
 import type { Candidate, ResumeScoreSummary } from '../../../shared/types/recruiting'
 
 export { loadJobs } from '../../jobs/api'
@@ -244,6 +245,133 @@ export async function listResumes(candidateId?: string): Promise<ApiResume[]> {
 
 export async function uploadResume(input: { candidateId: string; applicationId?: string; originalFilename: string; mimeType?: string; content: string; encoding?: 'utf8' | 'base64' }): Promise<{ resume: ApiResume; task: ApiAnalysisTask }> {
   return (await apiClient.postJson<{ resume: ApiResume; task: ApiAnalysisTask }>('/resumes', input)).data
+}
+
+export type ApiResumeImportBatchStatus = 'uploading' | 'completed' | 'cancelled'
+export type ApiResumeImportItemStatus = 'pending_upload' | 'uploading' | 'queued' | 'failed' | 'cancelled'
+
+export interface ApiResumeImportItem {
+  id: string
+  batchId: string
+  ordinal: number
+  clientFileId: string
+  originalFilename: string
+  mimeType: string
+  sizeBytes: number
+  status: ApiResumeImportItemStatus
+  candidateId?: string
+  applicationId?: string
+  resumeId?: string
+  analysisTaskId?: string
+  analysisStatus?: string
+  attempts: number
+  error?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApiResumeImportBatch {
+  id: string
+  jobId: string
+  status: ApiResumeImportBatchStatus
+  items: ApiResumeImportItem[]
+  counts: {
+    total: number
+    pendingUpload: number
+    uploading: number
+    uploaded: number
+    analyzing: number
+    completed: number
+    failed: number
+    cancelled: number
+  }
+  createdAt: string
+  updatedAt: string
+  cancelledAt?: string
+}
+
+export async function createResumeImportBatch(input: {
+  jobId: string
+  files: Array<{ clientFileId: string; originalFilename: string; mimeType: string; sizeBytes: number }>
+}): Promise<ApiResumeImportBatch> {
+  return (await apiClient.postJson<ApiResumeImportBatch>('/resume-import-batches', input)).data
+}
+
+export async function getResumeImportBatch(batchId: string): Promise<ApiResumeImportBatch> {
+  return (await apiClient.getJson<ApiResumeImportBatch>(`/resume-import-batches/${encodeURIComponent(batchId)}`)).data
+}
+
+export async function listResumeImportBatches(): Promise<ApiResumeImportBatch[]> {
+  const result = await apiClient.getJson<ApiResumeImportBatch[] | { items: ApiResumeImportBatch[] }>('/resume-import-batches?pageSize=20')
+  return Array.isArray(result.data) ? result.data : result.data.items
+}
+
+export async function cancelResumeImportBatch(batchId: string): Promise<ApiResumeImportBatch> {
+  return (await apiClient.postJson<ApiResumeImportBatch>(`/resume-import-batches/${encodeURIComponent(batchId)}/cancel`)).data
+}
+
+function csrfTokenFromCookie(): string {
+  const match = document.cookie.split(';').map(value => value.trim()).find(value => value.startsWith('smartrecruit_csrf='))
+  if (!match) return ''
+  try { return decodeURIComponent(match.slice('smartrecruit_csrf='.length)) } catch { return '' }
+}
+
+/**
+ * XHR is used only for resume bytes because fetch does not expose upload
+ * progress. Every item has its own timeout and abort signal.
+ */
+export function uploadResumeImportItem(
+  batchId: string,
+  itemId: string,
+  content: string,
+  options: { onProgress?: (percent: number) => void; signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ApiResumeImportItem> {
+  return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new DOMException('上传已取消', 'AbortError'))
+      return
+    }
+    const xhr = new XMLHttpRequest()
+    const workspace = getWorkspaceContext().workspaceId
+    let timedOut = false
+    const timeout = window.setTimeout(() => {
+      timedOut = true
+      xhr.abort()
+    }, options.timeoutMs ?? 60_000)
+    const finish = (operation: () => void) => {
+      window.clearTimeout(timeout)
+      options.signal?.removeEventListener('abort', abort)
+      operation()
+    }
+    const abort = () => xhr.abort()
+    options.signal?.addEventListener('abort', abort, { once: true })
+    xhr.open('POST', `/api/v1/resume-import-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/content`)
+    xhr.withCredentials = true
+    xhr.setRequestHeader('content-type', 'application/json; charset=utf-8')
+    xhr.setRequestHeader('accept', 'application/json')
+    const csrf = csrfTokenFromCookie()
+    if (csrf) xhr.setRequestHeader('x-csrf-token', csrf)
+    if (workspace) xhr.setRequestHeader('x-workspace-id', workspace)
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) options.onProgress?.(Math.min(99, Math.round(event.loaded / event.total * 100)))
+    }
+    xhr.onerror = () => finish(() => reject(new Error('网络连接中断，上传失败')))
+    xhr.onabort = () => finish(() => reject(timedOut ? new Error('上传超时，请重试') : new DOMException('上传已取消', 'AbortError')))
+    xhr.ontimeout = () => finish(() => reject(new Error('上传超时，请重试')))
+    xhr.onload = () => finish(() => {
+      let payload: unknown
+      try { payload = JSON.parse(xhr.responseText) } catch { reject(new Error('服务返回了无法解析的响应')); return }
+      const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+      if (xhr.status >= 200 && xhr.status < 300 && record.ok === true && record.data) {
+        options.onProgress?.(100)
+        resolve(record.data as ApiResumeImportItem)
+        return
+      }
+      const error = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : {}
+      reject(new Error(typeof error.message === 'string' ? error.message : `上传失败（HTTP ${xhr.status}）`))
+    })
+    xhr.send(JSON.stringify({ content, encoding: 'base64' }))
+  })
 }
 
 export async function listAnalysisTasks(): Promise<ApiAnalysisTask[]> {

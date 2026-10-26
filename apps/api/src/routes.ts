@@ -5,6 +5,7 @@ import { parseUsageFilters } from './platform/ai-usage-diagnostics.js';
 import { EntitlementService } from './platform/entitlements.js';
 import { PlatformService } from './platform/service.js';
 import { PlatformUsersService } from './platform/users/service.js';
+import { mapTrialQuotaError, TrialQuotaService } from './platform/trial-quota.js';
 import { EnterpriseAiStore, EnterpriseAiError, validateEnterpriseAiPatch, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
 import { testAiConnection } from './admin/ai-settings.js';
 import type { Middleware } from './http.js';
@@ -20,6 +21,7 @@ import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
 import type { ChannelProvider } from './integrations/channels/types.js';
 import { createDatabasePool } from './db/connection.js';
+import { MemoryResumeImportStore, PostgresResumeImportStore, ResumeImportError, ResumeImportService } from './recruiting/resume-import.js';
 import { authService } from './auth/middleware.js';
 import { isWorkspaceScopedPath } from './auth/workspace-context.js';
 import { WorkspaceInvitationsService, InvitationError } from './auth/workspace-invitations.js';
@@ -64,6 +66,8 @@ import { resolve } from 'node:path';
 import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, isAllowedResumeUploadOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
 
 const recruitingService = new RecruitingService();
+const resumeImportPool = process.env.NODE_ENV === 'test' ? undefined : createDatabasePool();
+const memoryResumeImports = new MemoryResumeImportStore();
 const liveInterviewSessions = new LiveInterviewSessionRepository(createDatabasePool());
 const liveInterviewVoices = new SessionVoiceprintTracker();
 const interviewQuestionSets = process.env.NODE_ENV === 'test'
@@ -71,6 +75,7 @@ const interviewQuestionSets = process.env.NODE_ENV === 'test'
   : new PostgresInterviewQuestionSetRepository(createDatabasePool());
 const platformService = new PlatformService(createDatabasePool());
 const platformUsers = new PlatformUsersService(createDatabasePool());
+const trialQuotaService = new TrialQuotaService(createDatabasePool());
 const billingSandboxService = new BillingSandboxService(createDatabasePool());
 const aiUsageService = new AiUsageService(createDatabasePool());
 const entitlementService = new EntitlementService(createDatabasePool());
@@ -151,12 +156,32 @@ const OFFER_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
 const ONBOARDING_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
 
 function errorFromRecruiting(error: unknown): never {
+  mapTrialQuotaError(error);
   if (error instanceof RecruitingWorkflowError) throw new HttpError(error.status, error.code, error.message);
   if ((error as { code?: string }).code) {
     const cause = error as Error & { code: string; status?: number };
     throw new HttpError(cause.status ?? 500, cause.code, cause.message);
   }
   throw error;
+}
+
+function resumeImportsFor(
+  recruiting: RecruitingService,
+  organizationId: string | undefined,
+): ResumeImportService {
+  const store = usePostgres && organizationId && resumeImportPool
+    ? new PostgresResumeImportStore(resumeImportPool, organizationId)
+    : memoryResumeImports;
+  return new ResumeImportService(store, recruiting);
+}
+
+async function runResumeImportAction<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof ResumeImportError) throw new HttpError(error.status, error.code, error.message);
+    throw error;
+  }
 }
 
 function requirePlatformAdmin(auth: NonNullable<Parameters<Middleware>[0]['auth']>): void {
@@ -532,6 +557,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/candidates',
     '/api/v1/candidate-tags',
     '/api/v1/resumes',
+    '/api/v1/resume-import-batches',
     '/api/v1/analysis-tasks',
     '/api/v1/analysis-results',
     '/api/v1/applications',
@@ -716,6 +742,10 @@ const routeMiddleware: Middleware = async (context, next) => {
       const jobs = await recruiting.listJobs(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('recruitmentRequestId') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);
       sendList(context, filterByDepartment(jobs, departmentScope(auth))); return;
     }
+    if (path === '/api/v1/trial-usage' && method === 'GET') {
+      sendSuccess(context, await trialQuotaService.read(auth.user.workspaceId!));
+      return;
+    }
     if (path === '/api/v1/jobs' && method === 'POST') {
       requireRole(auth, JOB_WRITE_ROLES);
       sendSuccess(context, await recruiting.createJob(await readJson(context) as never, auth.user.id), 201); return;
@@ -723,6 +753,44 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/candidates' && method === 'GET') { sendList(context, await recruiting.listCandidates(departmentScope(auth))); return; }
     if (path === '/api/v1/candidates' && method === 'POST') { requireRole(auth, CANDIDATE_WRITE_ROLES); sendSuccess(context, await recruiting.createCandidate(await readJson(context) as never, auth.user.id), 201); return; }
     if (path === '/api/v1/candidate-tags' && method === 'GET') { sendList(context, await recruiting.listCandidateTags()); return; }
+    if (path === '/api/v1/resume-import-batches' && method === 'GET') {
+      const resumeImports = resumeImportsFor(recruiting, auth.user.workspaceId)
+      sendList(context, await runResumeImportAction(() => resumeImports.listBatches(Number(context.url.searchParams.get('pageSize') ?? '20'))))
+      return
+    }
+    if (path === '/api/v1/resume-import-batches' && method === 'POST') {
+      requireRole(auth, CANDIDATE_WRITE_ROLES)
+      const resumeImports = resumeImportsFor(recruiting, auth.user.workspaceId)
+      const body = await readJson(context)
+      sendSuccess(context, await runResumeImportAction(() => resumeImports.createBatch(body, auth.user.id)), 201)
+      return
+    }
+    const resumeImportItemContentMatch = path.match(/^\/api\/v1\/resume-import-batches\/([^/]+)\/items\/([^/]+)\/content$/)
+    if (resumeImportItemContentMatch && method === 'POST') {
+      requireRole(auth, CANDIDATE_WRITE_ROLES)
+      const resumeImports = resumeImportsFor(recruiting, auth.user.workspaceId)
+      const body = await readJson(context)
+      sendSuccess(context, await runResumeImportAction(() => resumeImports.uploadItem(
+        resumeImportItemContentMatch[1]!,
+        resumeImportItemContentMatch[2]!,
+        body,
+        auth.user.id,
+      )))
+      return
+    }
+    const resumeImportCancelMatch = path.match(/^\/api\/v1\/resume-import-batches\/([^/]+)\/cancel$/)
+    if (resumeImportCancelMatch && method === 'POST') {
+      requireRole(auth, CANDIDATE_WRITE_ROLES)
+      const resumeImports = resumeImportsFor(recruiting, auth.user.workspaceId)
+      sendSuccess(context, await runResumeImportAction(() => resumeImports.cancelBatch(resumeImportCancelMatch[1]!)))
+      return
+    }
+    const resumeImportBatchMatch = path.match(/^\/api\/v1\/resume-import-batches\/([^/]+)$/)
+    if (resumeImportBatchMatch && method === 'GET') {
+      const resumeImports = resumeImportsFor(recruiting, auth.user.workspaceId)
+      sendSuccess(context, await runResumeImportAction(() => resumeImports.getBatch(resumeImportBatchMatch[1]!)))
+      return
+    }
     const candidateResumeApplicationMatch = path.match(/^\/api\/v1\/candidates\/([^/]+)\/resumes\/([^/]+)\/analyze-for-application$/);
     if (candidateResumeApplicationMatch && method === 'POST') {
       requireRole(auth, CANDIDATE_WRITE_ROLES);

@@ -46,12 +46,13 @@ test('development origins accept rotating loopback ports and Cloudflare quick tu
   assert.equal(isAllowedOrigin('https://new-random-address.trycloudflare.com', allowlist, false), false)
 })
 
-test('resume upload origin relaxation is scoped to the three POST onboarding endpoints', () => {
+test('resume upload origin relaxation is scoped to the POST onboarding endpoints', () => {
   const allowlist = ['https://app.example.com']
   const temporaryOrigin = 'https://temporary-tunnel.example'
   for (const path of ['/api/v1/candidates', '/api/v1/applications', '/api/v1/resumes']) {
     assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, path, 'POST', 'true'), true, path)
   }
+  assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, '/api/v1/resume-import-batches/batch-1/items/item-1/content', 'POST', 'true'), true)
   assert.equal(isAllowedResumeUploadOrigin('https://app.example.com', allowlist, '/api/v1/jobs', 'POST', 'false'), true)
   assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, '/api/v1/jobs', 'POST', 'true'), false)
   assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, '/api/v1/resumes', 'PATCH', 'true'), false)
@@ -59,7 +60,7 @@ test('resume upload origin relaxation is scoped to the three POST onboarding end
   for (const flag of [undefined, '', 'TRUE', '1']) {
     assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, '/api/v1/resumes', 'POST', flag), false)
   }
-  for (const path of ['/api/v1/candidates/id', '/api/v1/applications/id', '/api/v1/resumes/', '/api/v1/resumes/id/reparse', '/api/v1/admin/settings', '/api/v1/platform/customers', '/api/v1/auth/switch-workspace']) {
+  for (const path of ['/api/v1/candidates/id', '/api/v1/applications/id', '/api/v1/resumes/', '/api/v1/resumes/id/reparse', '/api/v1/resume-import-batches/batch-1', '/api/v1/resume-import-batches/batch-1/cancel', '/api/v1/admin/settings', '/api/v1/platform/customers', '/api/v1/auth/switch-workspace']) {
     assert.equal(isAllowedResumeUploadOrigin(temporaryOrigin, allowlist, path, 'POST', 'true'), false, path)
   }
   for (const method of [undefined, 'GET', 'PUT', 'DELETE']) {

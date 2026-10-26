@@ -7,9 +7,10 @@ export function isWorkspaceScopedPath(path: string): boolean {
   if (isPlatformManagementPath(path)) return false
   return [
     'departments', 'recruitment-requests', 'jobs', 'candidates', 'candidate-tags',
-    'resumes', 'analysis-tasks', 'analysis-results', 'applications', 'interviews',
+    'resumes', 'resume-import-batches', 'analysis-tasks', 'analysis-results', 'applications', 'interviews',
     'interviewer-options', 'interview-live-sessions', 'interview-live-segments',
     'offers', 'onboarding', 'dashboard', 'reports', 'workflow-events', 'admin', 'ai-skills',
+    'trial-usage',
   ].some((name) => path === `/api/v1/${name}` || path.startsWith(`/api/v1/${name}/`))
 }
 
