@@ -292,7 +292,7 @@ export class AdminService {
       const existing = await client.query('SELECT id FROM users WHERE lower(email) = $1', [email]);
       if (existing.rows[0]) throw new AdminConflictError('该邮箱已存在，请使用其他邮箱');
       const id = randomUUID();
-      await client.query('INSERT INTO users (id, email, display_name, password_hash, department_id, is_active) VALUES ($1, $2, $3, $4, $5, true)', [id, email, displayName, passwordHash, department.rows[0].id]);
+      await client.query("INSERT INTO users (id, email, display_name, password_hash, department_id, is_active, registration_source) VALUES ($1, $2, $3, $4, $5, true, 'platform_created')", [id, email, displayName, passwordHash, department.rows[0].id]);
       await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [id, roleResult.rows[0].id]);
       await client.query("INSERT INTO organization_members (organization_id, user_id, role, business_role, department_id) VALUES ($1, $2, 'member', $3, $4)", [organizationId, id, role, department.rows[0].id]);
       await this.appendAudit(actorId, 'admin.user.create', 'user', id, requestId, { email, organizationId, departmentCode, role, generatedPassword }, client);

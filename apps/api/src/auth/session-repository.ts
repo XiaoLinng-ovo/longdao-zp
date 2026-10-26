@@ -43,6 +43,7 @@ export class PostgresSessionRepository implements SessionRepository {
         WHERE lower(u.email) = lower($1) AND u.is_active = true LIMIT 1`, [email.trim()])
     const row = result.rows[0]
     if (!row?.password_hash || !(await verifyPassword(password, row.password_hash))) return undefined
+    await this.db.query('UPDATE users SET last_login_at = now() WHERE id = $1::uuid', [row.id])
     return { id: row.id, name: row.display_name, email: row.email, role: row.role, departmentId: row.department_code ?? row.department_id ?? '', ...(row.platform_role ? {platformRole: row.platform_role} : {}) }
   }
 

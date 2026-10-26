@@ -169,7 +169,7 @@ export class PlatformUsersService {
                 a.request_id,a.metadata,a.created_at
            FROM platform_audit_logs a LEFT JOIN organizations o ON o.id=a.organization_id
           WHERE a.actor_user_id=$1::uuid
-             OR a.organization_id IN (SELECT organization_id FROM organization_members WHERE user_id=$1::uuid)
+             OR (a.metadata->>'targetUserId')=$1::text
           ORDER BY a.created_at DESC LIMIT 30`,
         [userId],
       ),
@@ -178,7 +178,7 @@ export class PlatformUsersService {
                 a.request_id,a.metadata,a.created_at
            FROM audit_logs a LEFT JOIN organizations o ON o.id=a.organization_id
           WHERE a.actor_user_id=$1::uuid
-             OR a.organization_id IN (SELECT organization_id FROM organization_members WHERE user_id=$1::uuid)
+             OR (a.resource_type='organization_member' AND a.resource_id=$1::uuid)
           ORDER BY a.created_at DESC LIMIT 30`,
         [userId],
       ),
