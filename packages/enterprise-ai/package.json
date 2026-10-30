@@ -1,0 +1,16 @@
+{
+  "name": "@smartrecruit-pro/enterprise-ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "scripts": {
+    "build": "node --check index.js",
+    "test": "node --test index.test.js"
+  }
+}

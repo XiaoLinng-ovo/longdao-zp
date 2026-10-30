@@ -1,0 +1,188 @@
+diff --git a/web/src/modules/candidates/pages/CandidateListPage.vue b/web/src/modules/candidates/pages/CandidateListPage.vue
+index 5e55ed5..aff8091 100644
+--- a/web/src/modules/candidates/pages/CandidateListPage.vue
++++ b/web/src/modules/candidates/pages/CandidateListPage.vue
+@@ -228,6 +228,7 @@ const uploadPendingCount = computed(() => candidateResumeFiles.value.filter(item
+ const uploadStarted = computed(() => !!activeImportBatchId.value)
+ const uploadButtonLabel = computed(() => {
+   if (creatingCandidate.value) return '上传中（' + uploadCompletedCount.value + '/' + candidateResumeFiles.value.length + '）...'
++  if (candidateResumeFiles.value.length && uploadCompletedCount.value === candidateResumeFiles.value.length) return '已提交解析'
+   if (uploadRetryCount.value && !uploadPendingCount.value) return '重试失败文件（' + uploadRetryCount.value + '）'
+   return candidateResumeFiles.value.length > 1 ? '上传并解析（' + (uploadPendingCount.value + uploadRetryCount.value) + '份）' : '上传并解析'
+ })
+@@ -293,10 +294,10 @@ function openResumeUpload() {
+   showCreateCandidate.value = true
+ }
+ function viewImportProgress() {
+-  if (!creatingCandidate.value) showCreateCandidate.value = true
++  showCreateCandidate.value = true
+ }
+ function closeResumeUpload() {
+-  if (!creatingCandidate.value) showCreateCandidate.value = false
++  showCreateCandidate.value = false
+ }
+ function removeResumeFile(id: number) {
+   if (creatingCandidate.value) return
+@@ -393,15 +394,26 @@ function scheduleImportPolling(delay = 2000) {
+   importPollTimer.value = setTimeout(() => { void refreshImportBatch(true) }, delay)
+ }
+ async function refreshImportBatch(scheduleNext = true) {
+-  if (!activeImportBatchId.value) return
++  const batchId = activeImportBatchId.value
++  if (!batchId || disposed) return
++  if (creatingCandidate.value) {
++    if (scheduleNext) scheduleImportPolling()
++    return
++  }
+   try {
+-    const batch = await getResumeImportBatch(activeImportBatchId.value)
++    const batch = await getResumeImportBatch(batchId)
++    if (disposed || activeImportBatchId.value !== batchId) return
++    if (creatingCandidate.value) {
++      if (scheduleNext) scheduleImportPolling()
++      return
++    }
+     replaceEntriesFromBatch(batch)
+     const active = batch.items.some(item => ['pending_upload', 'uploading', 'queued'].includes(item.status) && item.analysisStatus !== 'completed' && item.analysisStatus !== 'failed')
+     if (scheduleNext && active) scheduleImportPolling(batch.items.some(item => item.status === 'queued') ? 5000 : 2000)
+     if (!active) stopImportPolling()
+     if (batch.counts.completed > 0) await refresh(true)
+   } catch (cause) {
++    if (disposed || activeImportBatchId.value !== batchId) return
+     if (cause instanceof ApiClientError && cause.status === 404) {
+       rememberBatch('')
+       candidateResumeFiles.value = []
+@@ -446,6 +458,7 @@ async function submitCreateCandidate() {
+   const jobId = candidateJobId.value
+   const jobTitle = jobs.value.find(job => (job.entityId || job.id) === jobId)?.title || '所选岗位'
+   creatingCandidate.value = true
++  stopImportPolling()
+   uploadDialogError.value = ''
+   error.value = ''
+   feedback.value = ''
+@@ -490,21 +503,21 @@ async function submitCreateCandidate() {
+         updateImportSummary()
+       }
+     }, uploadAbortController.signal)
+-    await refresh(true)
+-    const batch = await getResumeImportBatch(batchId)
+-    replaceEntriesFromBatch(batch)
+-    const submitted = batch.counts.uploaded
+-    const failed = batch.counts.failed
++    if (disposed) return
++    const submitted = uploadCompletedCount.value
++    const failed = uploadRetryCount.value
++    // Upload completion must not wait for list refreshes or progress reads.
++    if (submitted === candidateResumeFiles.value.length && activeImportBatchStatus.value !== 'cancelled') {
++      activeImportBatchStatus.value = 'completed'
++    }
+     feedback.value = submitted ? '已提交 ' + submitted + ' 份简历并关联“' + jobTitle + '”，AI 正在后台逐份解析和评分。' + (failed ? '另有 ' + failed + ' 份上传失败，可在窗口中重试。' : '') : ''
+     if (failed) uploadDialogError.value = failed + ' 份简历上传失败，请查看各文件原因并重试；成功文件不会重复上传。'
+-    if (batch.status !== 'cancelled') {
+-      const stillUploading = batch.items.some(item => item.status === 'pending_upload' || item.status === 'uploading')
+-      scheduleImportPolling(stillUploading ? 2000 : 5000)
+-    }
++    void refresh(true)
+   } catch (cause) {
+     if (activeImportBatchStatus.value !== 'cancelled') uploadDialogError.value = cause instanceof Error ? cause.message : '批次创建失败'
+   } finally {
+     creatingCandidate.value = false
++    if (!disposed && activeImportBatchId.value) scheduleImportPolling(0)
+   }
+ }
+ function resumeMimeType(filename: string): string {
+@@ -626,7 +639,7 @@ onUnmounted(() => {
+             <h3 id="resume-dialog-title">上传简历自动建库</h3>
+           </div>
+         </div>
+-        <button class="resume-close" type="button" aria-label="关闭上传简历窗口" :disabled="creatingCandidate" @click="closeResumeUpload">×</button>
++        <button class="resume-close" type="button" aria-label="关闭上传简历窗口" @click="closeResumeUpload">×</button>
+       </div>
+       <p class="resume-dialog-intro">上传后由系统在后台建立候选人档案并发起分析，可关闭页面稍后查看进度。</p>
+       <div v-if="uploadDialogError" class="error-note resume-upload-error" role="alert">{{ uploadDialogError }}</div>
+@@ -666,7 +679,7 @@ onUnmounted(() => {
+       <div class="resume-dialog-footer">
+         <span class="resume-security"><span class="security-dot"></span> 文件仅用于候选人建档与分析</span>
+         <div class="dialog-buttons">
+-          <button class="btn btn-ghost" type="button" :disabled="creatingCandidate" @click="closeResumeUpload">{{ uploadCompletedCount ? '完成' : '取消' }}</button>
++          <button class="btn btn-ghost" type="button" @click="closeResumeUpload">{{ creatingCandidate ? '收起' : uploadCompletedCount ? '完成' : '取消' }}</button>
+           <button v-if="activeImportBatchStatus === 'uploading'" class="btn btn-ghost resume-cancel-upload" type="button" @click="cancelActiveImport">取消上传</button>
+           <button class="btn btn-primary resume-submit" type="button" :disabled="creatingCandidate || (candidateResumeFiles.length > 0 && !uploadPendingCount && !uploadRetryCount)" @click="submitCreateCandidate"><span class="button-spark" aria-hidden="true">✦</span>{{ uploadButtonLabel }}</button>
+         </div>
+diff --git a/web/src/modules/candidates/pages/CandidateListPage.batch-upload.test.ts b/web/src/modules/candidates/pages/CandidateListPage.batch-upload.test.ts
+index d1f6804..0c2075c 100644
+--- a/web/src/modules/candidates/pages/CandidateListPage.batch-upload.test.ts
++++ b/web/src/modules/candidates/pages/CandidateListPage.batch-upload.test.ts
+@@ -190,6 +190,72 @@ describe('resumable batch upload', () => {
+     expect(root.querySelector('.resume-dialog')).toBeNull()
+   })
+ 
++  it('unlocks completed uploads even while the candidate list never responds', async () => {
++    await mount(); files(file('已上传.txt')); job(); await flush()
++    vi.mocked(loadCandidates).mockImplementation(() => new Promise(() => {}))
++    submit().click()
++    await waitFor(() => expect(root.querySelectorAll('[data-status="queued"]')).toHaveLength(1))
++    await waitFor(() => expect(readBatch).toHaveBeenCalledTimes(1))
++    expect(submit().textContent).toContain('已提交解析')
++    expect(button('完成').disabled).toBe(false)
++    expect(button('新建应聘申请').disabled).toBe(false)
++    button('完成').click(); await flush()
++    expect(root.querySelector('.resume-dialog')).toBeNull()
++    expect(uploadItem).toHaveBeenCalledTimes(1)
++  })
++
++  it('unlocks completed uploads even while reading the batch never responds', async () => {
++    await mount(); files(file('已上传.txt')); job(); await flush()
++    readBatch.mockImplementation(() => new Promise(() => {}))
++    submit().click()
++    await waitFor(() => expect(root.querySelectorAll('[data-status="queued"]')).toHaveLength(1))
++    await waitFor(() => expect(readBatch).toHaveBeenCalledTimes(1))
++    expect(button('完成').disabled).toBe(false)
++    expect(button('上传简历并建档').disabled).toBe(false)
++    expect(submit().textContent).toContain('已提交解析')
++    button('完成').click(); await flush()
++    expect(root.querySelector('.resume-dialog')).toBeNull()
++  })
++
++  it('does not turn an accepted upload into a failure when progress refresh fails', async () => {
++    await mount(); files(file('已上传.txt')); job(); await flush()
++    readBatch.mockRejectedValue(new Error('读取导入进度失败'))
++    submit().click()
++    await waitFor(() => expect(root.textContent).toContain('读取导入进度失败'))
++    expect(root.querySelectorAll('[data-status="queued"]')).toHaveLength(1)
++    expect(root.querySelectorAll('[data-status="failed"]')).toHaveLength(0)
++    expect(button('完成').disabled).toBe(false)
++    expect(submit().textContent).toContain('已提交解析')
++    expect(submit().disabled).toBe(true)
++    expect(uploadItem).toHaveBeenCalledTimes(1)
++  })
++
++  it('can hide and reopen the dialog without aborting an active upload', async () => {
++    let release!: () => void
++    let signal: AbortSignal | undefined
++    uploadItem.mockImplementation((_batchId, itemId, _content, options) => new Promise(resolve => {
++      signal = options?.signal
++      release = () => {
++        const item = itemFor(itemId)
++        item.status = 'queued'; item.analysisStatus = 'queued'; refreshCounts()
++        resolve(structuredClone(item))
++      }
++    }))
++    await mount(); files(file('上传中.txt')); job(); await flush(); submit().click()
++    await waitFor(() => expect(uploadItem).toHaveBeenCalledTimes(1))
++    const close = root.querySelector<HTMLButtonElement>('.resume-close')!
++    expect(close.disabled).toBe(false)
++    close.click(); await flush()
++    expect(root.querySelector('.resume-dialog')).toBeNull()
++    expect(signal?.aborted).toBe(false)
++    button('查看进度').click(); await flush()
++    expect(root.querySelectorAll('[data-status="uploading"]')).toHaveLength(1)
++    release()
++    await waitFor(() => expect(button('完成')?.disabled).toBe(false))
++    expect(uploadItem).toHaveBeenCalledTimes(1)
++    expect(cancelBatch).not.toHaveBeenCalled()
++  })
++
+   it('isolates a failed item and retries without creating another batch', async () => {
+     uploadItem.mockImplementation(async (_batchId, itemId, _content, options) => {
+       const item = itemFor(itemId)

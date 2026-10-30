@@ -1,0 +1,32 @@
+FROM node:22-alpine
+RUN apk add --no-cache ffmpeg
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@9.15.5 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/worker/package.json apps/worker/package.json
+# Existing shared-library build scripts use the Web workspace TypeScript fallback.
+COPY web/package.json web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/resume-intelligence/package.json packages/resume-intelligence/package.json
+COPY packages/object-storage/package.json packages/object-storage/package.json
+COPY packages/enterprise-ai/package.json packages/enterprise-ai/package.json
+RUN pnpm install --frozen-lockfile
+COPY apps/api/src ./apps/api/src
+COPY apps/api/tsconfig.json ./apps/api/tsconfig.json
+COPY apps/worker/src ./apps/worker/src
+COPY apps/worker/scripts ./apps/worker/scripts
+COPY apps/worker/tsconfig.json ./apps/worker/tsconfig.json
+COPY packages/contracts/tsconfig*.json ./packages/contracts/
+COPY packages/contracts/src ./packages/contracts/src
+COPY packages/contracts/scripts ./packages/contracts/scripts
+COPY packages/resume-intelligence/tsconfig*.json ./packages/resume-intelligence/
+COPY packages/resume-intelligence/src ./packages/resume-intelligence/src
+COPY packages/resume-intelligence/scripts ./packages/resume-intelligence/scripts
+COPY packages/object-storage/tsconfig.json ./packages/object-storage/tsconfig.json
+COPY packages/object-storage/src ./packages/object-storage/src
+COPY packages/enterprise-ai/index.js packages/enterprise-ai/index.d.ts ./packages/enterprise-ai/
+RUN pnpm --filter @smartrecruit-pro/contracts build && pnpm --filter @smartrecruit-pro/object-storage build && pnpm --filter @smartrecruit-pro/resume-intelligence build && pnpm --filter @smartrecruit-pro/enterprise-ai build && pnpm --filter @smartrecruit-pro/api build && pnpm --filter @smartrecruit-pro/worker build
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=3100
+EXPOSE 3100
+CMD ["node", "apps/api/dist/src/index.js"]
