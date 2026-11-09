@@ -1,42 +1,6 @@
 import { apiClient } from '../../../shared/api'
 import type { Requisition } from '../../../shared/types/recruiting'
 
-export interface ApprovalDetails {
-  current: {
-    id: string
-    entityType: string
-    entityId: string
-    version: number
-    status: string
-    provider?: string
-    externalInstanceId?: string
-    completedAt?: string
-    createdAt: string
-    updatedAt: string
-  } | null
-  steps: Array<{
-    id: string
-    instanceId: string
-    order: number
-    name: string
-    approverRole: string
-    externalStepId?: string
-    nodeName?: string
-    status: string
-    actedAt?: string
-  }>
-  records: Array<{
-    id: string
-    instanceId: string
-    stepId: string
-    actorId: string
-    approver?: string
-    action: 'approve' | 'reject' | 'progress'
-    comment?: string
-    createdAt: string
-  }>
-}
-
 export interface ApiRequisition {
   id: string
   code: string
@@ -62,7 +26,7 @@ export interface ApiRequisition {
 
 export interface ApiDepartment { id: string; code: string; name: string; isActive: boolean; createdAt?: string; updatedAt?: string }
 
-export type RequisitionAction = 'submit' | 'approve' | 'reject' | 'withdraw' | 'close' | 'resubmit' | 'cancel' | 'convert'
+export type RequisitionAction = 'submit' | 'withdraw' | 'close' | 'resubmit' | 'cancel' | 'convert'
 
 export interface CreateRequisitionInput {
   title: string
@@ -165,10 +129,6 @@ export async function loadRequisitionRows(): Promise<RequisitionView[]> {
 
 export async function getRequisition(id: string): Promise<ApiRequisition> {
   return (await apiClient.getJson<ApiRequisition>(`/recruitment-requests/${id}`)).data
-}
-
-export async function getRequisitionApproval(id: string): Promise<ApprovalDetails> {
-  return (await apiClient.getJson<ApprovalDetails>(`/recruitment-requests/${id}/approval`)).data
 }
 
 export async function createRequisition(input: CreateRequisitionInput): Promise<ApiRequisition> {

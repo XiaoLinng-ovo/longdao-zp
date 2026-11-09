@@ -5,38 +5,36 @@ import { parseUsageFilters } from './platform/ai-usage-diagnostics.js';
 import { EntitlementService } from './platform/entitlements.js';
 import { PlatformService } from './platform/service.js';
 import { PlatformUsersService } from './platform/users/service.js';
+import { isPlatformAdmin } from './platform/roles.js';
 import { mapTrialQuotaError, TrialQuotaService } from './platform/trial-quota.js';
 import { EnterpriseAiStore, EnterpriseAiError, validateEnterpriseAiPatch, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
-import { testAiConnection } from './admin/ai-settings.js';
+import { readAiSettings, testAiConnection } from './admin/ai-settings.js';
+import { decodePdfAttachment, readSmtpEnvSettings, sendSmtpMail, testSmtpConnection, updateSmtpEnvSettings } from './integrations/email/smtp.js';
 import type { Middleware } from './http.js';
 import { HttpError } from './http.js';
 import { sendSuccess, type ApiMeta } from './response.js';
-import { readBody, readJson } from './body.js';
+import { readJson } from './body.js';
 import { RecruitingService } from './recruiting/service.js';
+import { offerTemplateFieldValues } from './recruiting/offer-template-fields.js';
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { RepositoryNotFoundError } from './recruiting/repositories/postgres-repository.js';
 import { AdminService, AdminConflictError, AdminNotFoundError, AdminValidationError, type AiPromptSkillTarget } from './admin/service.js';
-import { RecruitmentApprovalSettingsError, RecruitmentApprovalSettingsService } from './admin/recruitment-approval-settings.js';
 import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
 import type { ChannelProvider } from './integrations/channels/types.js';
 import { createDatabasePool } from './db/connection.js';
 import { MemoryResumeImportStore, PostgresResumeImportStore, ResumeImportError, ResumeImportService } from './recruiting/resume-import.js';
 import { authService } from './auth/middleware.js';
+import { requireSystemAdministrator } from './auth/system-administrator.js';
 import { isWorkspaceScopedPath } from './auth/workspace-context.js';
 import { WorkspaceInvitationsService, InvitationError } from './auth/workspace-invitations.js';
 import { readSavedAccountSessions, buildSavedAccountsCookie } from './auth/saved-accounts.js';
-import type { Role } from './auth/types.js';
+import { resolveAuthClientIp } from './auth/client-ip.js';
+import type { AuthSession, Role } from './auth/types.js';
 import { timingSafeEqual } from 'node:crypto';
 import { DingTalkJobSyncError, DingTalkJobSyncService } from './integrations/dingtalk/job-sync.js';
 import { PostgresDingTalkJobSyncRepository } from './integrations/dingtalk/postgres-job-sync.js';
 import { MemoryDingTalkJobSyncRepository } from './integrations/dingtalk/memory-job-sync.js';
-import { createConfiguredDingTalkApprovalClient } from './integrations/dingtalk/approval-client.js';
-import { DingTalkApprovalWorkflow, DingTalkApprovalWorkflowError } from './integrations/dingtalk/approval-workflow.js';
-import { PostgresDingTalkApprovalRepository } from './integrations/dingtalk/postgres-approval-workflow.js';
-import { mockDingTalkApprovalClient } from './integrations/dingtalk/mock-approval-client.js';
-import { executePlatformRecruitmentApprovalAction, executeRecruitmentApprovalAction } from './integrations/dingtalk/approval-routing.js';
-import { executeOfferApprovalAction } from './integrations/dingtalk/offer-approval.js';
 import { createInterviewQuestionGenerator, generateLocalInterviewQuestions, InterviewQuestionGenerationError, loadInterviewQuestionGeneratorConfig, questionsForInterviewGroup, replaceInterviewQuestionGroup, type InterviewQuestionConversationMessage, type InterviewQuestionGroup } from './interviews/question-generator.js';
 import { createInterviewAnswerAnalyzer, InterviewAnswerAnalysisError, loadInterviewAnswerAnalyzerConfig } from './interviews/answer-analyzer.js';
 
@@ -66,7 +64,16 @@ import { FullAudioTranscription } from './interviews/full-audio-transcription.js
 import { parseLiveSessionPath } from './interviews/live-route.js';
 import { createObjectStorageFromEnv } from '@smartrecruit-pro/object-storage';
 import { resolve } from 'node:path';
-import { buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, isAllowedResumeUploadOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
+import { allowsLocalDevelopmentOrigins, buildAuthCookie, buildCsrfCookie, generateCsrfToken, isAllowedOrigin, isAllowedResumeUploadOrigin, validateCsrf, readCookie, parseAllowedOrigins, shouldProtectCsrf } from './auth/security.js';
+
+/**
+ * 浏览器写请求一定会带 Origin；自动化脚本、健康检查与测试可能不带。
+ * 生产环境或显式开启 REQUIRE_CSRF 时，缺失 Origin 仍视为不可信来源；
+ * 其他环境交给 CSRF Token 校验兜底，避免本地工具与测试被误伤。
+ */
+function originIsStrict(): boolean {
+  return process.env.NODE_ENV === 'production' || process.env.REQUIRE_CSRF === 'true'
+}
 
 const recruitingService = new RecruitingService();
 const resumeImportPool = process.env.NODE_ENV === 'test' ? undefined : createDatabasePool();
@@ -93,72 +100,83 @@ const interviewAudioRecordings = new InterviewAudioRecordingRepository(createDat
 const liveAudioTranscriptions = new LiveAudioTranscriptionRepository(createDatabasePool());
 const adminService = new AdminService(createDatabasePool());
 const workspaceInvitations = new WorkspaceInvitationsService(createDatabasePool());
-const recruitmentApprovalSettings = new RecruitmentApprovalSettingsService(createDatabasePool());
 const dingTalkJobSync = new DingTalkJobSyncService(
   process.env.NODE_ENV === 'test' ? new MemoryDingTalkJobSyncRepository() : new PostgresDingTalkJobSyncRepository(createDatabasePool()),
   { platformBaseUrl: process.env.PLATFORM_BASE_URL || 'http://127.0.0.1:5174' },
 );
-const dingTalkApprovalRepository = new PostgresDingTalkApprovalRepository(createDatabasePool());
-const DINGTALK_MOCK_AES_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-function dingTalkApprovalMode(): 'mock' | 'real' | 'off' {
-  const mode = (process.env.DINGTALK_APPROVAL_MODE ?? 'mock').trim().toLowerCase();
-  return mode === 'real' || mode === 'off' ? mode : 'mock';
-}
-function isDingTalkMockMode(): boolean { return dingTalkApprovalMode() === 'mock'; }
-function getDingTalkApproval(): DingTalkApprovalWorkflow | undefined {
-  // 单元测试不应因为仓库根 .env 中的模拟开关而连 PostgreSQL。
-  if (process.env.NODE_ENV === 'test') return undefined;
-  if (isDingTalkMockMode()) {
-    return new DingTalkApprovalWorkflow(dingTalkApprovalRepository, mockDingTalkApprovalClient, {
-      callbackToken: 'mock-callback-token',
-      callbackAesKey: DINGTALK_MOCK_AES_KEY,
-      callbackCorpId: 'mock-corp-id',
-    });
-  }
-  if (dingTalkApprovalMode() !== 'real') return undefined;
-  const client = createConfiguredDingTalkApprovalClient();
-  const callbackToken = process.env.DINGTALK_CALLBACK_TOKEN?.trim();
-  const callbackAesKey = process.env.DINGTALK_CALLBACK_AES_KEY?.trim();
-  const callbackCorpId = process.env.DINGTALK_CALLBACK_CORP_ID?.trim();
-  return client && callbackToken && callbackAesKey && callbackCorpId
-    ? new DingTalkApprovalWorkflow(dingTalkApprovalRepository, client, {
-      callbackToken, callbackAesKey, callbackCorpId,
-    })
-  : undefined;
-}
-function getDingTalkCallbackWorkflow(): { workflow: DingTalkApprovalWorkflow; verificationOnly: boolean } | undefined {
-  if (!isDingTalkMockMode()) {
-    const workflow = getDingTalkApproval()
-    return workflow ? { workflow, verificationOnly: false } : undefined
-  }
-  // Permit DingTalk's encrypted URL challenge in mock mode, but never apply real approval events.
-  const callbackToken = process.env.DINGTALK_CALLBACK_TOKEN?.trim()
-  const callbackAesKey = process.env.DINGTALK_CALLBACK_AES_KEY?.trim()
-  const callbackCorpId = process.env.DINGTALK_CALLBACK_CORP_ID?.trim()
-  if (!callbackToken || !callbackAesKey || !callbackCorpId) return undefined
-  return {
-    workflow: new DingTalkApprovalWorkflow(dingTalkApprovalRepository, mockDingTalkApprovalClient, { callbackToken, callbackAesKey, callbackCorpId }),
-    verificationOnly: true,
-  }
-}
-function resolveDingTalkOriginatorUserId(internalUserId: string): Promise<string> {
-  return isDingTalkMockMode()
-    ? Promise.resolve(`mock-user-${internalUserId}`)
-    : dingTalkApprovalRepository.resolveExternalUserId(internalUserId);
-}
 const usePostgres = process.env.NODE_ENV !== 'test';
 const AUTH_COOKIE = 'smartrecruit_session';
 const SESSION_COOKIE_MAX_AGE = 60 * 60 * 12;
 const DEFAULT_AUTH_ROLES: Role[] = ['recruiter', 'hiring_manager', 'approver', 'admin', 'hr_admin', 'interviewer'];
-const ADMIN_ROLES: Role[] = ['admin', 'hr_admin'];
-const RECRUITMENT_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
-const RECRUITMENT_APPROVAL_ROLES: Role[] = ['approver', 'hiring_manager', 'admin', 'hr_admin'];
-const JOB_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
-const CANDIDATE_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
-const APPLICATION_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
-const INTERVIEW_WRITE_ROLES: Role[] = ['recruiter', 'hiring_manager', 'admin', 'hr_admin', 'interviewer'];
-const OFFER_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
-const ONBOARDING_WRITE_ROLES: Role[] = ['recruiter', 'admin', 'hr_admin'];
+// 企业业务账号不再按招聘专员、部门负责人、审批人或面试官拆分权限。
+// 这些角色值仍保留在数据库中用于兼容历史数据，但业务接口统一按“已认证企业用户”处理。
+const ENTERPRISE_USER_ROLES: Role[] = [...DEFAULT_AUTH_ROLES];
+const ADMIN_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const RECRUITMENT_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const JOB_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const CANDIDATE_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const APPLICATION_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const INTERVIEW_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const OFFER_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const OFFER_EMAIL_SENDABLE_STATUSES = new Set(['draft', 'pending_approval', 'approved', 'sent', 'cancelled']);
+const ONBOARDING_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+const ONBOARDING_MATERIAL_WRITE_ROLES: Role[] = ENTERPRISE_USER_ROLES;
+// SMTP is an external side effect. Serialize matching Offer sends per API process.
+const offerEmailInFlight = new Set<string>();
+// A resolved SMTP request can still be followed by a database failure. Do not let
+// this API process send the same Offer again until an administrator verifies it.
+const offerEmailDeliveryUncertain = new Set<string>();
+
+function reportsDisabledError(): HttpError {
+  return new HttpError(404, 'RECRUITMENT_REPORTS_DISABLED', '招聘报表当前未启用');
+}
+
+async function reportsEnabledForRequest(): Promise<boolean> {
+  try {
+    return await adminService.getRecruitmentReportsEnabled();
+  } catch (error) {
+    // The test server can run without PostgreSQL. Production must fail closed.
+    if (process.env.NODE_ENV === 'test') return process.env.VITE_RECRUITMENT_REPORTS_ENABLED !== 'false';
+    throw error;
+  }
+}
+
+function authClientAddress(context: Parameters<Middleware>[0]): { ipAddress?: string } {
+  const ipAddress = resolveAuthClientIp(
+    context.req.socket.remoteAddress,
+    context.req.headers['x-forwarded-for'],
+  );
+  return ipAddress ? { ipAddress } : {};
+}
+
+async function sendAuthenticatedSession(
+  context: Parameters<Middleware>[0],
+  result: { session: AuthSession; token: string; recoveryCodes?: string[] },
+  status = 200,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const production = process.env.NODE_ENV === 'production';
+  const csrfToken = generateCsrfToken();
+  const accounts = (await readSavedAccountSessions(authService, context.req.headers.cookie, production))
+    .filter(({ auth }) => auth.user.id !== result.session.user.id);
+  accounts.push({
+    token: result.token,
+    auth: { user: result.session.user, sessionId: result.session.sessionId, method: 'session' },
+  });
+  context.res.setHeader('set-cookie', [
+    buildAuthCookie(result.token, { production, maxAge: SESSION_COOKIE_MAX_AGE }),
+    buildCsrfCookie(csrfToken, { production, maxAge: SESSION_COOKIE_MAX_AGE }),
+    buildSavedAccountsCookie(accounts, { production, maxAge: SESSION_COOKIE_MAX_AGE }),
+  ]);
+  sendSuccess(context, {
+    user: result.session.user,
+    sessionId: result.session.sessionId,
+    expiresAt: result.session.expiresAt,
+    workspaces: await authService.listWorkspaces(result.session.user.id),
+    ...(result.recoveryCodes ? { recoveryCodes: result.recoveryCodes } : {}),
+    ...extra,
+  }, status);
+}
 
 function errorFromRecruiting(error: unknown): never {
   mapTrialQuotaError(error);
@@ -190,7 +208,7 @@ async function runResumeImportAction<T>(operation: () => Promise<T>): Promise<T>
 }
 
 function requirePlatformAdmin(auth: NonNullable<Parameters<Middleware>[0]['auth']>): void {
-  if (auth.user.platformRole !== 'admin') throw new HttpError(403, 'PLATFORM_PERMISSION_REQUIRED', '此功能仅对平台管理员开放');
+  if (!isPlatformAdmin(auth.user.platformRole)) throw new HttpError(403, 'PLATFORM_PERMISSION_REQUIRED', '此功能仅对平台管理员开放');
 }
 
 function requireRole(auth: NonNullable<Parameters<Middleware>[0]['auth']>, roles: Role[]): void {
@@ -204,9 +222,8 @@ function requireRole(auth: NonNullable<Parameters<Middleware>[0]['auth']>, roles
 }
 
 function departmentScope(auth: NonNullable<Parameters<Middleware>[0]['auth']>): string | undefined {
-  if (auth.user.role !== 'hiring_manager') return undefined;
-  if (!auth.user.departmentId?.trim()) throw new HttpError(403, 'DEPARTMENT_SCOPE_REQUIRED', '当前部门负责人未绑定部门，请联系企业管理员设置后重试');
-  return auth.user.departmentId;
+  // 部门仅用于组织数据，不再作为企业业务账号的数据访问边界。
+  return undefined;
 }
 
 function filterByDepartment<T extends { departmentId: string }>(items: T[], scope: string | undefined): T[] {
@@ -248,6 +265,12 @@ function assertVersion(expected: number | undefined, actual: number): void {
 
 function setVersionEtag(context: Parameters<Middleware>[0], version: number): void {
   context.res.setHeader('etag', `"${version}"`)
+}
+
+/** Offer no longer uses approval. Retain legacy storage fields without exposing them to clients. */
+function withoutOfferApproval<T extends object>(value: T): Omit<T, 'approval'> {
+  const { approval: _approval, ...result } = value as T & { approval?: unknown }
+  return result
 }
 
 function requireDingTalkToken(context: Parameters<Middleware>[0]): void {
@@ -319,19 +342,35 @@ const routeMiddleware: Middleware = async (context, next) => {
         return 'unavailable'
       }
     })()
+    const ocrStatus = process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable'
+    const llmStatus = readAiSettings().configured ? 'ok' : 'not_configured'
+    // 语音转写只要有一路可用即视为可用；两路都不可用会导致面试转写整体失败，必须显式降级。
+    const voiceReady = funasrStatus === 'ok' || fasterWhisperStatus === 'ok'
+    const degradedReasons: string[] = []
+    if (!voiceReady) degradedReasons.push('语音转写不可用：FunASR 与 faster-whisper 均未就绪')
+    if (ocrStatus !== 'ok') degradedReasons.push('OCR 服务未配置，简历原件解析不可用')
+    if (llmStatus !== 'ok') degradedReasons.push('LLM 未配置，AI 生成能力不可用')
     sendSuccess(context, {
-      status: 'ready',
+      status: degradedReasons.length ? 'degraded' : 'ready',
+      degradedReasons,
       checks: {
         configuration: 'ok',
         auth: context.auth ? 'ok' : 'anonymous',
         externalServices: {
           funasr: funasrStatus,
           fasterWhisper: fasterWhisperStatus,
-          llm: 'requires_workspace_configuration',
-          ocr: process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable',
+          llm: llmStatus,
+          ocr: ocrStatus,
         },
       }
     });
+    return;
+  }
+
+  if (path === '/api/v1/system/features' && method === 'GET') {
+    requireAuth(context);
+    context.res.setHeader('cache-control', 'private, no-store');
+    sendSuccess(context, { recruitmentReportsEnabled: await reportsEnabledForRequest() });
     return;
   }
 
@@ -348,7 +387,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (shouldProtectCsrf(method, process.env.REQUIRE_CSRF)) {
       const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
       const origin = context.req.headers.origin;
-      if (allowed.length && !isAllowedOrigin(origin, allowed, process.env.NODE_ENV === 'development')) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
+      if (allowed.length && (origin || originIsStrict()) && !isAllowedOrigin(origin, allowed, allowsLocalDevelopmentOrigins())) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
       const headerToken = context.req.headers['x-csrf-token'];
       if (!validateCsrf(typeof headerToken === 'string' ? headerToken : undefined, readCookie(context.req.headers.cookie, 'smartrecruit_csrf', { production }))) {
         throw new HttpError(403, 'CSRF_TOKEN_INVALID', 'CSRF Token 无效');
@@ -367,35 +406,90 @@ const routeMiddleware: Middleware = async (context, next) => {
     return;
   }
 
+  if (path === '/api/v1/auth/security-config' && method === 'GET') {
+    context.res.setHeader('cache-control', 'no-store');
+    sendSuccess(context, authService.getSecurityConfig());
+    return;
+  }
+
+  if (path === '/api/v1/auth/registration/code' && method === 'POST') {
+    const body = await readJson(context);
+    sendSuccess(context, await authService.requestRegistrationCode({
+      email: String(body.email ?? ''),
+      ...authClientAddress(context),
+      ...(body.turnstileToken === undefined ? {} : { turnstileToken: String(body.turnstileToken) }),
+    }));
+    return;
+  }
+
+  if (path === '/api/v1/auth/password-reset/request' && method === 'POST') {
+    const body = await readJson(context);
+    sendSuccess(context, await authService.requestPasswordReset({
+      email: String(body.email ?? ''),
+      ...authClientAddress(context),
+      ...(body.turnstileToken === undefined ? {} : { turnstileToken: String(body.turnstileToken) }),
+    }));
+    return;
+  }
+
+  if (path === '/api/v1/auth/password-reset/confirm' && method === 'POST') {
+    const body = await readJson(context);
+    sendSuccess(context, await authService.confirmPasswordReset({
+      email: String(body.email ?? ''),
+      verificationCode: String(body.verificationCode ?? ''),
+      password: String(body.password ?? ''),
+      ...authClientAddress(context),
+      ...(body.turnstileToken === undefined ? {} : { turnstileToken: String(body.turnstileToken) }),
+    }));
+    return;
+  }
+
   if (path === '/api/v1/auth/login' && method === 'POST') {
     const body = await readJson(context);
-    const result = await authService.login({ email: String(body.email ?? ''), password: String(body.password ?? '') });
-    const production = process.env.NODE_ENV === 'production';
-    const csrfToken = generateCsrfToken();
-    const accounts = await readSavedAccountSessions(authService, context.req.headers.cookie, production);
-    accounts.push({ token: result.token, auth: { user: result.session.user, sessionId: result.session.sessionId, method: 'session' } });
-    context.res.setHeader('set-cookie', [buildAuthCookie(result.token, { production, maxAge: SESSION_COOKIE_MAX_AGE }), buildCsrfCookie(csrfToken, { production, maxAge: SESSION_COOKIE_MAX_AGE }), buildSavedAccountsCookie(accounts, { production, maxAge: SESSION_COOKIE_MAX_AGE })]);
-    sendSuccess(context, {
-      user: result.session.user,
-      sessionId: result.session.sessionId,
-      expiresAt: result.session.expiresAt,
-      workspaces: await authService.listWorkspaces(result.session.user.id),
+    const result = await authService.login({
+      email: String(body.email ?? ''),
+      password: String(body.password ?? ''),
+      ...authClientAddress(context),
     });
+    if (result.kind === 'authenticated') {
+      await sendAuthenticatedSession(context, result, 200, { kind: 'authenticated' });
+    } else {
+      sendSuccess(context, result, 202);
+    }
+    return;
+  }
+
+  if ((path === '/api/v1/auth/mfa/verify' || path === '/api/v1/auth/mfa/setup/confirm') && method === 'POST') {
+    const body = await readJson(context);
+    const verified = await authService.verifyMfa({
+      challengeToken: String(body.challengeToken ?? ''),
+      code: String(body.code ?? ''),
+      ...authClientAddress(context),
+    });
+    await sendAuthenticatedSession(context, verified);
+    return;
+  }
+
+  if (path === '/api/v1/auth/mfa/setup/start' && method === 'POST') {
+    const auth = requireAuth(context);
+    sendSuccess(context, await authService.startMfaSetup(auth.user));
     return;
   }
 
   if (path === '/api/v1/auth/register' && method === 'POST') {
-    const body = await readJson(context)
+    const body = await readJson(context);
     const registered = await authService.register({
       name: String(body.name ?? ''),
       email: String(body.email ?? ''),
       password: String(body.password ?? ''),
       companyName: String(body.companyName ?? ''),
       ...(body.phone === undefined ? {} : { phone: String(body.phone) }),
-      ...(context.req.socket.remoteAddress ? { ipAddress: context.req.socket.remoteAddress } : {}),
-    })
-    sendSuccess(context, registered, 201)
-    return
+      verificationCode: String(body.verificationCode ?? ''),
+      ...authClientAddress(context),
+      ...(body.turnstileToken === undefined ? {} : { turnstileToken: String(body.turnstileToken) }),
+    });
+    await sendAuthenticatedSession(context, registered, 201, { workspace: registered.workspace });
+    return;
   }
 
   if (path === '/api/v1/auth/logout' && method === 'POST') {
@@ -423,7 +517,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (shouldProtectCsrf(method, process.env.REQUIRE_CSRF)) {
       const origin = typeof context.req.headers.origin === 'string' ? context.req.headers.origin : undefined
       const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS)
-      if (allowed.length && !isAllowedOrigin(origin, allowed, process.env.NODE_ENV === 'development')) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任')
+      if (allowed.length && (origin || originIsStrict()) && !isAllowedOrigin(origin, allowed, allowsLocalDevelopmentOrigins())) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任')
       const headerToken = typeof context.req.headers['x-csrf-token'] === 'string' ? context.req.headers['x-csrf-token'] : undefined
       const cookieHeader = typeof context.req.headers.cookie === 'string' ? context.req.headers.cookie : undefined
       if (!validateCsrf(headerToken, readCookie(cookieHeader, 'smartrecruit_csrf', { production: process.env.NODE_ENV === 'production' }))) throw new HttpError(403, 'CSRF_TOKEN_INVALID', 'CSRF Token 无效')
@@ -503,6 +597,11 @@ const routeMiddleware: Middleware = async (context, next) => {
       sendSuccess(context, await platformUsers.resetPassword(auth.user.id, platformUserReset[1]!, await readJson(context), context.requestId))
       return
     }
+    const platformUserAiQuotaReset = path.match(/^\/api\/v1\/platform\/users\/([^/]+)\/workspaces\/([^/]+)\/reset-ai-generation-quota$/)
+    if (platformUserAiQuotaReset && method === 'POST') {
+      sendSuccess(context, await platformUsers.resetAiGenerationQuota(auth.user.id, platformUserAiQuotaReset[1]!, platformUserAiQuotaReset[2]!, await readJson(context), context.requestId))
+      return
+    }
     if (path === '/api/v1/platform/customers' && method === 'GET') { sendSuccess(context, await platformService.listCustomers(auth.user.id, context.url.searchParams)); return }
     if (path === '/api/v1/platform/audit-logs' && method === 'GET') { sendSuccess(context, await platformService.listAudit(auth.user.id)); return }
     if (path === '/api/v1/platform/plans' && method === 'GET') { sendSuccess(context, await entitlementService.listPlans(auth.user.id)); return }
@@ -518,8 +617,13 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   if (path === '/api/v1/me') {
-    if (method !== 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', '仅支持 GET 请求');
     if (!context.auth) throw new HttpError(401, 'AUTHENTICATION_REQUIRED', '未登录，请先完成身份认证');
+    if (method === 'PATCH') {
+      const user = await authService.updateCurrentUserProfile(context.auth.user, await readJson(context));
+      sendSuccess(context, { user });
+      return;
+    }
+    if (method !== 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', '仅支持 GET 或 PATCH 请求');
     sendSuccess(context, {
       user: context.auth.user,
       sessionId: context.auth.sessionId,
@@ -550,21 +654,7 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   if (path === '/api/v1/integrations/dingtalk/approvals/callback' && method === 'POST') {
-    const callbackWorkflow = getDingTalkCallbackWorkflow();
-    if (!callbackWorkflow) throw new HttpError(503, 'DINGTALK_APPROVAL_NOT_CONFIGURED', '钉钉审批回调尚未配置')
-    const signature = context.url.searchParams.get('msg_signature') ?? context.url.searchParams.get('signature') ?? ''
-    const timestamp = context.url.searchParams.get('timestamp') ?? ''
-    const nonce = context.url.searchParams.get('nonce') ?? ''
-    try {
-      const result = await callbackWorkflow.workflow.handleCallback({ body: (await readBody(context)).raw, timestamp, nonce, signature }, { verificationOnly: callbackWorkflow.verificationOnly })
-      context.res.statusCode = 200
-      context.res.setHeader('content-type', 'application/json; charset=utf-8')
-      context.res.end(JSON.stringify(result.response))
-    } catch (error) {
-      if (error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status, error.code, error.message)
-      throw error
-    }
-    return
+    throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，钉钉审批回调不再接收')
   }
 
   const protectedPaths = [
@@ -584,6 +674,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/interview-live-sessions',
     '/api/v1/interview-live-segments',
     '/api/v1/offers',
+    '/api/v1/offer-templates',
     '/api/v1/onboarding',
     '/api/v1/dashboard/summary',
 
@@ -604,7 +695,7 @@ const routeMiddleware: Middleware = async (context, next) => {
       const allowed = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
       if (allowed.length > 0) {
         const origin = Array.isArray(context.req.headers.origin) ? undefined : context.req.headers.origin;
-        if (!isAllowedResumeUploadOrigin(origin, allowed, path, method, process.env.RESUME_UPLOAD_RELAX_ORIGIN, process.env.NODE_ENV === 'development')) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
+        if ((origin || originIsStrict()) && !isAllowedResumeUploadOrigin(origin, allowed, path, method, process.env.RESUME_UPLOAD_RELAX_ORIGIN, allowsLocalDevelopmentOrigins())) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任');
       }
       const headerToken = Array.isArray(context.req.headers['x-csrf-token']) ? undefined : context.req.headers['x-csrf-token'];
       const cookieHeader = Array.isArray(context.req.headers.cookie) ? undefined : context.req.headers.cookie;
@@ -654,36 +745,31 @@ const routeMiddleware: Middleware = async (context, next) => {
     }
 
     if (path === '/api/v1/admin/dingtalk-mock/instances' && method === 'GET') {
-      requirePlatformAdmin(auth);
-      if (!isDingTalkMockMode()) throw new HttpError(409, 'DINGTALK_MOCK_DISABLED', '当前不是模拟审批模式');
-      sendSuccess(context, mockDingTalkApprovalClient.list());
-      return;
+      throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，钉钉模拟审批不再提供');
     }
     const mockDecisionMatch = path.match(/^\/api\/v1\/admin\/dingtalk-mock\/instances\/([^/]+)\/(approve|reject)$/);
     if (mockDecisionMatch && method === 'POST') {
-      requirePlatformAdmin(auth);
-      if (!isDingTalkMockMode()) throw new HttpError(409, 'DINGTALK_MOCK_DISABLED', '当前不是模拟审批模式');
-      const approval = getDingTalkApproval();
-      if (!approval) throw new HttpError(503, 'DINGTALK_APPROVAL_NOT_CONFIGURED', '模拟审批尚未配置');
-      const processInstanceId = decodeURIComponent(mockDecisionMatch[1]!);
-      const decision = mockDecisionMatch[2] === 'approve' ? 'approved' : 'rejected';
-      const body = await readJson(context);
-      try {
-        mockDingTalkApprovalClient.decide(processInstanceId, decision);
-        const result = await approval.applyMockDecision({
-          processInstanceId,
-          decision,
-          ...(typeof body.comment === 'string' && body.comment.trim() ? { comment: body.comment.trim() } : {}),
-        });
-        sendSuccess(context, { processInstanceId, decision, ...result });
-      } catch (error) {
-        if (error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status, error.code, error.message);
-        throw new HttpError(404, 'DINGTALK_MOCK_INSTANCE_NOT_FOUND', error instanceof Error ? error.message : '模拟审批实例不存在');
-      }
-      return;
+      throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，钉钉模拟审批不再提供');
     }
 
-    if (path === '/api/v1/departments' && method === 'GET') { sendSuccess(context, await adminService.listDepartments(true)); return; }
+    if (path === '/api/v1/departments' && method === 'GET') {
+      requireRole(auth, ADMIN_ROLES);
+      const activeOnly = context.url.searchParams.get('activeOnly') !== 'false'
+      sendSuccess(context, await adminService.forOrganization(auth.user.workspaceId).listDepartments(activeOnly)); return;
+    }
+    if (path === '/api/v1/departments' && method === 'POST') {
+      requireRole(auth, ADMIN_ROLES);
+      sendSuccess(context, await adminService.forOrganization(auth.user.workspaceId).createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return;
+    }
+    const departmentMatch = path.match(/^\/api\/v1\/departments\/([^/]+)$/);
+    if (departmentMatch && method === 'PATCH') {
+      requireRole(auth, ADMIN_ROLES);
+      sendSuccess(context, await adminService.forOrganization(auth.user.workspaceId).updateDepartment(departmentMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return;
+    }
+    if (departmentMatch && method === 'DELETE') {
+      requireRole(auth, ADMIN_ROLES);
+      sendSuccess(context, await adminService.forOrganization(auth.user.workspaceId).deleteDepartment(departmentMatch[1]!, auth.user.id, context.requestId)); return;
+    }
 
     if (path === '/api/v1/recruitment-requests' && method === 'GET') {
       const requests = await recruiting.listRequests(context.url.searchParams.get('status') ?? undefined, context.url.searchParams.get('departmentId') ?? undefined);
@@ -697,62 +783,18 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (requestMatch) {
       const id = requestMatch[1]!; const suffix = requestMatch[2] ?? '';
       if (!suffix && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); setVersionEtag(context, request.version); sendSuccess(context, request); return; }
-      if (suffix === 'approval' && method === 'GET') { const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); sendSuccess(context, await recruiting.getRequestApproval(id)); return; }
+      if (suffix === 'approval' && method === 'GET') { throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，审批详情不再提供'); }
       if (!suffix && method === 'PATCH') { requireRole(auth, RECRUITMENT_WRITE_ROLES); const request = await recruiting.getRequest(id); assertDepartmentScope(auth, request.departmentId); assertVersion(parseIfMatch(context), request.version); const result = await recruiting.updateRequest(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; }
       if (method === 'POST') {
         const rawRequestAction = actionFrom(`/${suffix}`, '') ?? suffix.replaceAll('-', '_');
         // Keep the public /submit-approval endpoint compatible with the service workflow action name.
         const requestAction = rawRequestAction === 'submit_approval' ? 'submit' : rawRequestAction;
+        if (requestAction === 'approve' || requestAction === 'reject') throw new HttpError(409, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求已取消审批，请直接提交需求')
         const request = await recruiting.getRequest(id);
         assertDepartmentScope(auth, request.departmentId);
-        requireRole(auth, ['approve', 'reject'].includes(requestAction) ? RECRUITMENT_APPROVAL_ROLES : RECRUITMENT_WRITE_ROLES);
+        requireRole(auth, RECRUITMENT_WRITE_ROLES);
         const reason = (await readJson(context)).reason;
-        const dingTalkApproval = getDingTalkApproval();
-        try {
-          const startsNewApproval = requestAction === 'submit' || requestAction === 'resubmit';
-          const approvalMode = startsNewApproval
-            ? (await recruitmentApprovalSettings.getMode(auth.user.workspaceId)).mode
-            : 'platform';
-          if (startsNewApproval && approvalMode === 'dingtalk') {
-            if (!dingTalkApproval) throw new HttpError(503, 'DINGTALK_APPROVAL_NOT_CONFIGURED', '企业已选择钉钉审批，但钉钉审批服务尚未配置');
-            const result = await executeRecruitmentApprovalAction({
-              requestId: request.id, action: requestAction, actorId: auth.user.id,
-              request: {
-                title: request.title,
-                departmentId: request.departmentId,
-                headcount: request.headcount,
-                salaryRange: request.salaryRange,
-                justification: request.justification,
-              },
-              performLocalAction: () => recruiting.requestAction(id, requestAction, reason, auth.user.id),
-              getCurrentInstanceId: async () => {
-                const approval = await recruiting.getRequestApproval(id)
-                if (!approval.current) throw new DingTalkApprovalWorkflowError('APPROVAL_INSTANCE_REQUIRED', '当前需求无可用审批实例', 409)
-                return approval.current.id
-              },
-              resolveOriginatorUserId: resolveDingTalkOriginatorUserId,
-              startExternalApproval: (approvalInput) => dingTalkApproval.start(approvalInput),
-              assertLocalDecisionAllowed: (subjectType, subjectId) => dingTalkApproval.assertLocalDecisionAllowed(subjectType, subjectId),
-            })
-            sendSuccess(context, result)
-          } else {
-            const result = await executePlatformRecruitmentApprovalAction({
-              requestId: request.id,
-              action: requestAction,
-              performLocalAction: () => recruiting.requestAction(id, requestAction, reason, auth.user.id),
-              assertLocalDecisionAllowed: async (subjectType, subjectId) => {
-                if (process.env.NODE_ENV !== 'test' && await dingTalkApprovalRepository.hasActiveExternalApproval(subjectType, subjectId)) {
-                  throw new DingTalkApprovalWorkflowError('DINGTALK_APPROVAL_ACTIVE', '该事项正在钉钉审批，必须由钉钉审批回调更新结果', 409)
-                }
-              },
-            })
-            sendSuccess(context, result)
-          }
-        } catch (error) {
-          if (error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status, error.code, error.message)
-          if (error instanceof RecruitmentApprovalSettingsError) throw new HttpError(error.status, error.code, error.message)
-          throw error
-        }
+        sendSuccess(context, await recruiting.requestAction(id, requestAction, reason, auth.user.id))
         return;
       }
     }
@@ -867,10 +909,10 @@ const routeMiddleware: Middleware = async (context, next) => {
       }));
       sendSuccess(context, await recruiting.getDashboardSummary(departmentScope(auth), ids => questionSheets.listDashboardReviews(ids), period)); return;
     }
-    if (path === '/api/v1/reports' && method === 'GET') { sendSuccess(context, await recruiting.getReports(departmentScope(auth))); return; }
-    if (path === '/api/v1/reports/funnel' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).funnel); return; }
-    if (path === '/api/v1/reports/channels' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).channels); return; }
-    if (path === '/api/v1/reports/cycle-time' && method === 'GET') { sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).recruitmentCycle); return; }
+    if (path === '/api/v1/reports' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); sendSuccess(context, await recruiting.getReports(departmentScope(auth))); return; }
+    if (path === '/api/v1/reports/funnel' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).funnel); return; }
+    if (path === '/api/v1/reports/channels' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).channels); return; }
+    if (path === '/api/v1/reports/cycle-time' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); sendSuccess(context, (await recruiting.getReports(departmentScope(auth))).recruitmentCycle); return; }
 
     if (path === '/api/v1/ai-skills' && method === 'GET') {
       const targetType = context.url.searchParams.get('targetType')
@@ -908,60 +950,40 @@ const routeMiddleware: Middleware = async (context, next) => {
       return;
     }
 
-    if (path === '/api/v1/admin/users' && method === 'GET') { requirePlatformAdmin(auth); sendList(context, await adminService.listUsers()); return; }
-    if (path === '/api/v1/admin/account-organizations' && method === 'GET') { requirePlatformAdmin(auth); sendList(context, await adminService.listAccountOrganizations()); return; }
+    if (path === '/api/v1/admin/users' && method === 'GET') { requireSystemAdministrator(auth); sendList(context, await adminService.listUsers()); return; }
+    if (path === '/api/v1/admin/account-organizations' && method === 'GET') { requireSystemAdministrator(auth); sendList(context, await adminService.listAccountOrganizations()); return; }
     if (path === '/api/v1/admin/users' && method === 'POST') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       context.res.setHeader('Cache-Control', 'no-store');
       sendSuccess(context, await adminService.createUser(await readJson(context) as never, auth.user.id, context.requestId), 201);
       return;
     }
-    if (path === '/api/v1/admin/departments' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.listDepartments()); return; }
-    if (path === '/api/v1/admin/departments' && method === 'POST') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return; }
+    if (path === '/api/v1/admin/departments' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.listDepartments()); return; }
+    if (path === '/api/v1/admin/departments' && method === 'POST') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.createDepartment(await readJson(context) as never, auth.user.id, context.requestId), 201); return; }
     const adminDepartmentMatch = path.match(/^\/api\/v1\/admin\/departments\/([^/]+)$/);
-    if (adminDepartmentMatch && method === 'PATCH') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.updateDepartment(adminDepartmentMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
-    if (adminDepartmentMatch && method === 'DELETE') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.deleteDepartment(adminDepartmentMatch[1]!, auth.user.id, context.requestId)); return; }
+    if (adminDepartmentMatch && method === 'PATCH') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.updateDepartment(adminDepartmentMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (adminDepartmentMatch && method === 'DELETE') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.deleteDepartment(adminDepartmentMatch[1]!, auth.user.id, context.requestId)); return; }
     const adminUserMatch = path.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
-    if (adminUserMatch && method === 'PATCH') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.updateUser(adminUserMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
-    if (path === '/api/v1/admin/roles' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.listRoles()); return; }
+    if (adminUserMatch && method === 'PATCH') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.updateUser(adminUserMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/roles' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.listRoles()); return; }
     const adminRoleMatch = path.match(/^\/api\/v1\/admin\/roles\/([^/]+)$/);
-    if (adminRoleMatch && method === 'PATCH') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.updateRole(adminRoleMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
-    if (path === '/api/v1/admin/settings' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.getSettings()); return; }
-    if (path === '/api/v1/admin/settings' && method === 'PATCH') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.updateSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
-    if (path === '/api/v1/admin/dingtalk-settings' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.getDingTalkSettings()); return; }
-    if (path === '/api/v1/admin/dingtalk-settings' && method === 'PATCH') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.updateDingTalkSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
-    // These settings use active-workspace owner/admin membership, not the separate global user_roles admin role.
+    if (adminRoleMatch && method === 'PATCH') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.updateRole(adminRoleMatch[1]!, await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/settings' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.getSettings()); return; }
+    if (path === '/api/v1/admin/settings' && method === 'PATCH') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.updateSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/dingtalk-settings' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.getDingTalkSettings()); return; }
+    if (path === '/api/v1/admin/dingtalk-settings' && method === 'PATCH') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.updateDingTalkSettings(await readJson(context) as never, auth.user.id, context.requestId)); return; }
     if (path === '/api/v1/admin/recruitment-approval-settings' && method === 'GET') {
-      try { sendSuccess(context, await recruitmentApprovalSettings.getForAdmin(auth.user.workspaceId, auth.user.id)); }
-      catch (error) {
-        if (error instanceof RecruitmentApprovalSettingsError) throw new HttpError(error.status, error.code, error.message);
-        throw error;
-      }
-      return;
+      throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，审批设置不再提供');
     }
     if (path === '/api/v1/admin/recruitment-approval-settings' && method === 'PATCH') {
-      const body = await readJson(context);
-      try {
-        sendSuccess(context, await recruitmentApprovalSettings.update({ ...(auth.user.workspaceId ? { organizationId: auth.user.workspaceId } : {}), actorId: auth.user.id, mode: body.mode, requestId: context.requestId }));
-      } catch (error) {
-        if (error instanceof RecruitmentApprovalSettingsError) throw new HttpError(error.status, error.code, error.message);
-        throw error;
-      }
-      return;
+      throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，审批设置不再提供');
     }
-    if (path === '/api/v1/admin/dingtalk-approval-config' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.getDingTalkApprovalConfig()); return; }
+    if (path === '/api/v1/admin/dingtalk-approval-config' && method === 'GET') { throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，钉钉招聘审批配置不再提供'); }
     if (path === '/api/v1/admin/dingtalk-approval-config' && method === 'PATCH') {
-      requirePlatformAdmin(auth);
-      try { sendSuccess(context, await adminService.updateDingTalkApprovalConfig(await readJson(context) as never, auth.user.id, context.requestId)); }
-      catch (error) {
-        if (error instanceof AdminValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message);
-        if (error instanceof AdminNotFoundError) throw new HttpError(404, 'NOT_FOUND', error.message);
-        throw error;
-      }
-      return;
+      throw new HttpError(410, 'RECRUITMENT_APPROVAL_DISABLED', '招聘需求审批流程已停用，钉钉招聘审批配置不再提供');
     }
     if (path === '/api/v1/admin/dingtalk-connection-test' && method === 'POST') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       const body = await readJson(context);
       sendSuccess(context, await adminService.testDingTalkConnection({
         ...(typeof body.appKey === 'string' ? { appKey: body.appKey } : {}),
@@ -969,11 +991,40 @@ const routeMiddleware: Middleware = async (context, next) => {
       }));
       return;
     }
-    if (path === '/api/v1/admin/resume-virus-scan' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.getResumeVirusScanSetting()); return; }
-    if (path === '/api/v1/admin/resume-virus-scan' && method === 'PATCH') { requirePlatformAdmin(auth); const body = await readJson(context); if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'VALIDATION_ERROR', 'enabled 必须是布尔值'); sendSuccess(context, await adminService.updateResumeVirusScanSetting(body.enabled, auth.user.id, context.requestId)); return; }
-    if (path === '/api/v1/admin/ai-settings' && method === 'GET') { requirePlatformAdmin(auth); context.res.setHeader('cache-control', 'no-store'); sendSuccess(context, await adminService.getAiSettings()); return; }
+    if (path === '/api/v1/admin/smtp-settings' && method === 'GET') { requireSystemAdministrator(auth); context.res.setHeader('cache-control', 'no-store'); sendSuccess(context, await readSmtpEnvSettings()); return; }
+    if (path === '/api/v1/admin/smtp-settings' && method === 'PATCH') {
+      requireSystemAdministrator(auth)
+      try { sendSuccess(context, await updateSmtpEnvSettings(undefined, await readJson(context) as never)) }
+      catch (error) { throw new HttpError(400, 'VALIDATION_ERROR', error instanceof Error ? error.message : 'SMTP 配置保存失败') }
+      return
+    }
+    if (path === '/api/v1/admin/smtp-connection-test' && method === 'POST') {
+      requireSystemAdministrator(auth)
+      const result = await testSmtpConnection(await readJson(context) as never)
+      sendSuccess(context, result, result.ok ? 200 : 400)
+      return
+    }
+    if (path === '/api/v1/admin/smtp-test-email' && method === 'POST') {
+      requireSystemAdministrator(auth)
+      const body = await readJson(context)
+      if (Object.keys(body).some((key) => key !== 'to') || typeof body.to !== 'string') throw new HttpError(400, 'VALIDATION_ERROR', '请提供收件人邮箱')
+      try {
+        await sendSmtpMail({
+          to: body.to,
+          subject: '智能招聘平台 SMTP 测试邮件',
+          markdown: '# SMTP 配置验证\n\n这是一封由智能招聘平台发送的测试邮件。若您能收到此邮件，说明 SMTP 配置已可用于发送 Offer 邮件。',
+        })
+        sendSuccess(context, { ok: true, message: '测试邮件已提交给 SMTP 服务，请检查收件箱' })
+      } catch (error) {
+        throw new HttpError(400, 'SMTP_TEST_EMAIL_FAILED', error instanceof Error ? `发送测试邮件失败：${error.message}` : '发送测试邮件失败')
+      }
+      return
+    }
+    if (path === '/api/v1/admin/resume-virus-scan' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.getResumeVirusScanSetting()); return; }
+    if (path === '/api/v1/admin/resume-virus-scan' && method === 'PATCH') { requireSystemAdministrator(auth); const body = await readJson(context); if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'VALIDATION_ERROR', 'enabled 必须是布尔值'); sendSuccess(context, await adminService.updateResumeVirusScanSetting(body.enabled, auth.user.id, context.requestId)); return; }
+    if (path === '/api/v1/admin/ai-settings' && method === 'GET') { requireSystemAdministrator(auth); context.res.setHeader('cache-control', 'no-store'); sendSuccess(context, await adminService.getAiSettings()); return; }
     if (path === '/api/v1/admin/ai-settings' && method === 'PATCH') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       try {
         sendSuccess(context, await adminService.updateAiSettings(await readJson(context), auth.user.id, context.requestId));
       } catch (error) {
@@ -982,8 +1033,23 @@ const routeMiddleware: Middleware = async (context, next) => {
       }
       return;
     }
+    if (path === '/api/v1/admin/ai-sharing' && method === 'GET') {
+      requireSystemAdministrator(auth);
+      context.res.setHeader('cache-control', 'no-store');
+      sendSuccess(context, await adminService.getAiSharingSettings());
+      return;
+    }
+    if (path === '/api/v1/admin/ai-sharing' && method === 'PATCH') {
+      requireSystemAdministrator(auth);
+      const body = await readJson(context);
+      if (typeof body.enabled !== 'boolean' || Object.keys(body).some((key) => key !== 'enabled')) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'enabled 必须是布尔值');
+      }
+      sendSuccess(context, await adminService.updateAiSharingSettings(body.enabled, auth.user.id, context.requestId));
+      return;
+    }
     if (path === '/api/v1/admin/ai-connection-test' && method === 'POST') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       const body = await readJson(context);
       if (Object.keys(body).some(key => !['baseUrl', 'apiKey', 'timeoutMs'].includes(key))) throw new HttpError(400, 'VALIDATION_ERROR', '不支持的连接测试参数');
       const patch: Record<string, unknown> = {};
@@ -997,9 +1063,9 @@ const routeMiddleware: Middleware = async (context, next) => {
         ...(body.timeoutMs !== undefined ? { timeoutMs: Number(body.timeoutMs) } : {}),
       }, process.env, (url, init) => fetch(url, { ...init, redirect: 'error' }))); return;
     }
-    if (path === '/api/v1/admin/channel-settings' && method === 'GET') { requirePlatformAdmin(auth); sendSuccess(context, await adminService.getChannelSettings()); return; }
+    if (path === '/api/v1/admin/channel-settings' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.getChannelSettings()); return; }
     if (path === '/api/v1/admin/channel-settings' && method === 'PATCH') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       try {
         sendSuccess(context, await adminService.updateChannelSettings(await readJson(context) as Record<string, string>, auth.user.id, context.requestId));
       } catch (error) {
@@ -1010,13 +1076,13 @@ const routeMiddleware: Middleware = async (context, next) => {
     }
     const channelConnectionTestMatch = path.match(/^\/api\/v1\/admin\/channel-connections\/([^/]+)\/test$/);
     if (channelConnectionTestMatch && method === 'POST') {
-      requirePlatformAdmin(auth);
+      requireSystemAdministrator(auth);
       const provider = channelConnectionTestMatch[1] as ChannelProvider;
       sendSuccess(context, await adminService.testChannelConnection(provider));
       return;
     }
     if (path === '/api/v1/admin/analysis-tasks' && method === 'GET') { requireRole(auth, ADMIN_ROLES); sendList(context, await recruiting.listAnalysisTasks(context.url.searchParams.get('status') ?? undefined)); return; }
-    if (path === '/api/v1/admin/audit-logs' && method === 'GET') { requirePlatformAdmin(auth); sendList(context, await adminService.listAuditLogs(Number(context.url.searchParams.get('limit') ?? '50'))); return; }
+    if (path === '/api/v1/admin/audit-logs' && method === 'GET') { requireSystemAdministrator(auth); sendList(context, await adminService.listAuditLogs(Number(context.url.searchParams.get('limit') ?? '50'))); return; }
     if (path === '/api/v1/workflow-events' && method === 'GET') {
       const subjectTypeParam = context.url.searchParams.get('subjectType');
       const subjectType = subjectTypeParam === 'recruitment_request' || subjectTypeParam === 'job' || subjectTypeParam === 'offer' || subjectTypeParam === 'onboarding' || subjectTypeParam === 'candidate' || subjectTypeParam === 'application' || subjectTypeParam === 'interview' ? subjectTypeParam : undefined;
@@ -1041,17 +1107,153 @@ const routeMiddleware: Middleware = async (context, next) => {
     const applicationDeleteMatch = path.match(/^\/api\/v1\/applications\/([^/]+)$/);
     if (applicationDeleteMatch && method === 'DELETE') { requireRole(auth, APPLICATION_WRITE_ROLES); await recruiting.assertApplicationInScope(applicationDeleteMatch[1]!, departmentScope(auth)); await recruiting.deleteApplication(applicationDeleteMatch[1]!, auth.user.id); sendSuccess(context, { deleted: true }); return; }
     if (path === '/api/v1/onboarding' && method === 'GET') { sendList(context, await recruiting.listOnboarding(departmentScope(auth))); return; }
+    if (path === '/api/v1/onboarding/workbench' && method === 'GET') { sendList(context, await recruiting.listOnboardingWorkbench(departmentScope(auth))); return; }
+    if (path === '/api/v1/onboarding/reports' && method === 'GET') { sendSuccess(context, await recruiting.listOnboardingReport(departmentScope(auth))); return; }
     const onboardingMatch = path.match(/^\/api\/v1\/onboarding\/([^/]+)(?:\/(.*))?$/);
     if (onboardingMatch) {
       const onboardingId = onboardingMatch[1]!; const suffix = onboardingMatch[2] ?? '';
       if (!suffix && method === 'GET') { await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.getOnboarding(onboardingId)); return; }
       if (!suffix && method === 'PATCH') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.updateOnboarding(onboardingId, await readJson(context) as never, auth.user.id)); return; }
-      if (method === 'POST') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); const body = await readJson(context); sendSuccess(context, await recruiting.onboardingAction(onboardingId, suffix.replaceAll('-', '_'), body.reason, auth.user.id)); return; }
-    }    if (path === '/api/v1/offers' && method === 'GET') { sendList(context, await recruiting.listOffers(context.url.searchParams.get('status') ?? undefined, departmentScope(auth))); return; }
+      if (suffix === 'tasks' && method === 'GET') { await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendList(context, await recruiting.listOnboardingTasks(onboardingId)); return; }
+      if (suffix === 'tasks' && method === 'POST') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.createOnboardingTask(onboardingId, await readJson(context) as never, auth.user.id), 201); return; }
+      const onboardingTaskMatch = suffix.match(/^tasks\/([^/]+)$/);
+      if (onboardingTaskMatch && method === 'PATCH') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.updateOnboardingTask(onboardingId, onboardingTaskMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
+      if (suffix === 'materials' && method === 'GET') { await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendList(context, await recruiting.listOnboardingMaterials(onboardingId)); return; }
+      if (suffix === 'materials' && method === 'POST') { requireRole(auth, ONBOARDING_MATERIAL_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.createOnboardingMaterial(onboardingId, await readJson(context) as never, auth.user.id), 201); return; }
+      const onboardingMaterialMatch = suffix.match(/^materials\/([^/]+)$/);
+      if (onboardingMaterialMatch && method === 'PATCH') { requireRole(auth, ONBOARDING_MATERIAL_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.updateOnboardingMaterial(onboardingId, onboardingMaterialMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
+      if (suffix === 'reminders' && method === 'GET') { await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendList(context, await recruiting.listOnboardingReminders(onboardingId)); return; }
+      if (suffix === 'reminders/refresh' && method === 'POST') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.refreshOnboardingReminders(onboardingId, auth.user.id)); return; }
+      if (suffix === 'integrations' && method === 'GET') { await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendList(context, await recruiting.listOnboardingIntegrations(onboardingId)); return; }
+      const onboardingIntegrationMatch = suffix.match(/^integrations\/([^/]+)$/);
+      if (onboardingIntegrationMatch && method === 'PATCH') { requireRole(auth, ONBOARDING_WRITE_ROLES); await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth)); sendSuccess(context, await recruiting.updateOnboardingIntegration(onboardingId, onboardingIntegrationMatch[1]!, await readJson(context) as never, auth.user.id)); return; }
+      if (method === 'POST') {
+        requireRole(auth, ONBOARDING_WRITE_ROLES);
+        await recruiting.assertOnboardingInScope(onboardingId, departmentScope(auth));
+        const body = await readJson(context);
+        const reason = body && typeof body === 'object' && 'reason' in body ? (body as Record<string, unknown>).reason ?? body : body;
+        sendSuccess(context, await recruiting.onboardingAction(onboardingId, suffix.replaceAll('-', '_'), reason, auth.user.id));
+        return;
+      }
+    }
+    if (path === '/api/v1/offer-templates' && method === 'GET') { requireRole(auth, OFFER_WRITE_ROLES); sendList(context, await recruiting.listOfferTemplates()); return; }
+    if (path === '/api/v1/offer-templates' && method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, await recruiting.createOfferTemplate(await readJson(context) as never, auth.user.id), 201); return; }
+    const offerTemplateMatch = path.match(/^\/api\/v1\/offer-templates\/([^/]+)$/)
+    if (offerTemplateMatch && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, await recruiting.updateOfferTemplate(offerTemplateMatch[1]!, await readJson(context) as never)); return; }
+    if (offerTemplateMatch && method === 'DELETE') { requireRole(auth, OFFER_WRITE_ROLES); await recruiting.deleteOfferTemplate(offerTemplateMatch[1]!); sendSuccess(context, { deleted: true }); return; }
+    if (path === '/api/v1/offers' && method === 'GET') { sendList(context, (await recruiting.listOffers(context.url.searchParams.get('status') ?? undefined, departmentScope(auth))).map(withoutOfferApproval)); return; }
     if (path === '/api/v1/offers/eligible-applications' && method === 'GET') { requireRole(auth, OFFER_WRITE_ROLES); sendList(context, await recruiting.listApplications(undefined, undefined, departmentScope(auth), true)); return; }
-    if (path === '/api/v1/offers' && method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, await recruiting.createOffer(await readJson(context) as never, auth.user.id), 201); return; }
+    if (path === '/api/v1/offers' && method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); sendSuccess(context, withoutOfferApproval(await recruiting.createOffer(await readJson(context) as never, auth.user.id)), 201); return; }
+    const offerEmailMatch = path.match(/^\/api\/v1\/offers\/([^/]+)\/send-email$/)
+    if (offerEmailMatch && method === 'POST') {
+      requireRole(auth, OFFER_WRITE_ROLES)
+      const requestedId = offerEmailMatch[1]!
+      if (offerEmailInFlight.has(requestedId)) throw new HttpError(409, 'OFFER_EMAIL_SENDING', '该 Offer 邮件正在发送，请勿重复提交')
+      if (offerEmailDeliveryUncertain.has(requestedId)) throw new HttpError(409, 'OFFER_EMAIL_STATUS_UNKNOWN', '该 Offer 的邮件投递结果待核实，请勿直接重试')
+      offerEmailInFlight.add(requestedId)
+      let canonicalId: string | undefined
+      let canonicalLockHeld = false
+      try {
+        const current = await recruiting.getOffer(requestedId)
+        canonicalId = current.id
+        if (canonicalId !== requestedId) {
+          if (offerEmailInFlight.has(canonicalId)) throw new HttpError(409, 'OFFER_EMAIL_SENDING', '该 Offer 邮件正在发送，请勿重复提交')
+          if (offerEmailDeliveryUncertain.has(canonicalId)) throw new HttpError(409, 'OFFER_EMAIL_STATUS_UNKNOWN', '该 Offer 的邮件投递结果待核实，请勿直接重试')
+          offerEmailInFlight.add(canonicalId)
+          canonicalLockHeld = true
+        }
+        await recruiting.assertApplicationInScope(current.applicationId, departmentScope(auth))
+        if (!OFFER_EMAIL_SENDABLE_STATUSES.has(current.status)) throw new HttpError(409, 'OFFER_EMAIL_NOT_READY', 'Offer 已结束，不能继续发送邮件；如需重新沟通，请创建新修订或新 Offer')
+        if (current.status === 'cancelled') {
+          const hasReplacement = (await recruiting.listOffers(undefined, departmentScope(auth)))
+            .some((offer) => offer.applicationId === current.applicationId && offer.id !== current.id && offer.status !== 'cancelled')
+          if (hasReplacement) throw new HttpError(409, 'OFFER_REPLACEMENT_EXISTS', '该申请已有新的有效 Offer，请先处理新 Offer，不能再发送已取消的旧 Offer')
+        }
+        const body = await readJson(context)
+        const offerContext = await recruiting.getOfferEmailContext(current.id)
+        const materialLabels: Record<string, string> = {
+          graduation_certificate: '毕业证书、学位证书',
+          id_card: '身份证',
+          previous_employment_release: '上家公司劳动合同解除证明或者离职证明',
+          previous_employment_payroll: '上家单位一年工资流水',
+          photo: '一寸照片一张',
+          medical_report: '体检报告',
+          bank_card: '工资卡',
+        }
+        const materialItems = offerContext.materials.map((item) => {
+          const [code, ...details] = item.split(':')
+          const bankName = details.join(':').trim()
+          if (code === 'other' && bankName) return bankName
+          return code === 'bank_card' && bankName ? `${bankName}工资卡` : materialLabels[code ?? ''] ?? item
+        })
+        const onboardingMaterials = materialItems.map((item, index) => `${index + 1}. ${item}；`).join('\n')
+        const bankCard = offerContext.materials.find((item) => item.startsWith('bank_card:'))
+        const bankName = bankCard ? bankCard.slice('bank_card:'.length).trim() : ''
+        const values: Record<string, string> = {
+          ...offerTemplateFieldValues(offerContext.templateFields),
+          candidateName: offerContext.candidateName, '候选人姓名': offerContext.candidateName, '称谓': '您好', candidateEmail: offerContext.candidateEmail,
+          positionTitle: offerContext.positionTitle, jobTitle: offerContext.positionTitle, '岗位名称': offerContext.positionTitle, offerCode: offerContext.offerCode,
+          department: offerContext.department,
+          startDate: offerContext.startDate ?? '', '报到日期': offerTemplateFieldValues(offerContext.templateFields)['报到日期'] || offerContext.startDate || '', reportDate: offerTemplateFieldValues(offerContext.templateFields)['报到日期'] || offerContext.startDate || '',
+          reportingLocation: offerContext.reportingLocation ?? '', '报到地点': offerContext.reportingLocation ?? '',
+          '报到地址': offerContext.reportingLocation ?? '', '报到地点/房间号': offerContext.reportingLocation ?? '',
+          invoiceTitle: offerContext.invoiceTitle ?? '', '发票抬头': offerContext.invoiceTitle ?? '',
+          taxNumber: offerContext.taxNumber ?? '', '企业税号': offerContext.taxNumber ?? '',
+          employmentType: offerContext.employmentType === 'full_time' ? '全职' : '实习',
+          probationSalary: offerContext.probationSalary?.toLocaleString('zh-CN') ?? '', '试用期月薪': offerContext.probationSalary?.toLocaleString('zh-CN') ?? '',
+          formalSalary: offerContext.baseSalary.toLocaleString('zh-CN'), baseSalary: offerContext.baseSalary.toLocaleString('zh-CN'),
+          '转正后月薪': offerContext.baseSalary.toLocaleString('zh-CN'),
+          bonus: offerContext.bonus?.toLocaleString('zh-CN') ?? '', benefits: offerContext.benefits.join('、'), '其他福利或约定': offerContext.benefits.join('、'),
+          materials: onboardingMaterials, onboardingMaterials, '入职材料': onboardingMaterials,
+          otherOnboardingMaterials: materialItems.join('、'), '其他入职材料': materialItems.join('、'),
+          bankName, '工资卡银行名称': bankName,
+          photoQuantity: offerContext.materials.includes('photo') ? '1' : '', '照片数量': offerContext.materials.includes('photo') ? '1' : '',
+          companyName: process.env.COMPANY_NAME?.trim() ?? '',
+        }
+        const normalizeReportingLocationTemplate = (value: string) => value.replace(/杭州市余杭区(?:城投未来之星|未来科技城)\s*C2\s*幢\s*(?:21\s*楼\s*)?2105\s*室/gu, '{{报到地点}}')
+        const resolveVariable = (rawKey: string) => {
+          const key = rawKey.trim()
+          if (!Object.hasOwn(values, key) || !values[key]?.trim()) throw new HttpError(400, 'OFFER_TEMPLATE_UNRESOLVED', `请先补全 Offer 信息或邮件正文中的模板变量：${key}`)
+          return values[key] ?? ''
+        }
+        const interpolate = (value: string) => normalizeReportingLocationTemplate(value).replace(/\{\{\s*([^{}]+?)\s*\}\}/gu, (_, rawKey: string) => resolveVariable(rawKey))
+        const escapeHtmlValue = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+        const interpolateHtml = (value: string) => normalizeReportingLocationTemplate(value).replace(/\{\{\s*([^{}]+?)\s*\}\}/gu, (_, rawKey: string) => escapeHtmlValue(resolveVariable(rawKey)).replace(/\r?\n/gu, '<br>'))
+        const recipient = typeof body.to === 'string' && body.to.trim() ? body.to.trim() : offerContext.candidateEmail
+        if (!recipient) throw new HttpError(409, 'CANDIDATE_EMAIL_REQUIRED', '候选人尚未填写邮箱，请填写收件人邮箱后发送')
+        const attachment = decodePdfAttachment(body.attachment)
+        const html = typeof body.html === 'string' ? interpolateHtml(body.html) : ''
+        const markdown = !html && typeof body.markdown === 'string' ? interpolate(body.markdown) : ''
+        await sendSmtpMail({
+          to: recipient,
+          subject: interpolate(typeof body.subject === 'string' ? body.subject : ''),
+          ...(html ? { html } : { markdown }),
+          ...(attachment ? { attachment } : {}),
+        })
+        try {
+          const sendAction = current.status === 'cancelled' ? 'resend_cancelled' : current.status === 'sent' ? 'resend' : 'send'
+          const sentOffer = await recruiting.offerAction(current.id, sendAction, undefined, auth.user.id)
+          offerEmailDeliveryUncertain.delete(current.id)
+          sendSuccess(context, withoutOfferApproval(sentOffer))
+        } catch {
+          offerEmailDeliveryUncertain.add(current.id)
+          throw new HttpError(502, 'OFFER_EMAIL_STATUS_UNKNOWN', '邮件服务器已受理邮件，但 Offer 状态未能更新。请先核实邮件投递结果，不要直接重试。')
+        }
+      } catch (error) {
+        if (error instanceof HttpError) throw error
+        if (error instanceof RecruitingWorkflowError) throw new HttpError(error.status, error.code, error.message)
+        throw new HttpError(502, 'OFFER_EMAIL_SEND_FAILED', error instanceof Error ? error.message : 'Offer 邮件发送失败')
+      } finally {
+        offerEmailInFlight.delete(requestedId)
+        if (canonicalLockHeld && canonicalId) offerEmailInFlight.delete(canonicalId)
+      }
+      return
+    }
     const offerMatch = path.match(/^\/api\/v1\/offers\/([^/]+)(?:\/(.*))?$/);
-    if (offerMatch) { const id=offerMatch[1]!; const suffix=offerMatch[2] ?? ''; await recruiting.assertOfferInScope(id, departmentScope(auth)); if (!suffix && method === 'GET') { const result = await recruiting.getOffer(id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (!suffix && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); const current = await recruiting.getOffer(id); assertVersion(parseIfMatch(context), current.version); const result = await recruiting.updateOffer(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, result); return; } if (method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); const body=await readJson(context); const action=suffix.replaceAll('-', '_'); const dingTalkApproval = getDingTalkApproval(); if (!dingTalkApproval || !usePostgres || !['submit_approval','approve','reject'].includes(action)) { sendSuccess(context, await recruiting.offerAction(id, action, body.reason, auth.user.id)); return; } const offer=await recruiting.getOffer(id); const version=offer.versions.find((item)=>item.id===offer.currentVersionId) ?? offer.versions.sort((a,b)=>b.version-a.version)[0]; if (!version) throw new HttpError(409,'OFFER_VERSION_REQUIRED','Offer 缺少当前版本'); try { const result=await executeOfferApprovalAction({ offerId:offer.id, action, actorId:auth.user.id, offer:{positionTitle:version.positionTitle,departmentId:version.departmentId,baseSalary:version.compensation.baseSalary}, performLocalAction:()=>recruiting.offerAction(id,action,body.reason,auth.user.id), getCurrentInstanceId:async()=>{ const found=await createDatabasePool().query(`WITH created AS (INSERT INTO approval_instances (id, subject_type, subject_id, version, status, current_step, created_by, updated_at) SELECT gen_random_uuid(), 'offer', $1::uuid, COALESCE(MAX(version), 0) + 1, 'pending', 1, $2::uuid, now() FROM approval_instances WHERE subject_type = 'offer' AND subject_id = $1::uuid RETURNING id) INSERT INTO approval_steps (id, approval_instance_id, step_no, approver_role_code, status) SELECT gen_random_uuid(), id, 1, 'approver', 'pending' FROM created RETURNING approval_instance_id AS id`,[offer.id,auth.user.id]); if (!found.rows[0]) throw new DingTalkApprovalWorkflowError('APPROVAL_INSTANCE_REQUIRED','当前 Offer 无可用审批实例',409); return String(found.rows[0].id) }, resolveOriginatorUserId: resolveDingTalkOriginatorUserId, startExternalApproval:(input)=>dingTalkApproval.start(input), assertLocalDecisionAllowed:(subjectType,subjectId)=>dingTalkApproval.assertLocalDecisionAllowed(subjectType,subjectId) }); sendSuccess(context,result) } catch(error) { if(error instanceof DingTalkApprovalWorkflowError) throw new HttpError(error.status,error.code,error.message); throw error } return; } }
+    if (offerMatch && method === 'POST' && offerMatch[2]?.replaceAll('-', '_') === 'resend_cancelled') {
+      throw new HttpError(409, 'OFFER_EMAIL_REQUIRED', '请通过邮件编辑窗口重新发送 Offer，邮件服务器接收成功后才会更新状态')
+    }
+    if (offerMatch) { const id=offerMatch[1]!; const suffix=offerMatch[2] ?? ''; await recruiting.assertOfferInScope(id, departmentScope(auth)); if (!suffix && method === 'GET') { const result = await recruiting.getOffer(id); setVersionEtag(context, result.version); sendSuccess(context, withoutOfferApproval(result)); return; } if (!suffix && method === 'PATCH') { requireRole(auth, OFFER_WRITE_ROLES); const current = await recruiting.getOffer(id); assertVersion(parseIfMatch(context), current.version); const result = await recruiting.updateOffer(id, await readJson(context) as never, auth.user.id); setVersionEtag(context, result.version); sendSuccess(context, withoutOfferApproval(result)); return; } if (method === 'POST') { requireRole(auth, OFFER_WRITE_ROLES); const body=await readJson(context); const action=suffix.replaceAll('-', '_'); if (action === 'send' || action === 'resend') throw new HttpError(409, 'OFFER_EMAIL_REQUIRED', '请通过邮件编辑窗口发送 Offer，系统会在 SMTP 成功接收后更新状态'); if (['submit_approval', 'approve', 'reject'].includes(action)) throw new HttpError(409, 'OFFER_APPROVAL_DISABLED', 'Offer 无需审批，请直接发送邮件'); sendSuccess(context, withoutOfferApproval(await recruiting.offerAction(id, action, body.reason, auth.user.id))); return; } }
     if (path === '/api/v1/interviews' && method === 'GET') {
       const rows = await recruiting.listInterviews(context.url.searchParams.get('applicationId') ?? undefined, departmentScope(auth));
       const preparation = await questionPreparations.repository.list(rows.map(row => row.id));
@@ -1140,7 +1342,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     }
     const liveSessionCreateMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/live-sessions$/);
     if (liveSessionCreateMatch && method === 'GET') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); sendSuccess(context, await liveInterviewSessions.findLatest(liveSessionCreateMatch[1]!) ?? null); return; }
-    if (liveSessionCreateMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); const existing = await liveInterviewSessions.findActive(liveSessionCreateMatch[1]!); if (existing) throw new HttpError(409, 'LIVE_SESSION_ALREADY_ACTIVE', '该面试已存在进行中的实时会话，请先结束当前会话再创建新的会话'); sendSuccess(context, await liveInterviewSessions.create(liveSessionCreateMatch[1]!, auth.user.id), 201); return; }
+    if (liveSessionCreateMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(liveSessionCreateMatch[1]!, departmentScope(auth)); sendSuccess(context, await liveInterviewSessions.create(liveSessionCreateMatch[1]!, auth.user.id), 201); return; }
     const liveSessionPath = parseLiveSessionPath(path);
     if (liveSessionPath && method === 'GET' && liveSessionPath.action === 'transcription') {
       requireRole(auth, INTERVIEW_WRITE_ROLES);
@@ -1309,6 +1511,20 @@ const routeMiddleware: Middleware = async (context, next) => {
     }
     const resumeQuestionsMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/questions$/);
     if (resumeQuestionsMatch && method === 'GET') { await recruiting.assertInterviewInScope(resumeQuestionsMatch[1]!, departmentScope(auth)); const saved = await interviewQuestionSets.get(resumeQuestionsMatch[1]!); sendSuccess(context, saved ? { questions: saved.questions.map(question => ({ ...question, sourceEngine: question.sourceEngine ?? saved.engine })), engine: saved.engine, updatedAt: saved.updatedAt, advisoryOnly: true, applicationStatusMutation: 'none' } : null); return; }
+    const correctConclusionMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/correct-conclusion$/);
+    if (correctConclusionMatch && method === 'POST') {
+      requireRole(auth, INTERVIEW_WRITE_ROLES);
+      await recruiting.assertInterviewInScope(correctConclusionMatch[1]!, departmentScope(auth));
+      const body = await readJson(context);
+      if (typeof body.outcome !== 'string' || !['continue', 'offer', 'reject', 'cancelled'].includes(body.outcome)) {
+        throw new HttpError(400, 'INVALID_INPUT', '请选择有效的面试结论');
+      }
+      if (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.trim().length > 1000) {
+        throw new HttpError(400, 'INVALID_INPUT', '请填写不超过 1000 个字符的更正原因');
+      }
+      sendSuccess(context, await recruiting.correctInterviewConclusion(correctConclusionMatch[1]!, body.outcome as 'continue' | 'offer' | 'reject' | 'cancelled', body.reason, auth.user.id));
+      return;
+    }
     const interviewMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)(?:\/(feedback|lock-feedback|conclude|complete|questions))?$/);
     if (interviewMatch && method === 'GET' && !interviewMatch[2]) { await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.getInterview(interviewMatch[1]!)); return; }
     if (interviewMatch && method === 'PATCH' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.updateInterviewSchedule(interviewMatch[1]!, await readJson(context), auth.user.id)); return; }
@@ -1527,7 +1743,10 @@ const routeMiddleware: Middleware = async (context, next) => {
           sendSuccess(context, generated);
         } catch (error) {
           if (error instanceof JobSpecGenerationError) {
-            if (error.code === 'AI_NOT_CONFIGURED') {
+            // Some OpenAI-compatible providers return HTTP 200 with truncated or
+            // schema-incompatible content. Keep generation usable without ever
+            // persisting unvalidated model output.
+            if (error.code === 'AI_NOT_CONFIGURED' || error.code === 'MODEL_RESPONSE_INVALID') {
               sendSuccess(context, await recruiting.createSpec(id, generateLocalJobSpec({ jobTitle: job.title }), auth.user.id));
               return;
             }
@@ -1568,7 +1787,9 @@ const routeMiddleware: Middleware = async (context, next) => {
           sendSuccess(context, generated);
         } catch (error) {
           if (error instanceof JobDescriptionGenerationError) {
-            if (error.code === 'AI_NOT_CONFIGURED') {
+            // A malformed model response is not safe to persist, but it should
+            // not make the user lose the existing deterministic JD fallback.
+            if (error.code === 'AI_NOT_CONFIGURED' || error.code === 'MODEL_RESPONSE_INVALID') {
               sendSuccess(context, await recruiting.createJd(id, generateLocalJobDescription(generationInput), auth.user.id));
               return;
             }

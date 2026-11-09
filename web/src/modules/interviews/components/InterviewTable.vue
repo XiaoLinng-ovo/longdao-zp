@@ -15,6 +15,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   prepare: [row: InterviewView]
   arrange: [row: InterviewView]
+  reschedule: [row: InterviewView]
   conclude: [row: InterviewView]
   detail: [row: InterviewView]
   delete: [row: InterviewView]
@@ -38,25 +39,25 @@ function needsFinalSchedule(row: InterviewView): boolean {
     <table>
       <thead>
         <tr>
-          <th>候选人</th>
-          <th>岗位</th>
-          <th>轮次</th>
-          <th>时间</th>
-          <th>面试官</th>
-          <th>面试表</th>
-          <th>AI 评分</th>
-          <th>面试结果</th>
-          <th>操作</th>
+          <th class="candidate-column">候选人</th>
+          <th class="job-column">岗位</th>
+          <th class="round-column">轮次</th>
+          <th class="time-column">时间</th>
+          <th class="interviewer-column">面试官</th>
+          <th class="preparation-column">面试表</th>
+          <th class="score-column">AI 评分</th>
+          <th class="result-column">面试结果</th>
+          <th class="actions-column">操作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.entityId || row.id">
-          <td><strong>{{ row.candidate }}</strong></td>
-          <td>{{ row.job }}</td>
-          <td>{{ row.round }}</td>
-          <td>{{ row.scheduledAt }}</td>
-          <td>{{ row.interviewers.join('、') || '未分配' }}</td>
-          <td>
+          <td class="candidate-cell"><strong>{{ row.candidate }}</strong></td>
+          <td class="job-cell">{{ row.job }}</td>
+          <td class="round-cell">{{ row.round }}</td>
+          <td class="time-cell">{{ row.scheduledAt }}</td>
+          <td class="interviewer-cell">{{ row.interviewers.join('、') || '未分配' }}</td>
+          <td class="preparation-cell-wrap">
             <div class="preparation-cell" v-if="row.questionPreparation">
               <span class="preparation-tag" :data-state="row.questionPreparation.status" :title="row.questionPreparation.error">
                 {{ preparationLabels[row.questionPreparation.status] }}
@@ -77,10 +78,10 @@ function needsFinalSchedule(row: InterviewView): boolean {
             </div>
             <span v-else class="preparation-unavailable">—</span>
           </td>
-          <td><span class="ai-score" :class="{ scored: row.aiScore !== null && row.aiScore !== undefined }">{{ aiScoreLabel(row) }}<small v-if="row.aiScore !== null && row.aiScore !== undefined"> / 100</small></span></td>
-          <td><span class="result-tag" :data-result="interviewResult(row)">{{ INTERVIEW_RESULT_LABELS[interviewResult(row)] }}</span></td>
-          <td>
-            <div class="inline-actions">
+          <td class="score-cell"><span class="ai-score" :class="{ scored: row.aiScore !== null && row.aiScore !== undefined }">{{ aiScoreLabel(row) }}<small v-if="row.aiScore !== null && row.aiScore !== undefined"> / 100</small></span></td>
+          <td class="result-cell"><span class="result-tag" :data-result="interviewResult(row)">{{ INTERVIEW_RESULT_LABELS[interviewResult(row)] }}</span></td>
+          <td class="actions-cell">
+            <div class="inline-actions" :class="{ 'is-confirming': props.confirmingDeleteId === rowId(row) }">
               <button class="btn btn-ghost" type="button" @click="emit('detail', row)">详情</button>
               <button
                 v-if="needsFinalSchedule(row)"
@@ -90,6 +91,7 @@ function needsFinalSchedule(row: InterviewView): boolean {
               >
                 安排复试
               </button>
+              <button v-if="row.status === 'cancelled'" class="btn btn-primary" type="button" @click="emit('reschedule', row)">重新安排</button>
               <button
                 v-if="row.status !== 'cancelled' && !row.outcome && !needsFinalSchedule(row)"
                 class="btn btn-primary"
@@ -136,7 +138,13 @@ function needsFinalSchedule(row: InterviewView): boolean {
 </template>
 
 <style scoped>
-table{min-width:1200px}
+.table-wrap table{width:100%;min-width:1200px;table-layout:fixed}
+.candidate-column{width:10%}.job-column{width:14%}.round-column{width:6%}.time-column{width:9%}.interviewer-column{width:9%}.preparation-column{width:16%}.score-column{width:7%}.result-column{width:8%}.actions-column{width:21%}
+.candidate-cell strong,.job-cell,.interviewer-cell{overflow-wrap:anywhere}
+.round-cell,.time-cell,.score-cell,.result-cell{white-space:nowrap}
+.actions-cell .inline-actions{flex-wrap:nowrap}
+.actions-cell .inline-actions.is-confirming{flex-wrap:wrap}
+.actions-cell .btn{flex:none;white-space:nowrap}
 .preparation-cell{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-height:32px}
 .preparation-tag{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:6px;font-size:12px;background:#edf3f6;color:#637f8a}
 .preparation-tag[data-state="ready"]{background:#e4f4eb;color:#287452}
@@ -145,7 +153,7 @@ table{min-width:1200px}
 .preparation-error{flex-basis:100%;max-width:260px;color:#9f4654;font-size:11px;line-height:1.5;white-space:normal;overflow-wrap:anywhere}
 .preparation-error summary{cursor:pointer}.preparation-error p{margin:5px 0}.preparation-progress{flex-basis:100%;font-size:11px;line-height:1.5;color:#637f8a;white-space:normal}
 .preparation-tag small{font-variant-numeric:tabular-nums}.preparation-unavailable{color:#9aadb8}
-.preparation-retry{padding:4px 7px;font-size:12px}th,td{white-space:nowrap}
+.preparation-retry{padding:4px 7px;font-size:12px}
 .ai-score{color:#7890a0;font-variant-numeric:tabular-nums;white-space:nowrap}
 .ai-score.scored{color:#237a82;font-size:16px;font-weight:700}
 .ai-score small{font-size:11px;font-weight:400;color:#7890a0}

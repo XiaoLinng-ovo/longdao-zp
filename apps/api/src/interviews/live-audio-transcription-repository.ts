@@ -64,6 +64,28 @@ export class LiveAudioTranscriptionRepository {
     } catch (error) { await client.query('ROLLBACK'); throw error }
     finally { client.release() }
   }
+  /**
+   * 实时切片只能看到几秒上下文，早期的句子往往先落在 unknown。等同一说话人
+   * 攒够两条以上一致的角色证据后，回头把它的 unknown 句子补上，避免整场
+   * 大段「未知说话人」。人工确认过的角色永不被覆盖。
+   */
+  async relabelFromEvidence(sessionId: string, minVotes = 2, minShare = 0.7): Promise<number> {
+    const result = await this.pool.query(`WITH votes AS (
+        SELECT speaker_id, role, count(*) AS n, sum(count(*)) OVER (PARTITION BY speaker_id) AS total
+        FROM interview_live_segments
+        WHERE session_id=$1::uuid AND role<>'unknown' AND speaker_id IS NOT NULL
+        GROUP BY speaker_id, role
+      ), decided AS (
+        SELECT v.speaker_id, v.role FROM votes v
+        WHERE v.n >= $2 AND v.n::numeric / v.total >= $3
+          AND NOT EXISTS (SELECT 1 FROM votes o WHERE o.speaker_id=v.speaker_id AND o.n > v.n)
+      )
+      UPDATE interview_live_segments s SET role=d.role, role_confidence=0.8
+      FROM decided d
+      WHERE s.session_id=$1::uuid AND s.speaker_id=d.speaker_id AND s.role='unknown'
+        AND s.speaker_confirmed IS NOT TRUE`, [sessionId, minVotes, minShare])
+    return result.rowCount ?? 0
+  }
   async retry(job: AudioTranscriptionJob, error: unknown): Promise<void> {
     const delaySeconds = Math.min(300, 5 * 2 ** Math.min(job.attempts - 1, 6))
     await this.pool.query(`UPDATE interview_audio_transcription_jobs SET status='pending',claim=NULL,error=$3,

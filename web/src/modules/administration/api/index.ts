@@ -47,6 +47,10 @@ export interface AdminDepartmentDeleteResult { id: string; code: string; name: s
 export type AdminSettings = Record<string, unknown>
 export interface DingTalkEnvSetting { value: string; configured: boolean; masked: boolean }
 export type DingTalkEnvSettings = Record<string, DingTalkEnvSetting>
+export interface SmtpEnvSetting { value: string; configured: boolean; masked: boolean }
+export type SmtpEnvSettings = Record<'SMTP_HOST' | 'SMTP_PORT' | 'SMTP_SECURE' | 'SMTP_USER' | 'SMTP_PASSWORD' | 'SMTP_FROM', SmtpEnvSetting>
+export interface SmtpConnectionTestResult { ok: boolean; message: string }
+export interface SmtpTestEmailResult { ok: boolean; message: string }
 export interface ResumeVirusScanSetting { enabled: boolean }
 export interface AdminAnalysisTask {
   id: string; resumeId: string; applicationId?: string; status: 'queued' | 'processing' | 'completed' | 'failed'; attempts: number; idempotencyKey: string; lastError?: string; availableAt: string; startedAt?: string; completedAt?: string; createdAt: string
@@ -135,6 +139,22 @@ export async function deleteAdminDepartment(id: string): Promise<AdminDepartment
   return (await apiClient.deleteJson<AdminDepartmentDeleteResult>(`/admin/departments/${encodeURIComponent(id)}`)).data
 }
 
+export async function listEnterpriseDepartments(): Promise<AdminDepartment[]> {
+  return (await apiClient.getJson<AdminDepartment[]>('/departments?activeOnly=false')).data
+}
+
+export async function createEnterpriseDepartment(input: { name: string }): Promise<AdminDepartment> {
+  return (await apiClient.postJson<AdminDepartment>('/departments', input)).data
+}
+
+export async function updateEnterpriseDepartment(id: string, patch: { name?: string; isActive?: boolean }): Promise<AdminDepartment> {
+  return (await apiClient.patchJson<AdminDepartment>(`/departments/${encodeURIComponent(id)}`, patch)).data
+}
+
+export async function deleteEnterpriseDepartment(id: string): Promise<AdminDepartmentDeleteResult> {
+  return (await apiClient.deleteJson<AdminDepartmentDeleteResult>(`/departments/${encodeURIComponent(id)}`)).data
+}
+
 export async function updateAdminRole(id: string, patch: { name?: string }): Promise<AdminRole> {
   return (await apiClient.patchJson<AdminRole>(`/admin/roles/${encodeURIComponent(id)}`, patch)).data
 }
@@ -155,6 +175,21 @@ export async function updateDingTalkSettings(patch: Record<string, string>): Pro
   return (await apiClient.patchJson<DingTalkEnvSettings>('/admin/dingtalk-settings', patch)).data
 }
 
+export async function getSmtpSettings(): Promise<SmtpEnvSettings> {
+  return (await apiClient.getJson<SmtpEnvSettings>('/admin/smtp-settings')).data
+}
+
+export async function updateSmtpSettings(patch: Partial<Record<keyof SmtpEnvSettings, string>>): Promise<SmtpEnvSettings> {
+  return (await apiClient.patchJson<SmtpEnvSettings>('/admin/smtp-settings', patch)).data
+}
+export async function sendSmtpTestEmail(to: string): Promise<SmtpTestEmailResult> {
+  return (await apiClient.postJson<SmtpTestEmailResult>('/admin/smtp-test-email', { to })).data
+}
+
+export async function testSmtpConnection(patch: Partial<Record<keyof SmtpEnvSettings, string>> = {}): Promise<SmtpConnectionTestResult> {
+  return (await apiClient.postJson<SmtpConnectionTestResult>('/admin/smtp-connection-test', patch)).data
+}
+
 export interface DingTalkConnectionTestResult {
   ok: boolean
   status?: number
@@ -164,54 +199,6 @@ export interface DingTalkConnectionTestResult {
 
 export async function testDingTalkConnection(input: { appKey?: string; appSecret?: string } = {}): Promise<DingTalkConnectionTestResult> {
   return (await apiClient.postJson<DingTalkConnectionTestResult>('/admin/dingtalk-connection-test', input)).data
-}
-
-export type RecruitmentApprovalMode = 'platform' | 'dingtalk'
-export interface RecruitmentApprovalSettings { mode: RecruitmentApprovalMode }
-
-export async function getRecruitmentApprovalSettings(): Promise<RecruitmentApprovalSettings> {
-  return (await apiClient.getJson<RecruitmentApprovalSettings>('/admin/recruitment-approval-settings')).data
-}
-
-export async function updateRecruitmentApprovalSettings(mode: RecruitmentApprovalMode): Promise<RecruitmentApprovalSettings> {
-  return (await apiClient.patchJson<RecruitmentApprovalSettings>('/admin/recruitment-approval-settings', { mode })).data
-}
-
-export interface DingTalkApprovalDepartmentConfig {
-  id: string
-  code: string
-  name: string
-  isActive: boolean
-  dingTalkDepartmentId: number | null
-  processCode: string | null
-  configured: boolean
-}
-export interface DingTalkApprovalUserMapping {
-  id: string
-  displayName: string
-  email: string
-  departmentName: string | null
-  dingTalkUserId: string | null
-  configured: boolean
-}
-export interface DingTalkApprovalConfig {
-  subjectType: 'recruitment_request'
-  callbackUrl: string | null
-  callbackUrlConfigured: boolean
-  departments: DingTalkApprovalDepartmentConfig[]
-  users: DingTalkApprovalUserMapping[]
-}
-
-export async function getDingTalkApprovalConfig(): Promise<DingTalkApprovalConfig> {
-  return (await apiClient.getJson<DingTalkApprovalConfig>('/admin/dingtalk-approval-config')).data
-}
-
-export async function updateDingTalkDepartmentApprovalConfig(input: { departmentId: string; dingTalkDepartmentId?: string | number | null; processCode?: string | null }): Promise<DingTalkApprovalConfig> {
-  return (await apiClient.patchJson<DingTalkApprovalConfig>('/admin/dingtalk-approval-config', input)).data
-}
-
-export async function updateDingTalkUserMapping(input: { userId: string; dingTalkUserId?: string | null }): Promise<DingTalkApprovalConfig> {
-  return (await apiClient.patchJson<DingTalkApprovalConfig>('/admin/dingtalk-approval-config', input)).data
 }
 
 export async function getResumeVirusScanSetting(): Promise<ResumeVirusScanSetting> {
@@ -256,6 +243,20 @@ export async function testAiConnection(input: AiConnectionTestInput = {}): Promi
 
 export async function saveAiSettings(patch: Partial<Record<keyof AiEnvSettings, string>>): Promise<AiSettings> {
   return (await apiClient.patchJson<AiSettings>('/admin/ai-settings', patch)).data
+}
+
+export interface AiSharingSettings {
+  enabled: boolean
+  activeOrganizationCount: number
+  sharedOrganizationCount: number
+}
+
+export async function getAiSharingSettings(): Promise<AiSharingSettings> {
+  return (await apiClient.getJson<AiSharingSettings>('/admin/ai-sharing')).data
+}
+
+export async function updateAiSharingSettings(enabled: boolean): Promise<AiSharingSettings> {
+  return (await apiClient.patchJson<AiSharingSettings>('/admin/ai-sharing', { enabled })).data
 }
 
 export type ChannelProvider = 'boss' | 'liepin' | '51job' | 'official_site'

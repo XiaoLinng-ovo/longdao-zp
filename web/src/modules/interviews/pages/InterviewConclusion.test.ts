@@ -3,12 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import InterviewDetailPage from './InterviewDetailPage.vue'
-import { concludeInterview, getInterview, loadInterviews } from '../api'
+import { completeInterview, getInterview, loadInterviews } from '../api'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../api', async (importOriginal) => ({
   ...await importOriginal<typeof import('../api')>(),
-  concludeInterview: vi.fn(),
+  completeInterview: vi.fn(),
   getInterview: vi.fn(),
   loadInterviews: vi.fn(),
 }))
@@ -56,7 +56,7 @@ afterEach(() => {
 })
 
 describe('Interview detail conclusion', () => {
-  async function mount() {
+  async function mount(overrides: Record<string, unknown> = {}) {
     vi.mocked(loadInterviews).mockResolvedValue([{
       id: 'INT-1', entityId: 'interview-1', candidate: '林晓', job: '商务', round: '1 轮',
       scheduledAt: '待安排', interviewers: [], interviewerIds: [], interviewerOptions: [],
@@ -68,6 +68,7 @@ describe('Interview detail conclusion', () => {
       participants: [], feedbackStatus: 'pending', feedback: [],
       application: { id: 'app-1', code: 'APP-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'interviewing' },
       createdAt: '2026-10-21T00:00:00Z', updatedAt: '2026-10-21T00:00:00Z',
+      ...overrides,
     })
     vi.mocked(apiClient.getJson).mockImplementation(async (path) => ({
       ok: true, requestId: 'test', data: path === '/candidates'
@@ -90,30 +91,30 @@ describe('Interview detail conclusion', () => {
     await flush()
   }
 
-  it('shows feedback-lock failures inside the dialog and lets the user retry', async () => {
-    vi.mocked(concludeInterview)
-      .mockRejectedValueOnce(Object.assign(new Error('所有面试反馈锁定后才能完成面试'), { code: 'INTERVIEW_FEEDBACK_INCOMPLETE' }))
+  it('shows completion failures inside the dialog and lets the user retry', async () => {
+    vi.mocked(completeInterview)
+      .mockRejectedValueOnce(new Error('连接暂不可用，请重试'))
       .mockResolvedValueOnce({})
     await mount()
     await chooseOutcome('reject')
     button('确认完成', dialog()).click()
     await flush()
 
-    expect(dialog().querySelector('[role="alert"]')?.textContent).toContain('请先填写并锁定所有面试官的综合反馈')
+    expect(dialog().querySelector('[role="alert"]')?.textContent).toContain('连接暂不可用，请重试')
     expect(button('确认完成', dialog()).disabled).toBe(false)
     expect(dialog().querySelector('select')?.value).toBe('reject')
     button('确认完成', dialog()).click()
     await flush()
 
-    expect(concludeInterview).toHaveBeenNthCalledWith(1, 'interview-1', 'reject')
-    expect(concludeInterview).toHaveBeenNthCalledWith(2, 'interview-1', 'reject')
+    expect(completeInterview).toHaveBeenNthCalledWith(1, 'interview-1', 'reject')
+    expect(completeInterview).toHaveBeenNthCalledWith(2, 'interview-1', 'reject')
     expect(root.querySelector('[role="dialog"]')).toBeNull()
     expect(root.textContent).toContain('面试已完成：未通过')
     expect(getInterview).toHaveBeenCalledTimes(2)
   })
 
   it('keeps network errors visible in the modal and clears them on reopening', async () => {
-    vi.mocked(concludeInterview).mockRejectedValue(new Error('网络连接失败，请重试'))
+    vi.mocked(completeInterview).mockRejectedValue(new Error('网络连接失败，请重试'))
     await mount()
     button('确认完成', dialog()).click()
     await flush()
@@ -128,16 +129,30 @@ describe('Interview detail conclusion', () => {
   })
 
   it.each([
-    ['continue', '进入下一轮'], ['offer', '通过，进入 Offer 阶段'], ['reject', '未通过'],
-  ])('submits %s and retains success feedback after refreshing', async (outcome, label) => {
-    vi.mocked(concludeInterview).mockResolvedValue({})
-    await mount()
+    [{ round: 1, stage: 'initial' }, ['下一轮', '未通过', '取消面试'], 'continue'],
+    [{ round: 2, stage: 'final' }, ['通过，进入 Offer', '未通过', '取消面试'], 'offer'],
+  ] as const)('uses stage-appropriate options for %o', async (overrides, options, defaultOutcome) => {
+    vi.mocked(completeInterview).mockResolvedValue({})
+    await mount(overrides)
+    const select = dialog().querySelector('select')!
+    expect([...select.options].map(option => option.textContent)).toEqual(options)
+    expect(select.value).toBe(defaultOutcome)
+  })
+
+  it.each([
+    [{ round: 1, stage: 'initial' }, 'continue', '进入下一轮'],
+    [{ round: 1, stage: 'initial' }, 'reject', '未通过'],
+    [{ round: 2, stage: 'final' }, 'offer', '通过，进入 Offer 阶段'],
+    [{ round: 2, stage: 'final' }, 'cancelled', '已取消面试'],
+  ] as const)('submits %s through the single completion endpoint and refreshes', async (overrides, outcome, label) => {
+    vi.mocked(completeInterview).mockResolvedValue({})
+    await mount(overrides)
     await chooseOutcome(outcome)
     button('确认完成', dialog()).click()
     await flush()
 
-    expect(concludeInterview).toHaveBeenCalledTimes(1)
-    expect(concludeInterview).toHaveBeenCalledWith('interview-1', outcome)
+    expect(completeInterview).toHaveBeenCalledTimes(1)
+    expect(completeInterview).toHaveBeenCalledWith('interview-1', outcome)
     expect(root.querySelector('[role="dialog"]')).toBeNull()
     expect(root.textContent).toContain(`面试已完成：${label}`)
     expect(getInterview).toHaveBeenCalledTimes(2)
@@ -145,14 +160,14 @@ describe('Interview detail conclusion', () => {
 
   it('locks the outcome and backdrop while submitting and prevents duplicate requests', async () => {
     let resolve!: (value: unknown) => void
-    vi.mocked(concludeInterview).mockReturnValue(new Promise((done) => { resolve = done }))
+    vi.mocked(completeInterview).mockReturnValue(new Promise((done) => { resolve = done }))
     await mount()
     const submit = button('确认完成', dialog())
     submit.click()
     submit.click()
     await flush()
 
-    expect(concludeInterview).toHaveBeenCalledTimes(1)
+    expect(completeInterview).toHaveBeenCalledTimes(1)
     expect(button('提交中...', dialog()).disabled).toBe(true)
     expect(button('取消', dialog()).disabled).toBe(true)
     expect(dialog().querySelector('select')?.disabled).toBe(true)

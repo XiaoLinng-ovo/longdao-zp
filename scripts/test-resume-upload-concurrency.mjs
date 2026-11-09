@@ -92,7 +92,7 @@ try {
     PGUSER: scratchConnection.user, PGPASSWORD: scratchConnection.password || '',
     DATABASE_URL: `postgresql://${encodeURIComponent(scratchConnection.user)}:${encodeURIComponent(scratchConnection.password || '')}@${scratchConnection.host}:${scratchConnection.port}/${database}`,
     PGDATABASE: database, DB_POOL_MAX: '10', REQUIRE_CSRF: 'true', ALLOWED_ORIGINS: 'http://127.0.0.1:5173', ALLOW_DEV_BOOTSTRAP_AUTH: 'false',
-    RESUME_VIRUS_SCAN_ENABLED: 'false', WORKER_USE_LLM_ANALYSIS: 'false', QUESTION_SHEET_POLL: 'off', DINGTALK_APPROVAL_RECONCILE: 'off',
+    RESUME_VIRUS_SCAN_ENABLED: 'false', WORKER_USE_LLM_ANALYSIS: 'false', QUESTION_SHEET_POLL: 'off',
     RESUME_UPLOAD_CONCURRENCY: '24', RESUME_UPLOAD_WORKSPACE_CONCURRENCY: '24', RESUME_ANALYSIS_QUEUE_LIMIT: '2000', RESUME_ANALYSIS_WORKSPACE_QUEUE_LIMIT: '500',
     S3_ENDPOINT: '', OPENAI_BASE_URL: '', OPENAI_API_KEY: '', OPENAI_MODEL: '', RESUME_LOCAL_OCR_ENABLED: 'false', RECRUITING_QUARANTINE_ROOT: storageRoot })
   assert.equal(loadDatabaseConfig().target, `${scratchConnection.host}:${scratchConnection.port}/${database}`)

@@ -7,7 +7,7 @@ import { switchWorkspace } from '../session'
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: { invite: 'ABCDEF-123456-ABCDEF-123456' } }) }))
 vi.mock('../api/invitations', () => ({ previewInvitation: vi.fn(), acceptInvitation: vi.fn() }))
 vi.mock('../session', () => ({ switchWorkspace: vi.fn() }))
-const invitation = { id:'i', workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',businessRole:'interviewer',membershipRole:'member',expiresAt:'2099-01-01',status:'pending' } as Invitation
+const invitation = { id:'i', workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',businessRole:'recruiter',membershipRole:'member',expiresAt:'2099-01-01',status:'pending' } as Invitation
 let app: App, root: HTMLDivElement
 async function flush() { for(let i=0;i<8;i++) { await Promise.resolve(); await nextTick() } }
 function button(text:string) { return [...root.querySelectorAll('button')].find(b=>b.textContent?.trim()===text)! }
@@ -18,7 +18,7 @@ describe('JoinWorkspaceCard',()=>{
   expect(root.querySelector('input')!.value).toBe('ABCDEF123456ABCDEF123456')
   vi.mocked(previewInvitation).mockResolvedValue(invitation)
   button('验证邀请码').click();await flush()
-  expect(root.textContent).toContain('面试官');expect(acceptInvitation).not.toHaveBeenCalled()
+  expect(root.textContent).toContain('企业用户');expect(acceptInvitation).not.toHaveBeenCalled()
   vi.mocked(acceptInvitation).mockResolvedValue({workspaceId:'w',workspaceName:'测试企业'})
   vi.mocked(switchWorkspace).mockResolvedValue(undefined)
   button('确认加入企业').click();await flush()

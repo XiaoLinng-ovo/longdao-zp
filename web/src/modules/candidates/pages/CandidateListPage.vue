@@ -24,14 +24,16 @@ import ApplicationCreateDialog from '../components/ApplicationCreateDialog.vue'
 import InitialInterviewDialog from '../../interviews/components/InitialInterviewDialog.vue'
 import { aiResumeScore, canArrangeInitialInterview, canStartInitialInterview, screeningStatuses } from '../utils/ai-screening'
 import { authSession } from '../../auth/session'
+import { isEnterpriseUser } from '../../auth/utils/enterprise-access'
 import { ApiClientError } from '../../../shared/api'
 import { normalizeSearchText } from '../../../shared/utils/search'
 import { runResumeUploadQueue } from '../utils/resume-upload-queue'
-import { isActiveResumeImportStatus, resumeImportItemStatus, type ResumeUploadStatus } from '../utils/resume-import-progress'
+import { isActiveResumeImportStatus, resumeImportBatchPhase, resumeImportItemStatus, type ResumeUploadStatus } from '../utils/resume-import-progress'
+import type { ApiResumeImportBatchPhase } from '../api'
 
 const router = useRouter()
 const invitationApplicationId = ref('')
-const canArrange = computed(() => ['recruiter', 'hiring_manager', 'admin', 'hr_admin', 'interviewer'].includes(authSession.user?.role ?? ''))
+const canArrange = computed(() => isEnterpriseUser(authSession.user))
 function arrangeApplication(applicationId: string) {
   if (!canArrange.value) return
   reviewId.value = ''
@@ -116,7 +118,6 @@ const searchQuery = ref('')
 const scoreSort = ref<'none' | 'desc' | 'asc'>('none')
 const jobSort = ref<'none' | 'asc' | 'desc'>('none')
 const unprocessedStatuses = new Set(['pending', 'active', 'new', ...screeningStatuses])
-
 const jobOptions = computed(() => [...new Set(rows.value.flatMap((row) => row.applicationRows || [row]).map((row) => row.job).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 
 function runSearch() {
@@ -132,8 +133,7 @@ const filteredRows = computed(() => {
       - (Date.parse(left.updatedAtTimestamp || left.updatedAt) || 0)
     const hasManualSort = jobSort.value !== 'none' || scoreSort.value !== 'none'
 
-    // Default order is recency-first. Keep status as a tiebreaker so a newer
-    // candidate is never pushed below an older one just because its status differs.
+    // 默认按有效更新时间倒序；只有用户主动选择其他排序时才保留状态优先。
     if (!hasManualSort && updatedAtOrder !== 0) return updatedAtOrder
     if (hasManualSort && statusOrder !== 0) return statusOrder
     if (jobSort.value !== 'none') {
@@ -144,6 +144,7 @@ const filteredRows = computed(() => {
       const leftScore = aiResumeScore(left)
       const rightScore = aiResumeScore(right)
       if (leftScore === undefined || rightScore === undefined) {
+        // 未评分的简历始终排在已评分之后，避免把“暂无分数”误当成低分或高分。
         if (leftScore !== rightScore) return leftScore === undefined ? 1 : -1
       } else if (leftScore !== rightScore) {
         return scoreSort.value === 'desc' ? rightScore - leftScore : leftScore - rightScore
@@ -170,7 +171,7 @@ const loading = ref(true)
 const error = ref('')
 const feedback = ref('')
 const deletingId = ref('')
-const canDelete = computed(() => ['recruiter', 'admin', 'hr_admin'].includes(authSession.user?.role ?? ''))
+const canDelete = computed(() => isEnterpriseUser(authSession.user))
 let refreshVersion = 0
 
 async function handleDelete(row: Awaited<ReturnType<typeof loadCandidates>>[number]) {
@@ -230,10 +231,29 @@ const candidateResumeFiles = ref<ResumeUploadEntry[]>([])
 const uploadDialogError = ref('')
 const activeImportBatchId = ref('')
 const activeImportBatchStatus = ref<'uploading' | 'completed' | 'cancelled' | ''>('')
+const activeImportBatchPhase = ref<ApiResumeImportBatchPhase | ''>('')
 const dismissedImportBatchId = ref('')
 const cancellingUpload = ref(false)
-const hasActiveImportWork = computed(() => !!activeImportBatchId.value && candidateResumeFiles.value.some(item => isActiveResumeImportStatus(item.status)))
-const importBatchSummary = ref({ total: 0, finished: 0, processing: 0, failed: 0 })
+const hasActiveImportWork = computed(() => !!activeImportBatchId.value && (
+  candidateResumeFiles.value.some(item => isActiveResumeImportStatus(item.status))
+  || activeImportBatchPhase.value === 'uploading'
+  || activeImportBatchPhase.value === 'waiting_analysis'
+  || activeImportBatchPhase.value === 'analyzing'
+))
+const importBatchSummary = ref({
+  phase: 'uploading' as ApiResumeImportBatchPhase,
+  total: 0,
+  uploaded: 0,
+  uploadFailed: 0,
+  uploadProcessing: 0,
+  queued: 0,
+  analyzing: 0,
+  completed: 0,
+  analysisFailed: 0,
+  removed: 0,
+  cancelled: 0,
+  terminalAnalysis: 0,
+})
 const importPollTimer = ref<ReturnType<typeof setTimeout>>()
 let uploadAbortController: AbortController | undefined
 let nextResumeEntryId = 0
@@ -248,18 +268,57 @@ const uploadButtonLabel = computed(() => {
   return candidateResumeFiles.value.length > 1 ? '上传并解析（' + (uploadPendingCount.value + uploadRetryCount.value) + '份）' : '上传并解析'
 })
 
+const importProgressLabel = computed(() => {
+  const summary = importBatchSummary.value
+  if (summary.phase === 'uploading') {
+    return `文件上传：成功 ${summary.uploaded}/${summary.total}，${summary.uploadProcessing} 份处理中${summary.uploadFailed ? `，${summary.uploadFailed} 份失败` : ''}`
+  }
+  const analysis = [
+    summary.queued ? `排队 ${summary.queued}` : '',
+    summary.analyzing ? `分析中 ${summary.analyzing}` : '',
+    `完成 ${summary.completed}/${summary.total}`,
+    summary.analysisFailed ? `失败 ${summary.analysisFailed}` : '',
+    summary.removed ? `已删除 ${summary.removed}` : '',
+  ].filter(Boolean).join('，')
+  return `${summary.phase === 'cancelled' ? '文件上传：已停止' : `文件上传：${summary.uploaded}/${summary.total} 已完成`}；AI 分析：${analysis}`
+})
+
 function updateImportSummary() {
   const entries = candidateResumeFiles.value
+  const statuses = entries.map(entry => entry.status)
+  const uploadFailed = entries.filter(entry => entry.status === 'failed' && !entry.analysisTaskId).length
+  const analysisFailed = entries.filter(entry => entry.status === 'failed' && !!entry.analysisTaskId).length
+  const removed = statuses.filter(status => status === 'removed').length
+  const phase: ApiResumeImportBatchPhase = activeImportBatchPhase.value === 'cancelled'
+    ? 'cancelled'
+    : statuses.some(status => ['pending', 'uploading'].includes(status))
+    ? 'uploading'
+    : statuses.some(status => status === 'processing')
+      ? 'analyzing'
+      : statuses.some(status => status === 'queued')
+        ? 'waiting_analysis'
+        : uploadFailed || analysisFailed || removed
+            ? 'completed_with_issues'
+            : 'completed'
   importBatchSummary.value = {
+    phase,
     total: entries.length,
-    finished: entries.filter(item => ['completed', 'failed', 'cancelled', 'removed'].includes(item.status)).length,
-    processing: entries.filter(item => ['queued', 'processing'].includes(item.status)).length,
-    failed: entries.filter(item => item.status === 'failed').length,
+    uploaded: statuses.filter(status => ['queued', 'processing', 'completed', 'failed', 'removed'].includes(status)).length,
+    uploadFailed,
+    uploadProcessing: statuses.filter(status => ['pending', 'uploading'].includes(status)).length,
+    queued: statuses.filter(status => status === 'queued').length,
+    analyzing: statuses.filter(status => status === 'processing').length,
+    completed: statuses.filter(status => status === 'completed').length,
+    analysisFailed,
+    removed,
+    cancelled: statuses.filter(status => status === 'cancelled').length,
+    terminalAnalysis: statuses.filter(status => ['completed', 'failed', 'removed', 'cancelled'].includes(status)).length,
   }
 }
 function rememberBatch(batchId: string) {
   const previousBatchId = activeImportBatchId.value
   activeImportBatchId.value = batchId
+  if (!batchId && !candidateResumeFiles.value.length) activeImportBatchPhase.value = ''
   if (batchId !== previousBatchId) dismissedImportBatchId.value = ''
   if (!batchId) stopImportPolling()
   try {
@@ -280,6 +339,7 @@ function reconcileImportTracking() {
 }
 function replaceEntriesFromBatch(batch: Awaited<ReturnType<typeof getResumeImportBatch>>) {
   activeImportBatchStatus.value = batch.status
+  activeImportBatchPhase.value = resumeImportBatchPhase(batch)
   candidateJobId.value = batch.jobId
   const previous = new Map(
     candidateResumeFiles.value.flatMap(item => [
@@ -306,15 +366,22 @@ function replaceEntriesFromBatch(batch: Awaited<ReturnType<typeof getResumeImpor
       ...(item.error ? { error: item.error } : {}),
     }
   })
+  // A server-side upload summary can be complete while AI tasks are only queued.
+  // Keep the derived stage attached to the displayed entries so local progress and
+  // polling use the same source of truth.
+  if (activeImportBatchPhase.value === 'waiting_analysis' || activeImportBatchPhase.value === 'analyzing') {
+    activeImportBatchStatus.value = 'completed'
+  }
   updateImportSummary()
   reconcileImportTracking()
 }
 
 function openResumeUpload() {
   if (creatingCandidate.value) return
-  if (activeImportBatchId.value && activeImportBatchStatus.value !== 'uploading') {
+  if (activeImportBatchId.value && activeImportBatchPhase.value !== 'uploading') {
     rememberBatch('')
     activeImportBatchStatus.value = ''
+    activeImportBatchPhase.value = ''
     candidateResumeFiles.value = []
     candidateJobId.value = ''
     updateImportSummary()
@@ -338,12 +405,13 @@ function removeResumeFile(id: number) {
 }
 function resumeUploadStatus(entry: ResumeUploadEntry) {
   if (entry.status === 'uploading') return entry.progress >= 100 ? '文件已发送 · 等待服务器确认' : `上传中 ${entry.progress}%`
+  if (entry.status === 'failed') return entry.analysisTaskId ? 'AI 分析失败，可重试' : '上传失败'
   return {
     pending: '等待上传',
     uploading: `上传中 ${entry.progress}%`,
-    queued: '已上传 · 等待分析',
-    processing: 'AI 分析中',
-    completed: '已完成',
+    queued: '已上传 · AI 分析排队中',
+    processing: 'AI 正在分析',
+    completed: 'AI 分析完成',
     failed: '上传失败',
     cancelled: '已取消',
     removed: '关联简历或分析任务已删除',
@@ -424,7 +492,7 @@ function stopImportPolling() {
 }
 function scheduleImportPolling(delay = 2000) {
   stopImportPolling()
-  if (!activeImportBatchId.value || disposed || (!hasActiveImportWork.value && activeImportBatchStatus.value !== '')) return
+  if (!activeImportBatchId.value || disposed || !hasActiveImportWork.value) return
   importPollTimer.value = setTimeout(() => {
     importPollTimer.value = undefined
     void refreshImportBatch(true)
@@ -438,18 +506,25 @@ async function refreshImportBatch(scheduleNext = true) {
     const batch = await getResumeImportBatch(batchId)
     if (disposed || cancellingUpload.value || batchId !== activeImportBatchId.value || version !== importRefreshVersion) return
     replaceEntriesFromBatch(batch)
-    if (scheduleNext && hasActiveImportWork.value) scheduleImportPolling(batch.items.some(item => item.status === 'queued') ? 5000 : 2000)
+    if (scheduleNext && hasActiveImportWork.value) scheduleImportPolling(batch.items.some(item => item.status === 'queued' || item.status === 'pending_upload' || item.status === 'uploading') ? 5000 : 2000)
     if (batch.counts.completed > 0 && !creatingCandidate.value) await refresh(true)
   } catch (cause) {
     if (disposed || cancellingUpload.value || batchId !== activeImportBatchId.value || version !== importRefreshVersion) return
     if (cause instanceof ApiClientError && cause.status === 404) {
       rememberBatch('')
       activeImportBatchStatus.value = ''
+      activeImportBatchPhase.value = ''
       candidateResumeFiles.value = []
       updateImportSummary()
       return
     }
-    if (scheduleNext) scheduleImportPolling(5000)
+    if (scheduleNext) {
+      stopImportPolling()
+      importPollTimer.value = setTimeout(() => {
+        importPollTimer.value = undefined
+        void refreshImportBatch(true)
+      }, 5000)
+    }
     uploadDialogError.value = cause instanceof Error ? cause.message : '读取导入进度失败'
   }
 }
@@ -471,6 +546,7 @@ async function cancelActiveImport() {
   stopImportPolling()
   uploadAbortController?.abort()
   activeImportBatchStatus.value = 'cancelled'
+  activeImportBatchPhase.value = 'cancelled'
   for (const entry of candidateResumeFiles.value) {
     if (entry.status === 'pending' || entry.status === 'uploading') {
       entry.status = 'cancelled'
@@ -725,7 +801,7 @@ onUnmounted(() => {
     </div>
   </div>
   <div v-if="(hasActiveImportWork || uploadRetryCount) && activeImportBatchId !== dismissedImportBatchId && !showCreateCandidate" class="success-note resume-import-progress" role="status">
-    <span>简历导入进度：{{ importBatchSummary.finished }}/{{ importBatchSummary.total }}，{{ importBatchSummary.processing }} 份等待或正在分析</span>
+    <span>{{ importProgressLabel }}</span>
     <button class="btn btn-ghost" type="button" @click="viewImportProgress">查看进度</button>
     <button v-if="activeImportBatchStatus === 'uploading'" class="btn btn-ghost" type="button" @click="cancelActiveImport">取消上传</button>
     <button class="btn btn-ghost resume-dismiss-progress" type="button" aria-label="隐藏导入进度提示" title="隐藏提示，不会停止上传或解析" @click="dismissImportProgress"><X :size="16" aria-hidden="true" /></button>
@@ -819,7 +895,7 @@ onUnmounted(() => {
       <div class="filter-field">
         <label for="candidate-score-sort">评分排序</label>
         <select id="candidate-score-sort" v-model="scoreSort" aria-label="评分排序">
-          <option value="none">默认排序</option>
+          <option value="none">更新时间最新</option>
           <option value="desc">评分从高到低</option>
           <option value="asc">评分从低到高</option>
         </select>
@@ -827,7 +903,7 @@ onUnmounted(() => {
       <div class="filter-field">
         <label for="candidate-job-sort">岗位排序</label>
         <select id="candidate-job-sort" v-model="jobSort" aria-label="岗位排序">
-          <option value="none">默认排序</option>
+          <option value="none">更新时间最新</option>
           <option value="asc">岗位 A→Z</option>
           <option value="desc">岗位 Z→A</option>
         </select>

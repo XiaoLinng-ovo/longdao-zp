@@ -128,7 +128,7 @@ describe('岗位负责人保存与显示', () => {
 })
 
 
-describe('岗位说明书和 JD 同时生成', () => {
+describe('岗位说明书和 JD 分别生成', () => {
   const emptyJob: ApiJob = { ...readyJob, spec: undefined, jd: undefined }
   const specResult: ApiJob = { ...emptyJob, version: 3, spec: { ...readyJob.spec, summary: '新生成的说明书', confirmed: false, generatedBy: 'ai' } }
   const jdResult: ApiJob = { ...emptyJob, version: 2, jd: { ...readyJob.jd, content: '新生成的招聘 JD', confirmed: false, generatedBy: 'ai_assisted' } }
@@ -146,85 +146,68 @@ describe('岗位说明书和 JD 同时生成', () => {
     field.dispatchEvent(new Event(selector === 'select' ? 'change' : 'input'))
   }
 
-  it.each(['spec', 'jd'] as const)('点击 %s 同时发起两项生成，分别传入要求/Skill，乱序返回也不丢失文档', async (trigger) => {
+  it.each(['spec', 'jd'] as const)('点击 %s 只发起对应生成，传入对应要求/Skill 并只更新当前文档', async (trigger) => {
     vi.mocked(getJob).mockResolvedValue(emptyJob)
     vi.mocked(listActiveAiSkills).mockResolvedValue([
       { id: 'spec-skill', name: '说明书 Skill', targetType: 'job_spec', content: '内部说明书' },
       { id: 'jd-skill', name: 'JD Skill', targetType: 'jd', content: '招聘广告' },
     ])
-    const spec = deferred<ApiJob>()
-    const jd = deferred<ApiJob>()
-    vi.mocked(generateJobSpec).mockReturnValue(spec.promise)
-    vi.mocked(generateJobDescription).mockReturnValue(jd.promise)
+    const pending = deferred<ApiJob>()
+    if (trigger === 'spec') vi.mocked(generateJobSpec).mockReturnValue(pending.promise)
+    else vi.mocked(generateJobDescription).mockReturnValue(pending.promise)
     await mount()
     input('spec', 'textarea', '  突出人事管理职责  ')
     input('jd', 'textarea', '  面向候选人  ')
     input('spec', 'select', 'spec-skill')
     input('jd', 'select', 'jd-skill')
     generationButton(trigger).click(); await flush()
-    expect(generateJobSpec).toHaveBeenCalledWith('new-job', { prompt: '突出人事管理职责', skillId: 'spec-skill' })
-    expect(generateJobDescription).toHaveBeenCalledWith('new-job', { prompt: '面向候选人', skillId: 'jd-skill' })
-    for (const kind of ['spec', 'jd'] as const) {
-      expect(generationButton(kind).textContent).toBe('生成中...')
-      expect(generationButton(kind).disabled).toBe(true)
-      generationButton(kind).click()
+    if (trigger === 'spec') {
+      expect(generateJobSpec).toHaveBeenCalledWith('new-job', { prompt: '突出人事管理职责', skillId: 'spec-skill' })
+      expect(generateJobDescription).not.toHaveBeenCalled()
+    } else {
+      expect(generateJobDescription).toHaveBeenCalledWith('new-job', { prompt: '面向候选人', skillId: 'jd-skill' })
+      expect(generateJobSpec).not.toHaveBeenCalled()
     }
-    expect(generateJobSpec).toHaveBeenCalledTimes(1)
-    expect(generateJobDescription).toHaveBeenCalledTimes(1)
-    if (trigger === 'spec') spec.resolve(specResult)
-    else jd.resolve(jdResult)
+    expect(generationButton(trigger).textContent).toBe('生成中...')
+    expect(generationButton(trigger).disabled).toBe(true)
+    expect(generationButton(trigger === 'spec' ? 'jd' : 'spec').disabled).toBe(true)
+    generationButton(trigger).click()
+    expect(trigger === 'spec' ? generateJobSpec : generateJobDescription).toHaveBeenCalledTimes(1)
+    pending.resolve(trigger === 'spec' ? specResult : jdResult)
     await flush()
     expect(generationButton(trigger).textContent).toBe('AI 重新生成')
-    expect(generationButton(trigger).disabled).toBe(true)
-    expect(generationButton(trigger === 'spec' ? 'jd' : 'spec').textContent).toBe('生成中...')
-    if (trigger === 'spec') jd.resolve(jdResult)
-    else spec.resolve(specResult)
-    await flush()
-    expect(root.querySelector('#job-document-spec')?.textContent).toContain('新生成的说明书')
-    expect(root.querySelector('#job-document-jd')?.textContent).toContain('新生成的招聘 JD')
-    expect(root.textContent).toContain('岗位说明书已由AI生成（未确认）；JD已由AI生成（未确认）')
+    expect(root.querySelector('#job-document-' + trigger)?.textContent).toContain(trigger === 'spec' ? '新生成的说明书' : '新生成的招聘 JD')
+    expect(root.textContent).toContain(trigger === 'spec' ? '岗位说明书已由AI生成（未确认）' : 'JD已由AI生成（未确认）')
     expect(generationButton('spec').disabled).toBe(false)
     expect(generationButton('jd').disabled).toBe(false)
     expect(publishButton().disabled).toBe(true)
   })
 
-  it.each(['spec', 'jd'] as const)('%s 失败不丢失另一侧成功内容，并展示部分失败原因且恢复操作', async (failed) => {
+  it.each(['spec', 'jd'] as const)('%s 失败时只展示当前文档错误并恢复操作', async (failed) => {
     vi.mocked(getJob).mockResolvedValue(emptyJob)
     if (failed === 'spec') {
       vi.mocked(generateJobSpec).mockRejectedValue(new Error('说明书服务超时'))
-      vi.mocked(generateJobDescription).mockResolvedValue(jdResult)
     } else {
-      vi.mocked(generateJobSpec).mockResolvedValue(specResult)
       vi.mocked(generateJobDescription).mockRejectedValue(new Error('JD 服务超时'))
     }
-    await mount(); generationButton('spec').click(); await flush()
+    await mount(); generationButton(failed).click(); await flush()
     expect(root.textContent).toContain(failed === 'spec' ? '岗位说明书生成失败：说明书服务超时' : 'JD生成失败：JD 服务超时')
-    expect(root.textContent).toContain(failed === 'spec' ? '新生成的招聘 JD' : '新生成的说明书')
-    expect(root.textContent).toContain(failed === 'spec' ? 'JD已由AI生成（未确认）' : '岗位说明书已由AI生成（未确认）')
-    expect(generationButton('spec').disabled).toBe(false)
-    expect(generationButton('jd').disabled).toBe(false)
-  })
-
-  it('两项均失败时显示两项错误，并允许再次生成', async () => {
-    vi.mocked(generateJobSpec).mockRejectedValue(new Error('说明书不可用'))
-    vi.mocked(generateJobDescription).mockRejectedValue(new Error('JD 不可用'))
-    await mount(); generationButton('jd').click(); await flush()
-    expect(root.textContent).toContain('岗位说明书生成失败：说明书不可用')
-    expect(root.textContent).toContain('JD生成失败：JD 不可用')
+    expect(root.textContent).not.toContain('新生成的说明书')
+    expect(root.textContent).not.toContain('新生成的招聘 JD')
+    expect(failed === 'spec' ? generateJobDescription : generateJobSpec).not.toHaveBeenCalled()
     expect(generationButton('spec').disabled).toBe(false)
     expect(generationButton('jd').disabled).toBe(false)
   })
 
   it('版本历史读取失败不误报生成失败，仍保留生成结果并提示刷新', async () => {
     vi.mocked(generateJobSpec).mockResolvedValue(specResult)
-    vi.mocked(generateJobDescription).mockResolvedValue(jdResult)
     await mount()
     vi.mocked(listJobSpecVersions).mockRejectedValue(new Error('历史读取失败'))
     generationButton('spec').click(); await flush()
     expect(root.textContent).toContain('新生成的说明书')
-    expect(root.textContent).toContain('新生成的招聘 JD')
     expect(root.textContent).toContain('版本历史加载失败，请刷新查看')
     expect(root.textContent).not.toContain('生成失败：')
+    expect(generateJobDescription).not.toHaveBeenCalled()
   })
 })
 

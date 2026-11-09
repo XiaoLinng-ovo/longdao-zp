@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { interviewOutcome, validateDirectInterviewOutcome, type InterviewResult } from './interview-result.js'
+import { interviewOutcome, validateInterviewOutcome, type InterviewResult } from './interview-result.js'
 import { resolve } from 'node:path'
 import { LocalRecruitingStore } from './store.js'
+import { normalizeOfferTemplateFields, type OfferTemplateFields } from './offer-template-fields.js'
 import { isLocalOfferEligible } from './offer-eligibility.js'
 import { createRecruitingStore } from './postgres-store.js'
-import { createNormalizedRecruitingRepository, type NormalizedRecruitingRepository } from './repositories/postgres-repository.js'
-import type { AnalysisTaskRecord as RepositoryAnalysisTask, AnalysisResultRecord as RepositoryAnalysisResult, JobRecord as RepositoryJob, JobSpecVersionDbRecord as RepositoryJobSpecVersion, JobDescriptionVersionDbRecord as RepositoryJobDescriptionVersion, InterviewDbRecord as RepositoryInterview, InterviewFeedbackDbRecord as RepositoryInterviewFeedback, OfferDbRecord as RepositoryOffer, OnboardingDbRecord as RepositoryOnboarding } from './repositories/types.js'
-import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, ApprovalAuditRecord, ApprovalInstanceRecord, ApprovalRecord, ApprovalStepRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord, InterviewParticipant } from './types.js'
+import { NormalizedRecruitingRepository } from './repositories/postgres-repository.js'
+import { createDatabasePool } from '../db/connection.js'
+import type { AnalysisTaskRecord as RepositoryAnalysisTask, AnalysisResultRecord as RepositoryAnalysisResult, JobRecord as RepositoryJob, JobSpecVersionDbRecord as RepositoryJobSpecVersion, JobDescriptionVersionDbRecord as RepositoryJobDescriptionVersion, InterviewDbRecord as RepositoryInterview, InterviewFeedbackDbRecord as RepositoryInterviewFeedback, OfferDbRecord as RepositoryOffer, OnboardingDbRecord as RepositoryOnboarding, OnboardingTaskDbRecord as RepositoryOnboardingTask, OnboardingMaterialDbRecord as RepositoryOnboardingMaterial, OnboardingReminderDbRecord as RepositoryOnboardingReminder, OnboardingIntegrationDbRecord as RepositoryOnboardingIntegration, OfferTemplateDbRecord as RepositoryOfferTemplate } from './repositories/types.js'
+import type { AnalysisResultRecord, AnalysisTaskRecord, ApplicationRecord, ApprovalAuditRecord, ApprovalInstanceRecord, ApprovalRecord, ApprovalStepRecord, CandidateRecord, JobDescriptionRecord, JobDescriptionVersionRecord, JobRecord, JobSpecRecord, JobSpecVersionRecord, RecruitingStoreState, RecruitmentRequestRecord, ResumeRecord, WorkflowEventRecord, InterviewRecord, InterviewFeedbackRecord, InterviewType, OfferRecord, OfferVersionRecord, OnboardingRecord, OnboardingTaskRecord, OnboardingTaskCategory, OnboardingTaskStatus, OnboardingTaskOwnerRole, OnboardingMaterialRecord, OnboardingMaterialStatus, OnboardingReminderRecord, OnboardingIntegrationRecord, OnboardingIntegrationProvider, OnboardingIntegrationStatus, OnboardingWorkbenchItem, OnboardingReport, InterviewParticipant } from './types.js'
 import { RecruitingWorkflowError, transitionJob, transitionRequest } from './workflow.js'
+import { transitionOfferWorkflow } from './offer-workflow.js'
 import { validateResumeUpload } from './file-security.js'
 import { extractResumeText } from './resume-text-extractor.js'
 import mammoth from 'mammoth'
@@ -17,11 +20,12 @@ import { anonymizeText, buildRuleBasedReport, buildJobAnalysisContext, buildJobR
 import { initialResumeScanStatus } from './resume-scan-policy.js'
 import { latestAnalysisByKey } from './latest-analysis.js'
 import { buildDashboardTodos, type DashboardTodo } from './dashboard-todos.js'
-import { dashboardActivity, parseDashboardPeriod, withinPeriod, type DashboardActivity } from './dashboard-period.js'
+import { dashboardActivity, parseDashboardPeriod, type DashboardActivity } from './dashboard-period.js'
 import type { DashboardInterviewReview } from '../interviews/question-sheet-repository.js'
 import { interviewProgressByApplication } from './interview-progress.js'
 import { prepareInterviewScheduleUpdate } from './interview-schedule.js'
 import { applyResumeReview, resumeScoreSummary, type ResumeReviewInput } from './resume-scoring.js'
+import { buildOnboardingReminderSchedule, buildOnboardingReport, buildOnboardingWorkbenchItem, isClockTime, isIsoDate, isOnboardingEditable, missingSchedulingFields, onboardingCancellationReasons, onboardingNoShowReasons } from './onboarding-workbench.js'
 
 type RuleReportBuilder = (input: { resume: { documentId: string; fileName: string; mimeType: string; text: string; source: 'upload' }; job: ReturnType<typeof buildJobRequirements>; subject: { resumeId: string; applicationId?: string; jobId?: string } }) => Record<string, unknown>
 
@@ -36,10 +40,157 @@ type CreateJobSpecInput = { title: string; summary: string; responsibilities: st
 type CreateCandidateInput = { fullName: string; email?: string; phone?: string; source?: string; tags?: string[] }
 type UpdateCandidateInput = Partial<Omit<CreateCandidateInput, 'fullName'>> & { fullName?: string; status?: CandidateRecord['status']; reason?: string }
 type CreateApplicationInput = { candidateId: string; jobId: string; source?: string }
+type UpdateOnboardingInput = {
+  plannedStartDate?: string | null
+  plannedStartTime?: string | null
+  reportingMode?: OnboardingRecord['reportingMode'] | null
+  reportingLocation?: string | null
+  reportingContactName?: string | null
+  reportingContactPhone?: string | null
+  hrOwnerName?: string | null
+  hiringManagerName?: string | null
+  workCity?: string | null
+  officeLocation?: string | null
+  riskNotes?: string | null
+  notes?: string | null
+}
+type CreateOnboardingTaskInput = { title: string; category: OnboardingTaskCategory; isRequired?: boolean; ownerRole?: OnboardingTaskOwnerRole | null; templateKey?: string | null; ownerName?: string | null; dueDate?: string | null; notes?: string | null }
+type UpdateOnboardingTaskInput = Partial<CreateOnboardingTaskInput> & { status?: OnboardingTaskStatus; blockedReason?: string | null }
+type CreateOnboardingMaterialInput = { code: string; label: string; isRequired?: boolean; notes?: string }
+type UpdateOnboardingMaterialInput = { status?: OnboardingMaterialStatus; isRequired?: boolean; notes?: string }
+type UpdateOnboardingIntegrationInput = { status?: OnboardingIntegrationStatus; externalReference?: string | null; lastError?: string | null }
+type OnboardingActionResult = { reasonCode?: string; notes?: string; reason?: string }
+const defaultOnboardingTasks = (): Array<Pick<OnboardingTaskRecord, 'title' | 'category' | 'ownerName' | 'isRequired' | 'ownerRole' | 'templateKey'>> => [
+  { title: '核对劳动合同与入职材料', category: 'hr', ownerName: 'HR', isRequired: true, ownerRole: 'hr_admin', templateKey: 'hr_documents' },
+  { title: '建立员工档案并录入 HRIS', category: 'hr', ownerName: 'HR', isRequired: true, ownerRole: 'hr_admin', templateKey: 'hr_employee_record' },
+  { title: '开通账号与工作邮箱', category: 'it', ownerName: 'IT', isRequired: true, ownerRole: 'admin', templateKey: 'it_accounts' },
+  { title: '配置系统权限与 VPN', category: 'it', ownerName: 'IT', isRequired: true, ownerRole: 'admin', templateKey: 'it_permissions' },
+  { title: '准备工位、电脑与办公用品', category: 'admin', ownerName: '行政', isRequired: true, ownerRole: 'admin', templateKey: 'admin_workplace' },
+  { title: '办理门禁卡与园区权限', category: 'admin', ownerName: '行政', isRequired: true, ownerRole: 'admin', templateKey: 'admin_access_card' },
+  { title: '确认直属主管与报到联系人', category: 'manager', ownerName: '用人部门', isRequired: true, ownerRole: 'hiring_manager', templateKey: 'manager_first_week' },
+  { title: '制定首周计划与岗位目标', category: 'manager', ownerName: '用人部门', isRequired: true, ownerRole: 'hiring_manager', templateKey: 'manager_goals' },
+  { title: '安排入职引导与团队介绍', category: 'training', ownerName: '培训负责人', isRequired: true, ownerRole: 'hr_admin', templateKey: 'training_orientation' },
+  { title: '完成合规与信息安全培训', category: 'training', ownerName: '培训负责人', isRequired: true, ownerRole: 'hr_admin', templateKey: 'training_compliance' },
+  { title: '确认报到时间、地点与交通方式', category: 'candidate', ownerName: '候选人', isRequired: true, ownerRole: 'candidate', templateKey: 'candidate_reporting_confirmation' },
+  { title: '提交并核对入职材料', category: 'candidate', ownerName: '候选人', isRequired: true, ownerRole: 'candidate', templateKey: 'candidate_materials' },
+]
+const defaultOnboardingMaterials = ['身份证明', '学历与学位证明', '离职证明', '银行卡信息']
+const defaultOnboardingIntegrationProviders: OnboardingIntegrationProvider[] = ['oa', 'it_service_desk', 'access_control', 'email_account', 'hris']
+const onboardingReasonLabels: Record<string, string> = {
+  candidate_declined: '候选人放弃', offer_revoked: 'Offer 撤回', schedule_changed: '报到时间调整', position_closed: '岗位关闭', failed_requirements: '条件不符', candidate_unreachable: '无法联系候选人', personal_reason: '个人原因', another_offer: '接受其他 Offer', document_issue: '材料问题', attendance_issue: '报到异常', other: '其他原因',
+}
+
+const onboardingMaterialCodes: Record<string, string> = {
+  '身份证明': 'identity',
+  '身份证': 'id_card',
+  '学历与学位证明': 'education',
+  '毕业证书、学位证书': 'graduation_certificate',
+  '离职证明': 'separation',
+  '上家公司劳动合同解除证明或者离职证明': 'previous_employment_release',
+  '上家单位一年工资流水': 'previous_employment_payroll',
+  '一寸照片一张': 'photo',
+  '体检报告': 'medical_report',
+  '银行卡信息': 'bank_account',
+  '工资卡': 'bank_card',
+}
+
+const onboardingMaterialCodeLabels: Record<string, string> = {
+  identity: '身份证明',
+  id_card: '身份证',
+  education: '学历与学位证明',
+  graduation_certificate: '毕业证书、学位证书',
+  separation: '离职证明',
+  previous_employment_release: '上家公司劳动合同解除证明或者离职证明',
+  previous_employment_payroll: '上家单位一年工资流水',
+  photo: '一寸照片',
+  medical_report: '体检报告',
+  bank_account: '银行卡信息',
+  bank_card: '工资卡',
+}
+
+function onboardingMaterialTemplates(labels = defaultOnboardingMaterials): Array<{ code: string; label: string; isRequired: boolean }> {
+  const used = new Set<string>()
+  const templates: Array<{ code: string; label: string; isRequired: boolean }> = []
+  labels.forEach((rawLabel, index) => {
+    const normalized = clean(rawLabel)
+    const [rawCode, ...details] = normalized.split(':')
+    const detail = details.join(':').trim()
+    const mappedFromChinese = onboardingMaterialCodes[normalized]
+    const mappedFromCode = onboardingMaterialCodes[rawCode ?? '']
+    const code = mappedFromChinese ?? mappedFromCode ?? (/^[a-z0-9_]+$/i.test(rawCode ?? '') ? rawCode! : `material_${index + 1}`)
+    if (used.has(code)) return
+    const readableCode = code.replaceAll('_', ' ').trim().replace(/^[a-z]/, (letter) => letter.toUpperCase())
+    const label = rawCode === 'bank_card' && detail
+      ? `${detail}工资卡`
+      : mappedFromChinese
+        ? normalized
+        : onboardingMaterialCodeLabels[code] ?? detail ?? (mappedFromChinese ? normalized : readableCode) ?? `入职材料 ${index + 1}`
+    used.add(code)
+    templates.push({ code, label, isRequired: true })
+  })
+  return templates
+}
+
+function optionalClean(value: string | null | undefined): string | undefined {
+  if (value === null) return undefined
+  const result = clean(value)
+  return result || undefined
+}
+
+function validateOnboardingContactPhone(value: string): void {
+  if (!/^[0-9+()\-\s]{6,30}$/.test(value) || value.replace(/\D/g, '').length < 6) {
+    throw new RecruitingWorkflowError('ONBOARDING_CONTACT_PHONE_INVALID', '联系人电话格式无效', 400)
+  }
+}
+
+function validateOnboardingScheduleInput(input: UpdateOnboardingInput): void {
+  if (input.plannedStartDate && !isIsoDate(input.plannedStartDate)) throw new RecruitingWorkflowError('ONBOARDING_DATE_INVALID', '计划入职日期格式应为 YYYY-MM-DD', 400)
+  if (input.plannedStartTime && !isClockTime(input.plannedStartTime)) throw new RecruitingWorkflowError('ONBOARDING_TIME_INVALID', '计划报到时间格式应为 HH:mm', 400)
+  if (input.reportingMode && !['onsite', 'remote', 'hybrid'].includes(input.reportingMode)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '报到方式无效', 400)
+  if (input.reportingContactPhone) validateOnboardingContactPhone(input.reportingContactPhone)
+}
+
+function validateOnboardingTaskInput(input: Partial<UpdateOnboardingTaskInput>): void {
+  if (input.category !== undefined && !['hr', 'it', 'admin', 'manager', 'training', 'candidate'].includes(input.category)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '任务分类无效', 400)
+  if (input.status !== undefined && !['pending', 'in_progress', 'completed', 'blocked', 'not_required'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '任务状态无效', 400)
+  if (input.dueDate && !isIsoDate(input.dueDate)) throw new RecruitingWorkflowError('ONBOARDING_TASK_DUE_DATE_INVALID', '任务截止日期格式应为 YYYY-MM-DD', 400)
+}
+
+function onboardingReasonInput(value: unknown): { code?: string; notes?: string; legacy?: string } {
+  if (typeof value === 'string') {
+    const legacy = clean(value)
+    return legacy ? { legacy } : {}
+  }
+  if (!value || typeof value !== 'object') return {}
+  const row = value as Record<string, unknown>
+  const code = clean(row.reasonCode)
+  const notes = clean(row.notes)
+  return { ...(code ? { code } : {}), ...(notes ? { notes } : {}) }
+}
+
+function validateOnboardingReason(kind: 'cancel' | 'no_show', value: unknown): { reasonCode?: string; notes?: string; auditReason: string } {
+  const reason = onboardingReasonInput(value)
+  const allowed = kind === 'cancel' ? onboardingCancellationReasons : onboardingNoShowReasons
+  if (reason.code && !(allowed as readonly string[]).includes(reason.code)) throw new RecruitingWorkflowError('ONBOARDING_REASON_INVALID', '原因选项无效', 400)
+  if (reason.code === 'other' && !reason.notes) throw new RecruitingWorkflowError('ONBOARDING_REASON_NOTES_REQUIRED', '选择“其他原因”时必须填写说明', 400)
+  const auditReason = reason.notes || (reason.code ? onboardingReasonLabels[reason.code] ?? reason.code : reason.legacy ?? '')
+  if (!reason.code && !auditReason) throw new RecruitingWorkflowError('ONBOARDING_REASON_REQUIRED', kind === 'cancel' ? '取消原因不能为空' : '未报到原因不能为空', 400)
+  return { ...(reason.code ? { reasonCode: reason.code } : {}), ...(reason.notes ? { notes: reason.notes } : {}), auditReason }
+}
 type CreateResumeInput = { candidateId: string; applicationId?: string; originalFilename: string; mimeType?: string; content: string; encoding?: 'utf8' | 'base64' }
 type CreateInterviewInput = { applicationId: string; round?: number; type?: InterviewType; title: string; scheduledStartAt?: string; scheduledEndAt?: string; timezone?: string; location?: string; meetingUrl?: string; participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean }> }
 type FeedbackInput = { interviewerId: string; overallScore?: number; recommendation?: InterviewFeedbackRecord['recommendation']; ratings?: Record<string, number>; strengths?: string[]; concerns?: string[]; notes?: string }
-type CreateOfferInput = { applicationId: string; positionTitle: string; departmentId: string; employmentType: string; startDate?: string; baseSalary: { amount: number; currency: string }; bonus?: { amount: number; currency: string }; equity?: string; benefits?: string[]; content: string; expiresAt?: string }
+function normalizeOfferInvoiceField(value: unknown, label: string, maxLength: number): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new RecruitingWorkflowError('VALIDATION_ERROR', `${label}必须为文本`, 400)
+  const text = value.trim()
+  if (text.length > maxLength) throw new RecruitingWorkflowError('VALIDATION_ERROR', `${label}不能超过 ${maxLength} 个字符`, 400)
+  return text
+}
+
+type CreateOfferInput = { applicationId: string; positionTitle: string; departmentId: string; employmentType: string; startDate?: string; reportingLocation?: string; invoiceTitle?: string; taxNumber?: string; templateFields?: OfferTemplateFields; baseSalary: { amount: number; currency: string }; probationSalary?: { amount: number; currency: string }; bonus?: { amount: number; currency: string }; equity?: string; benefits?: string[]; materials?: string[]; content: string; expiresAt?: string }
+type OfferTemplateInput = { name: string; filename: string; content: string; isActive?: boolean; isDefault?: boolean }
+type OfferTemplatePatch = Partial<OfferTemplateInput>
 type ExtractedCandidateProfile = { candidate?: { fullName?: string; email?: string; phone?: string } }
 type ReviewAnalysisResultInput = {
   status: AnalysisResultRecord['humanReviewStatus']
@@ -60,7 +211,7 @@ export interface DashboardSummary {
   metrics: Array<{ label: string; value: number; detail: string }>
   funnel: Array<{ stage: string; count: number; conversionRate: number | null }>
   pendingApprovals: RecruitmentRequestRecord[]
-  pendingFeedback: Array<InterviewRecord & { feedbackStatus: InterviewFeedbackRecord['status'] | 'pending'; application: ApplicationRecord; candidateName: string; jobTitle: string }>
+  pendingInterviews: Array<InterviewRecord & { application: ApplicationRecord; candidateName: string; jobTitle: string }>
   failedTasks: AnalysisTaskRecord[]
 }
 
@@ -458,6 +609,10 @@ export function filterStateByDepartment(state: RecruitingStoreState, departmentI
     offers,
     offerVersions: state.offerVersions.filter((version) => offerIds.has(version.offerId)),
     onboarding,
+    onboardingTasks: state.onboardingTasks.filter((task) => onboardingIds.has(task.onboardingId)),
+    onboardingMaterials: state.onboardingMaterials.filter((material) => onboardingIds.has(material.onboardingId)),
+    onboardingReminders: state.onboardingReminders.filter((reminder) => onboardingIds.has(reminder.onboardingId)),
+    onboardingIntegrations: state.onboardingIntegrations.filter((integration) => onboardingIds.has(integration.onboardingId)),
     approvalInstances,
     approvalSteps: state.approvalSteps.filter((step) => instanceIds.has(step.instanceId)),
     approvalRecords: state.approvalRecords.filter((record) => instanceIds.has(record.instanceId)),
@@ -484,7 +639,7 @@ export class RecruitingService {
       this.store = store ?? createRecruitingStore()
       this.repository = undefined
     } else {
-      this.repository = createNormalizedRecruitingRepository()
+      this.repository = new NormalizedRecruitingRepository(createDatabasePool())
     }
   }
 
@@ -519,7 +674,7 @@ export class RecruitingService {
   private async repositoryStateView(departmentId?: string): Promise<RecruitingStoreState> {
     const repository = this.repository
     if (!repository) throw new Error('repositoryStateView 需要仓储实例')
-    const [requests, jobs, candidates, applications, resumes, tasks, results, interviews, feedback, offers, offerVersions, onboarding, specRows, jdRows, events] = await Promise.all([
+    const [requests, jobs, candidates, applications, resumes, tasks, results, interviews, feedback, offers, offerVersions, onboarding, onboardingTasks, onboardingMaterials, onboardingReminders, onboardingIntegrations, specRows, jdRows, events] = await Promise.all([
       repository.listRecruitmentRequests(),
       repository.listJobs(),
       repository.listCandidates(),
@@ -532,6 +687,10 @@ export class RecruitingService {
       repository.listOffers(),
       repository.listOfferVersions(),
       repository.listOnboarding(),
+      repository.listOnboardingTasks(),
+      repository.listOnboardingMaterials(),
+      repository.listOnboardingReminders(),
+      repository.listOnboardingIntegrations(),
       repository.listJobSpecVersions(),
       repository.listJobDescriptionVersions(),
       repository.listWorkflowEvents({ limit: 500 }),
@@ -554,7 +713,6 @@ export class RecruitingService {
     const participantUserIds = [...new Set(interviews.flatMap((item) => item.participants.map((participant) => participant.userId)).filter(Boolean))]
     const userNameMap = await repository.resolveUserDisplayNames(participantUserIds)
     const mappedInterviews = interviews.map((item) => this.mapRepositoryInterview(item)).map((interview) => ({ ...interview, participants: interview.participants.map((participant) => { if (participant.name) return participant; const displayName = userNameMap.get(participant.userId); return displayName ? { ...participant, name: displayName } : participant }) }))
-
     const state: RecruitingStoreState = {
       recruitmentRequests: requests.map((item) => this.mapRepositoryRequest(item)),
       jobs: mappedJobs,
@@ -566,8 +724,12 @@ export class RecruitingService {
       interviews: mappedInterviews,
       interviewFeedback: feedback.map((item) => this.mapRepositoryFeedback(item)),
       offers: offers.map((item) => this.mapRepositoryOffer(item)),
-      offerVersions: offerVersions.map((item) => ({ id: item.id, offerId: item.offerId, version: item.version, positionTitle: item.positionTitle, departmentId: item.departmentId, employmentType: item.employmentType, ...(item.startDate ? { startDate: item.startDate } : {}), compensation: item.compensation as unknown as OfferVersionRecord['compensation'], benefits: item.benefits, content: item.content, createdAt: item.createdAt })),
+      offerVersions: offerVersions.map((item) => ({ id: item.id, offerId: item.offerId, version: item.version, positionTitle: item.positionTitle, departmentId: item.departmentId, employmentType: item.employmentType, ...(item.startDate ? { startDate: item.startDate } : {}), ...(item.reportingLocation ? { reportingLocation: item.reportingLocation } : {}), ...(item.invoiceTitle ? { invoiceTitle: item.invoiceTitle } : {}), ...(item.taxNumber ? { taxNumber: item.taxNumber } : {}), templateFields: item.templateFields ?? {}, compensation: item.compensation as unknown as OfferVersionRecord['compensation'], benefits: item.benefits, materials: item.materials, content: item.content, createdAt: item.createdAt })),
       onboarding: onboarding.map((item) => this.mapRepositoryOnboarding(item)),
+      onboardingTasks: onboardingTasks.map((item) => this.mapRepositoryOnboardingTask(item)),
+      onboardingMaterials: onboardingMaterials.map((item) => this.mapRepositoryOnboardingMaterial(item)),
+      onboardingReminders: onboardingReminders.map((item) => this.mapRepositoryOnboardingReminder(item)),
+      onboardingIntegrations: onboardingIntegrations.map((item) => this.mapRepositoryOnboardingIntegration(item)),
       jobSpecVersions: specVersions,
       jobDescriptionVersions: jdVersions,
       approvalInstances: [],
@@ -610,8 +772,28 @@ export class RecruitingService {
     return { id: item.id, code: item.businessId, applicationId: item.applicationId, status: item.status as OfferRecord['status'], ...(item.currentVersionId ? { currentVersionId: item.currentVersionId } : {}), approval: { status: item.approvalStatus as OfferRecord['approval']['status'], approver: '' }, ...(item.sentAt ? { sentAt: item.sentAt } : {}), ...(item.respondedAt ? { respondedAt: item.respondedAt } : {}), ...(item.expiresAt ? { expiresAt: item.expiresAt } : {}), version: item.version, createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
+  private mapRepositoryOfferTemplate(item: RepositoryOfferTemplate): RepositoryOfferTemplate {
+    return { ...item }
+  }
+
   private mapRepositoryOnboarding(item: RepositoryOnboarding): OnboardingRecord {
-    return { id: item.id, applicationId: item.applicationId, offerId: item.offerId, ...(item.plannedStartDate ? { plannedStartDate: item.plannedStartDate } : {}), status: item.status as OnboardingRecord['status'], ...(item.notes ? { notes: item.notes } : {}), ...(item.archivedAt ? { archivedAt: item.archivedAt } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, applicationId: item.applicationId, offerId: item.offerId, ...(item.plannedStartDate ? { plannedStartDate: item.plannedStartDate } : {}), ...(item.plannedStartTime ? { plannedStartTime: item.plannedStartTime } : {}), ...(item.reportingMode ? { reportingMode: item.reportingMode } : {}), ...(item.reportingLocation ? { reportingLocation: item.reportingLocation } : {}), ...(item.reportingContactName ? { reportingContactName: item.reportingContactName } : {}), ...(item.reportingContactPhone ? { reportingContactPhone: item.reportingContactPhone } : {}), ...(item.hrOwnerName ? { hrOwnerName: item.hrOwnerName } : {}), ...(item.hiringManagerName ? { hiringManagerName: item.hiringManagerName } : {}), ...(item.workCity ? { workCity: item.workCity } : {}), ...(item.officeLocation ? { officeLocation: item.officeLocation } : {}), ...(item.riskNotes ? { riskNotes: item.riskNotes } : {}), ...(item.cancellationReasonCode ? { cancellationReasonCode: item.cancellationReasonCode as NonNullable<OnboardingRecord['cancellationReasonCode']> } : {}), ...(item.cancellationNotes ? { cancellationNotes: item.cancellationNotes } : {}), ...(item.cancelledAt ? { cancelledAt: item.cancelledAt } : {}), ...(item.noShowReasonCode ? { noShowReasonCode: item.noShowReasonCode as NonNullable<OnboardingRecord['noShowReasonCode']> } : {}), ...(item.noShowNotes ? { noShowNotes: item.noShowNotes } : {}), ...(item.noShowAt ? { noShowAt: item.noShowAt } : {}), ...(item.actualArrivalAt ? { actualArrivalAt: item.actualArrivalAt } : {}), status: item.status as OnboardingRecord['status'], ...(item.notes ? { notes: item.notes } : {}), ...(item.archivedAt ? { archivedAt: item.archivedAt } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  private mapRepositoryOnboardingTask(item: RepositoryOnboardingTask): OnboardingTaskRecord {
+    return { id: item.id, onboardingId: item.onboardingId, title: item.title, category: item.category, status: item.status, isRequired: item.isRequired, ...(item.ownerRole ? { ownerRole: item.ownerRole } : {}), ...(item.templateKey ? { templateKey: item.templateKey } : {}), ...(item.ownerName ? { ownerName: item.ownerName } : {}), ...(item.dueDate ? { dueDate: item.dueDate } : {}), ...(item.notes ? { notes: item.notes } : {}), ...(item.blockedReason ? { blockedReason: item.blockedReason } : {}), ...(item.completedAt ? { completedAt: item.completedAt } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  private mapRepositoryOnboardingMaterial(item: RepositoryOnboardingMaterial): import('./types.js').OnboardingMaterialRecord {
+    return { id: item.id, onboardingId: item.onboardingId, code: item.code, label: item.label, status: item.status, isRequired: item.isRequired, ...(item.collectedAt ? { collectedAt: item.collectedAt } : {}), ...(item.verifiedAt ? { verifiedAt: item.verifiedAt } : {}), ...(item.verifiedByUserId ? { verifiedByUserId: item.verifiedByUserId } : {}), ...(item.waivedAt ? { waivedAt: item.waivedAt } : {}), ...(item.notes ? { notes: item.notes } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  private mapRepositoryOnboardingReminder(item: RepositoryOnboardingReminder): import('./types.js').OnboardingReminderRecord {
+    return { id: item.id, onboardingId: item.onboardingId, milestone: item.milestone, audience: item.audience, channel: item.channel, status: item.status, scheduledAt: item.scheduledAt, ...(item.sentAt ? { sentAt: item.sentAt } : {}), ...(item.failedAt ? { failedAt: item.failedAt } : {}), ...(item.failureReason ? { failureReason: item.failureReason } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+  }
+
+  private mapRepositoryOnboardingIntegration(item: RepositoryOnboardingIntegration): import('./types.js').OnboardingIntegrationRecord {
+    return { id: item.id, onboardingId: item.onboardingId, provider: item.provider, status: item.status, ...(item.externalReference ? { externalReference: item.externalReference } : {}), ...(item.lastAttemptAt ? { lastAttemptAt: item.lastAttemptAt } : {}), ...(item.lastSuccessAt ? { lastSuccessAt: item.lastSuccessAt } : {}), ...(item.lastError ? { lastError: item.lastError } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   private mapRepositoryRequest(item: import('./repositories/types.js').RecruitmentRequestRecord): RecruitmentRequestRecord {
@@ -722,6 +904,7 @@ export class RecruitingService {
   }
 
   async requestAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<RecruitmentRequestRecord> {
+    if (action === 'approve' || action === 'reject') throw new RecruitingWorkflowError('RECRUITMENT_APPROVAL_DISABLED', '招聘需求已取消审批，请直接提交需求')
     if (this.repository && ['submit', 'resubmit', 'approve', 'reject', 'withdraw', 'close', 'cancel', 'convert'].includes(action)) {
       const row = await this.repository.requestApprovalAction(id, action as 'submit' | 'resubmit' | 'approve' | 'reject' | 'withdraw' | 'close' | 'cancel' | 'convert', actorId, reason === undefined ? undefined : clean(reason))
       return this.mapRepositoryRequest(row)
@@ -729,29 +912,7 @@ export class RecruitingService {
     return this.store.transaction((state) => {
       const request = requestOrThrow(state, id)
       const fromStatus = request.status
-      const normalizedReason = reason === undefined ? '' : clean(reason)
-
-      if (action === 'submit' || action === 'resubmit') {
-        transitionRequest(request, action, reason)
-        createApprovalInstance(state, id, actorId)
-      } else if (action === 'approve' || action === 'reject') {
-        const instance = state.approvalInstances
-          .filter((item) => item.entityType === 'recruitment_request' && item.entityId === id)
-          .sort((a, b) => b.version - a.version)[0]
-        if (!instance || instance.status !== 'pending') throw new RecruitingWorkflowError('APPROVAL_INSTANCE_REQUIRED', '当前需求无可审批实例')
-        const step = currentPendingStep(state, instance.id)
-        if (!step) throw new RecruitingWorkflowError('APPROVAL_STEP_REQUIRED', '当前审批实例已结束')
-        const approvalResult = recordApproval(state, instance, step, action, actorId, normalizedReason || undefined)
-        const allSteps = state.approvalSteps.filter((item) => item.instanceId === instance.id)
-        const completed = allSteps.every((item) => item.status !== 'pending')
-        if (action === 'reject') instance.status = 'rejected'
-        else if (completed) instance.status = 'approved'
-        transitionRequest(request, action, reason)
-        request.approval = approvalResult
-        request.approval.approver = actorId === 'user-demo' ? '当前审批人' : actorId
-      } else {
-        transitionRequest(request, action, reason)
-      }
+      transitionRequest(request, action, reason)
 
       addEvent(state, { subjectType: 'recruitment_request', subjectId: request.id, action, fromStatus, toStatus: request.status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
       return request
@@ -1209,19 +1370,29 @@ export class RecruitingService {
     const results = this.repository ? await this.repository.listInterviewResults(interviews.map(i => i.id)) : null
     return interviews.map(interview => {
       const feedback = state.interviewFeedback.filter(x => x.interviewId === interview.id)
-      const event = [...state.workflowEvents].reverse().find(e => e.subjectType === 'interview' && e.subjectId === interview.id && e.action === 'conclude')
+      const event = [...state.workflowEvents].reverse().find(e => e.subjectType === 'interview' && e.subjectId === interview.id && ['conclude', 'correct_conclusion'].includes(e.action))
       const result = results?.get(interview.id) ?? { outcome: interviewOutcome(event?.metadata?.outcome), aiScore: null, aiScoreStatus: 'none' }
       return { ...interview, ...result, application: applicationOrThrow(state, interview.applicationId), feedbackStatus: feedback.length && feedback.every(x => x.status === 'locked') ? 'locked' as const : feedback.length ? feedback[0]!.status : 'pending' as const }
     })
   }
 
-  async getInterview(id: string): Promise<InterviewRecord & { feedbackStatus: InterviewFeedbackRecord['status'] | 'pending'; application: ApplicationRecord; feedback: InterviewFeedbackRecord[] }> {
+  async getInterview(id: string): Promise<InterviewRecord & InterviewResult & { feedbackStatus: InterviewFeedbackRecord['status'] | 'pending'; application: ApplicationRecord; feedback: InterviewFeedbackRecord[] }> {
     const state = await this.stateView()
     const interview = state.interviews.find((x) => x.id === id)
     if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`)
     const feedback = state.interviewFeedback.filter((x) => x.interviewId === id).map((item) => ({ ...item }))
     const feedbackStatus = feedback.length && feedback.every((x) => x.status === 'locked') ? 'locked' : feedback.length ? feedback[0]!.status : 'pending'
-    return { ...interview, application: applicationOrThrow(state, interview.applicationId), feedbackStatus, feedback }
+    const event = [...state.workflowEvents].reverse().find((item) => item.subjectType === 'interview' && item.subjectId === id && ['conclude', 'correct_conclusion'].includes(item.action))
+    const result = this.repository
+      ? (await this.repository.listInterviewResults([id])).get(id)
+      : undefined
+    return {
+      ...interview,
+      ...(result ?? { outcome: interviewOutcome(event?.metadata?.outcome), aiScore: null, aiScoreStatus: 'none' }),
+      application: applicationOrThrow(state, interview.applicationId),
+      feedbackStatus,
+      feedback,
+    }
   }
 
   async getInterviewQuestionContext(id: string): Promise<{
@@ -1324,13 +1495,15 @@ export class RecruitingService {
       const participants = (input.participants ?? []).map((item) => ({ userId: required(item.userId, '面试官'), ...(item.name ? { name: clean(item.name) } : {}), role: item.role ?? 'interviewer', required: item.required ?? true }))
       const existing = await this.repository.listInterviews(applicationRow.id)
       const round = input.round ?? existing.length + 1
+      if (!Number.isInteger(round) || round < 1 || round > 2) throw new RecruitingWorkflowError('INTERVIEW_ROUND_LIMIT', '系统仅支持初试和复试两轮面试', 400)
+      if (existing.some((item) => item.round === round)) throw new RecruitingWorkflowError('INTERVIEW_ROUND_EXISTS', `${round === 1 ? '初试' : '复试'}已经存在，不能重复创建`, 409)
       if (round !== 1 && !participants.some((item) => item.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官')
       const created = await this.repository.createInterview({ createdBy: actorId, applicationId: applicationRow.id, round, type: input.type ?? 'other', title: required(input.title, '面试标题'), scheduledStartAt: input.scheduledStartAt ?? null, scheduledEndAt: input.scheduledEndAt ?? null, timezone: input.timezone ? clean(input.timezone) : null, location: input.location ? clean(input.location) : null, meetingUrl: input.meetingUrl ? clean(input.meetingUrl) : null, participants })
       await this.repository.appendWorkflowEvent({ subjectType: 'interview', subjectId: created.id, action: 'create', actorId })
       if (['pending_analysis', 'analysis_queued', 'human_review'].includes(applicationRow.status)) await this.repository.updateApplicationStatus(applicationRow.id, 'interviewing')
       return this.mapRepositoryInterview(created)
     }
-    return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const round = input.round ?? state.interviews.filter((x) => x.applicationId === application.id).length + 1; const participants = (input.participants ?? []).map((p) => ({ userId: required(p.userId, '面试官'), ...(p.name ? { name: clean(p.name) } : {}), role: p.role ?? 'interviewer', required: p.required ?? true })); if (round !== 1 && !participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'pending_analysis' || application.status === 'analysis_queued' || application.status === 'human_review') application.status = 'interviewing'; application.updatedAt = timestamp; return interview }) }
+    return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const existing = state.interviews.filter((x) => x.applicationId === application.id); const round = input.round ?? existing.length + 1; if (!Number.isInteger(round) || round < 1 || round > 2) throw new RecruitingWorkflowError('INTERVIEW_ROUND_LIMIT', '系统仅支持初试和复试两轮面试', 400); if (existing.some((item) => item.round === round)) throw new RecruitingWorkflowError('INTERVIEW_ROUND_EXISTS', `${round === 1 ? '初试' : '复试'}已经存在，不能重复创建`, 409); const participants = (input.participants ?? []).map((p) => ({ userId: required(p.userId, '面试官'), ...(p.name ? { name: clean(p.name) } : {}), role: p.role ?? 'interviewer', required: p.required ?? true })); if (round !== 1 && !participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'pending_analysis' || application.status === 'analysis_queued' || application.status === 'human_review') application.status = 'interviewing'; application.updatedAt = timestamp; return interview }) }
 
   async submitFeedback(id: string, input: FeedbackInput, actorId = 'user-demo'): Promise<InterviewFeedbackRecord> {
     if (this.repository) {
@@ -1378,26 +1551,29 @@ export class RecruitingService {
     })
   }
 
-  async completeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo'): Promise<InterviewRecord> {
+  async completeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled', actorId = 'user-demo'): Promise<InterviewRecord> {
     return this.concludeInterview(id, outcome, actorId, true)
   }
 
-  async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject', actorId = 'user-demo', directCompletion = false): Promise<InterviewRecord> {
+  async concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled', actorId = 'user-demo', directCompletion = false): Promise<InterviewRecord> {
     if (this.repository) {
       return this.mapRepositoryInterview(await this.repository.concludeInterview(id, outcome, actorId, directCompletion))
     }
-    if (!['continue', 'offer', 'reject'].includes(outcome)) throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', '无效的面试结论')
+    if (!['continue', 'offer', 'reject', 'cancelled'].includes(outcome)) throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', '无效的面试结论')
     return this.store.transaction((state) => {
       const interview = state.interviews.find((item) => item.id === id || item.code === id)
       if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`)
-      if (directCompletion) validateDirectInterviewOutcome(interview, outcome)
+      validateInterviewOutcome(interview, outcome)
       const application = applicationOrThrow(state, interview.applicationId)
-      if (interview.status === 'cancelled') throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认结论', 409)
       const previous = [...state.workflowEvents].reverse().find((event) => event.subjectId === interview.id && event.action === 'conclude')
+      if (interview.status === 'cancelled') {
+        if (previous?.metadata?.outcome === 'cancelled' && outcome === 'cancelled') return interview
+        throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认其他结论', 409)
+      }
       if (previous && previous.metadata?.outcome !== outcome) throw new RecruitingWorkflowError('INTERVIEW_ALREADY_CONCLUDED', '该面试已确认其他结论，请在当前面试阶段继续处理', 409)
       const completingFinalOffer = application.status === 'offer_approval' && outcome === 'offer' && (interview.stage === 'final' || interview.round >= 2)
       if (!previous && !['interviewing', 'human_review'].includes(application.status) && !completingFinalOffer) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请状态不能确认面试结论', 409)
-      if (!previous && !directCompletion) {
+      if (!previous && !directCompletion && outcome !== 'cancelled') {
         const feedback = state.interviewFeedback.filter((item) => item.interviewId === interview.id)
         const missingRequired = interview.participants.some((person) => person.required && (person.role ?? 'interviewer') === 'interviewer'
           && !feedback.some((item) => item.interviewerId === person.userId && item.status === 'locked'))
@@ -1415,12 +1591,60 @@ export class RecruitingService {
       }
       if (previous) return interview
       const fromStatus = interview.status
-      interview.status = 'completed'
+      interview.status = outcome === 'cancelled' ? 'cancelled' : 'completed'
       interview.updatedAt = now
       application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
       if (outcome === 'reject') application.rejectionReason = '面试未通过'
       application.updatedAt = now
-      addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus, toStatus: 'completed', actorId, metadata: { outcome, ...(directCompletion ? { completionMode: 'direct' } : {}) } })
+      addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus, toStatus: interview.status, actorId, metadata: { outcome, ...(directCompletion ? { completionMode: 'direct' } : {}) } })
+      return interview
+    })
+  }
+
+  async correctInterviewConclusion(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled', reason: string, actorId = 'user-demo'): Promise<InterviewRecord> {
+    const normalizedReason = clean(reason)
+    if (!normalizedReason || normalizedReason.length > 1000) throw new RecruitingWorkflowError('INTERVIEW_CORRECTION_REASON_REQUIRED', '请填写不超过 1000 个字符的更正原因', 400)
+    if (this.repository) return this.mapRepositoryInterview(await this.repository.correctInterviewConclusion(id, outcome, normalizedReason, actorId))
+    if (!['continue', 'offer', 'reject', 'cancelled'].includes(outcome)) throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', '无效的面试结论', 400)
+    return this.store.transaction((state) => {
+      const interview = state.interviews.find((item) => item.id === id || item.code === id)
+      if (!interview) throw new RecruitingNotFoundError(`未找到面试：${id}`)
+      validateInterviewOutcome(interview, outcome)
+      const application = applicationOrThrow(state, interview.applicationId)
+      const previous = [...state.workflowEvents].reverse().find((event) => event.subjectType === 'interview' && event.subjectId === interview.id && ['conclude', 'correct_conclusion'].includes(event.action))
+      const previousOutcome = previous?.metadata?.outcome
+      if (!previousOutcome || !['continue', 'offer', 'reject', 'cancelled'].includes(String(previousOutcome))) throw new RecruitingWorkflowError('INTERVIEW_NOT_CONCLUDED', '该面试尚无可更正的结论', 409)
+      if (previousOutcome === outcome) throw new RecruitingWorkflowError('INTERVIEW_CONCLUSION_UNCHANGED', '新结论与当前结论相同', 400)
+      const stage = interview.stage === 'final' || interview.round >= 2 ? 'final' : 'initial'
+      const downstream = state.interviews.some(item => item.applicationId === application.id && item.round > interview.round
+        && (item.status === 'completed' || state.interviewFeedback.some(feedback => feedback.interviewId === item.id)))
+      if (downstream || state.offers.some(item => item.applicationId === application.id) || state.onboarding.some(item => item.applicationId === application.id)) {
+        throw new RecruitingWorkflowError('INTERVIEW_CONCLUSION_HAS_DOWNSTREAM', '后续面试、Offer 或入职流程已建立，不能直接更正；请先处理后续流程记录', 409)
+      }
+      const autoCreatedFinalInterviewIds = new Set(state.workflowEvents
+        .filter(event => event.subjectType === 'application' && event.subjectId === application.id && event.action === 'advance_to_final_interview')
+        .map(event => event.metadata?.interviewId)
+        .filter((interviewId): interviewId is string => typeof interviewId === 'string'))
+      if (stage === 'initial' && previousOutcome === 'continue' && outcome !== 'continue') {
+        for (const next of state.interviews.filter(item => autoCreatedFinalInterviewIds.has(item.id) && item.applicationId === application.id && item.round > interview.round && item.status === 'scheduled')) next.status = 'cancelled'
+      }
+      if (stage === 'initial' && previousOutcome !== 'continue' && outcome === 'continue') {
+        const next = state.interviews.find(item => autoCreatedFinalInterviewIds.has(item.id) && item.applicationId === application.id && item.round > interview.round && item.status === 'cancelled')
+        if (next) next.status = 'scheduled'
+        else {
+          const now = LocalRecruitingStore.timestamp()
+          state.interviews.push({ id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round: 2, stage: 'final', type: interview.type, title: '第二轮复试', status: 'scheduled', participants: interview.participants.map(person => ({ ...person })), createdAt: now, updatedAt: now })
+        }
+      }
+      const now = LocalRecruitingStore.timestamp()
+      const fromStatus = interview.status
+      interview.status = outcome === 'cancelled' ? 'cancelled' : 'completed'
+      interview.updatedAt = now
+      application.status = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
+      if (outcome === 'reject') application.rejectionReason = '面试未通过'
+      else delete application.rejectionReason
+      application.updatedAt = now
+      addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'correct_conclusion', actorId, fromStatus: String(previousOutcome), toStatus: interview.status, reason: normalizedReason, metadata: { previousOutcome, outcome } })
       return interview
     })
   }
@@ -1434,7 +1658,8 @@ export class RecruitingService {
       activity = dashboardActivity({ ...state, workflowEvents: events as RecruitingStoreState['workflowEvents'] }, period)
     }
     const reviews = loadReviews ? await loadReviews(state.interviews.filter(row => row.status !== 'cancelled').map(row => row.id)) : []
-    const todos = buildDashboardTodos(state, reviews).filter(todo => !period || withinPeriod(todo.updatedAt, period))
+    // Todos represent outstanding work, not activity during the selected reporting period.
+    const todos = buildDashboardTodos(state, reviews)
     const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
     const counts = activity ? [activity.counts.applications, activity.counts.screened, activity.counts.interviews, activity.counts.offers, activity.counts.onboarded] : [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
@@ -1446,27 +1671,24 @@ export class RecruitingService {
       { label: '发出 Offer', value: counts[3]!, detail: activity ? '所选时段实际发出 Offer 的人数' : (funnel[3]!.conversionRate ?? 0) + '% 转化率' },
     ]
     const pendingApprovals = state.recruitmentRequests
-      .filter((request) => request.status === 'pending_approval' && (!period || withinPeriod(request.updatedAt, period)))
+      .filter((request) => request.status === 'pending_approval')
       .slice()
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    const pendingFeedback = state.interviews
-      .filter((interview) => interview.status === 'scheduled' || interview.status === 'completed')
+    const pendingInterviews = state.interviews
+      .filter((interview) => interview.status === 'scheduled' && !!interview.scheduledStartAt)
       .map((interview) => {
-        const feedback = state.interviewFeedback.filter((item) => item.interviewId === interview.id)
-        const missingRequired = interview.participants.some(person => person.required && person.role === 'interviewer' && !feedback.some(item => item.interviewerId === person.userId && item.status === 'locked'))
-        const feedbackStatus: InterviewFeedbackRecord['status'] | 'pending' = feedback.find(item => item.status !== 'locked')?.status ?? (feedback.length && !missingRequired ? 'locked' : 'pending')
         const application = state.applications.find((item) => item.id === interview.applicationId)
         const candidate = application ? state.candidates.find((item) => item.id === application.candidateId) : undefined
         const job = application ? state.jobs.find((item) => item.id === application.jobId) : undefined
-        return { ...interview, application: application!, feedbackStatus, candidateName: candidate?.fullName || '未知候选人', jobTitle: job?.title || '未知岗位' }
+        return { ...interview, application: application!, candidateName: candidate?.fullName || '未知候选人', jobTitle: job?.title || '未知岗位' }
       })
-      .filter((interview) => interview.feedbackStatus !== 'locked' && todos.some(todo => todo.id === `feedback-${interview.id}`))
+      .filter((interview) => todos.some(todo => todo.id === `complete-${interview.id}`))
       .sort((a, b) => (a.scheduledStartAt ?? a.updatedAt).localeCompare(b.scheduledStartAt ?? b.updatedAt))
     const failedTasks = state.analysisTasks
       .filter((task) => task.status === 'failed' && todos.some(todo => todo.id === `analysis-${task.id}`))
       .slice()
       .sort((a, b) => b.availableAt.localeCompare(a.availableAt))
-    return { generatedAt: LocalRecruitingStore.timestamp(), ...(activity ? { activity } : {}), todos, metrics, funnel, pendingApprovals, pendingFeedback, failedTasks }
+    return { generatedAt: LocalRecruitingStore.timestamp(), ...(activity ? { activity } : {}), todos, metrics, funnel, pendingApprovals, pendingInterviews, failedTasks }
   }
 
   async getReports(departmentId?: string): Promise<RecruitingReport> {
@@ -1944,99 +2166,639 @@ export class RecruitingService {
     })
   }
   async listOffers(status?: string, departmentId?: string): Promise<OfferRecord[]> { const state = await this.stateView(departmentId); return state.offers.filter(x=>!status||x.status===status) }
+  async listOfferTemplates(): Promise<RepositoryOfferTemplate[]> {
+    if (!this.repository) return []
+    return (await this.repository.listOfferTemplates()).map((item) => this.mapRepositoryOfferTemplate(item))
+  }
+  async createOfferTemplate(input: OfferTemplateInput, actorId = 'user-demo'): Promise<RepositoryOfferTemplate> {
+    if (!this.repository) throw new RecruitingWorkflowError('OFFER_TEMPLATE_STORAGE_UNAVAILABLE', 'Offer 模板需要 PostgreSQL 数据库支持', 503)
+    const name = required(input.name, '模板名称')
+    const filename = required(input.filename, '模板文件名')
+    const content = typeof input.content === 'string' ? input.content : ''
+    if (name.length > 200) throw new RecruitingWorkflowError('VALIDATION_ERROR', '模板名称不能超过 200 个字符', 400)
+    if (!/\.(?:md|html?|txt)$/iu.test(filename)) throw new RecruitingWorkflowError('VALIDATION_ERROR', 'Offer 模板文件必须为 .md、.html、.htm 或 .txt 格式', 400)
+    if (content.length > 50_000) throw new RecruitingWorkflowError('VALIDATION_ERROR', 'Offer 模板内容不能超过 50000 个字符', 400)
+    if (input.isDefault === true && input.isActive === false) throw new RecruitingWorkflowError('VALIDATION_ERROR', '默认 Offer 模板必须保持启用', 400)
+    return this.mapRepositoryOfferTemplate(await this.repository.createOfferTemplate({ name, filename, content, isActive: input.isActive !== false, isDefault: input.isDefault === true, createdById: actorId }))
+  }
+  async updateOfferTemplate(id: string, input: OfferTemplatePatch): Promise<RepositoryOfferTemplate> {
+    if (!this.repository) throw new RecruitingWorkflowError('OFFER_TEMPLATE_STORAGE_UNAVAILABLE', 'Offer 模板需要 PostgreSQL 数据库支持', 503)
+    const patch: OfferTemplatePatch = {}
+    if (input.name !== undefined) {
+      const name = required(input.name, '模板名称')
+      if (name.length > 200) throw new RecruitingWorkflowError('VALIDATION_ERROR', '模板名称不能超过 200 个字符', 400)
+      patch.name = name
+    }
+    if (input.filename !== undefined) {
+      const filename = required(input.filename, '模板文件名')
+      if (!/\.(?:md|html?|txt)$/iu.test(filename)) throw new RecruitingWorkflowError('VALIDATION_ERROR', 'Offer 模板文件必须为 .md、.html、.htm 或 .txt 格式', 400)
+      patch.filename = filename
+    }
+    if (input.content !== undefined) {
+      if (typeof input.content !== 'string') throw new RecruitingWorkflowError('VALIDATION_ERROR', '模板内容必须为文本', 400)
+      if (input.content.length > 50_000) throw new RecruitingWorkflowError('VALIDATION_ERROR', 'Offer 模板内容不能超过 50000 个字符', 400)
+      patch.content = input.content
+    }
+    if (input.isActive !== undefined) patch.isActive = input.isActive === true
+    if (input.isDefault !== undefined) patch.isDefault = input.isDefault === true
+    if (patch.isActive === false && patch.isDefault === true) throw new RecruitingWorkflowError('VALIDATION_ERROR', '默认 Offer 模板必须保持启用', 400)
+    return this.mapRepositoryOfferTemplate(await this.repository.updateOfferTemplate(required(id, 'Offer 模板'), patch))
+  }
+  async deleteOfferTemplate(id: string): Promise<void> {
+    if (!this.repository) throw new RecruitingWorkflowError('OFFER_TEMPLATE_STORAGE_UNAVAILABLE', 'Offer 模板需要 PostgreSQL 数据库支持', 503)
+    await this.repository.deleteOfferTemplate(required(id, 'Offer 模板'))
+  }
   async getOffer(id:string): Promise<OfferRecord & { versions: OfferVersionRecord[]; onboarding?: OnboardingRecord }> { const state=await this.stateView(); const offer=state.offers.find(x=>x.id===id) ?? state.offers.find(x=>x.code===id); if(!offer) throw new RecruitingNotFoundError(`未找到 Offer：${id}`); const onboarding=state.onboarding.find(x=>x.offerId===offer.id); return {...offer,versions:state.offerVersions.filter(x=>x.offerId===offer.id),...(onboarding?{onboarding}: {})} }
+  async getOfferEmailContext(id: string): Promise<{ offerCode: string; candidateName: string; candidateEmail: string; positionTitle: string; department: string; startDate?: string; reportingLocation?: string; invoiceTitle?: string; taxNumber?: string; templateFields?: OfferTemplateFields; employmentType: string; baseSalary: number; probationSalary?: number; bonus?: number; benefits: string[]; materials: string[] }> {
+    const state = await this.stateView()
+    const offer = state.offers.find((item) => item.id === id) ?? state.offers.find((item) => item.code === id)
+    if (!offer) throw new RecruitingNotFoundError(`未找到 Offer：${id}`)
+    const application = state.applications.find((item) => item.id === offer.applicationId)
+    if (!application) throw new RecruitingNotFoundError(`未找到 Offer 对应的申请：${offer.applicationId}`)
+    const candidate = state.candidates.find((item) => item.id === application.candidateId)
+    if (!candidate) throw new RecruitingNotFoundError(`未找到 Offer 对应的候选人：${application.candidateId}`)
+    const job = state.jobs.find((item) => item.id === application.jobId)
+    const version = state.offerVersions.find((item) => item.id === offer.currentVersionId) ?? state.offerVersions.filter((item) => item.offerId === offer.id).sort((a, b) => b.version - a.version)[0]
+    if (!version) throw new RecruitingWorkflowError('OFFER_VERSION_REQUIRED', 'Offer 缺少当前版本', 409)
+    return {
+      offerCode: offer.code,
+      candidateName: candidate.fullName,
+      candidateEmail: candidate.email ?? '',
+      positionTitle: version.positionTitle,
+      department: job?.department ?? version.departmentId,
+      ...(version.startDate ? { startDate: version.startDate } : {}),
+      ...(version.reportingLocation ? { reportingLocation: version.reportingLocation } : {}),
+      ...(version.invoiceTitle ? { invoiceTitle: version.invoiceTitle } : {}),
+      ...(version.taxNumber ? { taxNumber: version.taxNumber } : {}),
+      employmentType: version.employmentType,
+      templateFields: version.templateFields ?? {},
+      baseSalary: version.compensation.baseSalary.amount,
+      ...(version.compensation.probationSalary ? { probationSalary: version.compensation.probationSalary.amount } : {}),
+      ...(version.compensation.bonus ? { bonus: version.compensation.bonus.amount } : {}),
+      benefits: version.benefits,
+      materials: version.materials,
+    }
+  }
   async listOnboarding(departmentId?: string): Promise<OnboardingRecord[]> { const state = await this.stateView(departmentId); return state.onboarding }
-  async getOnboarding(id: string): Promise<OnboardingRecord> { const state = await this.stateView(); const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); return item }
-  async updateOnboarding(id: string, input: { plannedStartDate?: string; notes?: string }, actorId = 'user-demo'): Promise<OnboardingRecord> {
+  async getOnboarding(id: string): Promise<OnboardingRecord> {
+    if (this.repository) return this.mapRepositoryOnboarding(await this.repository.getOnboarding(id))
+    const state = await this.store.read()
+    const item = state.onboarding.find((record) => record.id === id)
+    if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`)
+    return item
+  }
+  async listOnboardingWorkbench(departmentId?: string): Promise<OnboardingWorkbenchItem[]> {
+    const state = await this.stateView(departmentId)
+    const applicationMap = new Map(state.applications.map((item) => [item.id, item]))
+    const candidateMap = new Map(state.candidates.map((item) => [item.id, item]))
+    const jobMap = new Map(state.jobs.map((item) => [item.id, item]))
+    const offerMap = new Map(state.offers.map((item) => [item.id, item]))
+    return state.onboarding.map((onboarding) => {
+      const application = applicationMap.get(onboarding.applicationId)
+      const candidate = application ? candidateMap.get(application.candidateId) : undefined
+      const job = application ? jobMap.get(application.jobId) : undefined
+      const offer = offerMap.get(onboarding.offerId)
+      return buildOnboardingWorkbenchItem({
+        onboarding,
+        tasks: state.onboardingTasks.filter((item) => item.onboardingId === onboarding.id),
+        materials: state.onboardingMaterials.filter((item) => item.onboardingId === onboarding.id),
+        reminders: state.onboardingReminders.filter((item) => item.onboardingId === onboarding.id),
+        integrations: state.onboardingIntegrations.filter((item) => item.onboardingId === onboarding.id),
+        candidateName: candidate?.fullName ?? '未知候选人',
+        jobTitle: job?.title ?? '未知岗位',
+        offerCode: offer?.code ?? onboarding.offerId,
+        department: job?.department ?? job?.departmentId ?? '',
+      })
+    }).sort((left, right) => (left.onboarding.plannedStartDate ?? '9999-12-31').localeCompare(right.onboarding.plannedStartDate ?? '9999-12-31') || right.onboarding.updatedAt.localeCompare(left.onboarding.updatedAt))
+  }
+  async listOnboardingReport(departmentId?: string): Promise<OnboardingReport> {
+    return buildOnboardingReport(await this.listOnboardingWorkbench(departmentId))
+  }
+  async updateOnboarding(id: string, input: UpdateOnboardingInput, actorId = 'user-demo'): Promise<OnboardingRecord> {
+    validateOnboardingScheduleInput(input)
     if (this.repository) {
       const current = await this.repository.getOnboarding(id)
-      if (current.status === 'cancelled' || current.status === 'completed') throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '已取消或已归档记录不能编辑')
-      const patched = await this.repository.updateOnboarding(current.id, { ...(input.plannedStartDate !== undefined ? { plannedStartDate: clean(input.plannedStartDate) } : {}), ...(input.notes !== undefined ? { notes: clean(input.notes) } : {}) })
+      if (!isOnboardingEditable(current.status as OnboardingRecord['status'])) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能编辑', 409)
+      const patched = await this.repository.updateOnboarding(current.id, Object.fromEntries(Object.entries(input).map(([key, value]) => [key, typeof value === 'string' ? clean(value) : value])))
       await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: current.id, action: 'update', actorId })
       return this.mapRepositoryOnboarding(patched)
     }
-    return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); if (item.status === 'cancelled' || item.status === 'completed') throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '已取消或已归档记录不能编辑'); if (input.plannedStartDate !== undefined) item.plannedStartDate = clean(input.plannedStartDate); if (input.notes !== undefined) item.notes = clean(input.notes); item.updatedAt = LocalRecruitingStore.timestamp(); addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action: 'update', actorId }); return item }) }
-  async onboardingAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<OnboardingRecord> {
-    if (this.repository) {
-      const current = await this.repository.getOnboarding(id)
-      const from = current.status
-      const allowed: Record<string, string[]> = { schedule: ['pending', 'cancelled'], complete: ['pending', 'scheduled'], cancel: ['pending', 'scheduled'] }
-      if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`)
-      if (action === 'cancel') required(reason, '取消原因')
-      const next: Record<string, OnboardingRecord['status']> = { schedule: 'scheduled', complete: 'completed', cancel: 'cancelled' }
+    return this.store.transaction((state) => {
+      const item = state.onboarding.find((record) => record.id === id)
+      if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`)
+      if (!isOnboardingEditable(item.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能编辑', 409)
+      const mutableItem = item as unknown as Record<string, unknown>
+      for (const [key, value] of Object.entries(input)) {
+        if (value === null) delete mutableItem[key]
+        else mutableItem[key] = typeof value === 'string' ? clean(value) : value
+      }
+      item.updatedAt = LocalRecruitingStore.timestamp()
+      addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action: 'update', actorId })
+      return item
+    })
+  }
+  async listOnboardingTasks(onboardingId: string): Promise<OnboardingTaskRecord[]> {
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (this.repository) return (await this.repository.listOnboardingTasks(onboardingId)).map((item) => this.mapRepositoryOnboardingTask(item))
+    return this.store.transaction((state) => {
+      const existing = state.onboardingTasks.filter((item) => item.onboardingId === onboardingId)
+      const knownDefaults = new Set(existing.map((item) => item.templateKey ?? `${item.category}\u0000${item.title}`))
       const timestamp = LocalRecruitingStore.timestamp()
-      const patched = await this.repository.updateOnboarding(current.id, { status: next[action]!, ...(action === 'complete' ? { archivedAt: timestamp } : {}) })
+      for (const task of defaultOnboardingTasks()) {
+        if (knownDefaults.has(task.templateKey ?? `${task.category}\u0000${task.title}`)) continue
+        state.onboardingTasks.push({ id: randomUUID(), onboardingId, status: 'pending', createdAt: timestamp, updatedAt: timestamp, ...task })
+      }
+      return state.onboardingTasks.filter((item) => item.onboardingId === onboardingId)
+    })
+  }
+  async createOnboardingTask(onboardingId: string, input: CreateOnboardingTaskInput, actorId = 'user-demo'): Promise<OnboardingTaskRecord> {
+    const title = required(input.title, '任务标题')
+    validateOnboardingTaskInput(input)
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能新增任务', 409)
+    const base = {
+      onboardingId,
+      title,
+      category: input.category,
+      isRequired: input.isRequired !== false,
+      ...(input.ownerRole !== undefined ? { ownerRole: input.ownerRole } : {}),
+      ...(input.templateKey !== undefined ? { templateKey: optionalClean(input.templateKey) ?? null } : {}),
+      ...(input.ownerName !== undefined ? { ownerName: optionalClean(input.ownerName) ?? null } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: optionalClean(input.dueDate) ?? null } : {}),
+      ...(input.notes !== undefined ? { notes: optionalClean(input.notes) ?? null } : {}),
+    }
+    if (this.repository) {
+      const item = await this.repository.createOnboardingTask(base)
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action: 'task_create', actorId })
+      return this.mapRepositoryOnboardingTask(item)
+    }
+    return this.store.transaction((state) => {
+      const now = LocalRecruitingStore.timestamp()
+      const item: OnboardingTaskRecord = {
+        id: randomUUID(), onboardingId, title, category: input.category, status: 'pending', isRequired: input.isRequired !== false,
+        ...(input.ownerRole != null ? { ownerRole: input.ownerRole } : {}),
+        ...(optionalClean(input.templateKey) ? { templateKey: optionalClean(input.templateKey)! } : {}),
+        ...(optionalClean(input.ownerName) ? { ownerName: optionalClean(input.ownerName)! } : {}),
+        ...(optionalClean(input.dueDate) ? { dueDate: optionalClean(input.dueDate)! } : {}),
+        ...(optionalClean(input.notes) ? { notes: optionalClean(input.notes)! } : {}),
+        createdAt: now, updatedAt: now,
+      }
+      state.onboardingTasks.push(item)
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action: 'task_create', actorId })
+      return item
+    })
+  }
+  async updateOnboardingTask(onboardingId: string, taskId: string, input: UpdateOnboardingTaskInput, actorId = 'user-demo'): Promise<OnboardingTaskRecord> {
+    validateOnboardingTaskInput(input)
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能修改任务', 409)
+    const completedAt = input.status === 'completed' ? LocalRecruitingStore.timestamp() : input.status !== undefined ? null : undefined
+    const blockedReason = input.status === 'blocked' ? required(input.blockedReason, '阻塞原因') : input.status !== undefined ? null : input.blockedReason !== undefined ? optionalClean(input.blockedReason) ?? null : undefined
+    const patch = {
+      ...(input.title !== undefined ? { title: required(input.title, '任务标题') } : {}),
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.isRequired !== undefined ? { isRequired: input.isRequired } : {}),
+      ...(input.ownerRole !== undefined ? { ownerRole: input.ownerRole } : {}),
+      ...(input.templateKey !== undefined ? { templateKey: optionalClean(input.templateKey) ?? null } : {}),
+      ...(input.ownerName !== undefined ? { ownerName: optionalClean(input.ownerName) ?? null } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: optionalClean(input.dueDate) ?? null } : {}),
+      ...(input.notes !== undefined ? { notes: optionalClean(input.notes) ?? null } : {}),
+      ...(completedAt !== undefined ? { completedAt } : {}),
+      ...(blockedReason !== undefined ? { blockedReason } : {}),
+    }
+    if (this.repository) {
+      const item = await this.repository.updateOnboardingTask(onboardingId, taskId, patch)
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action: 'task_update', actorId })
+      return this.mapRepositoryOnboardingTask(item)
+    }
+    return this.store.transaction((state) => {
+      const item = state.onboardingTasks.find((task) => task.id === taskId && task.onboardingId === onboardingId)
+      if (!item) throw new RecruitingNotFoundError(`未找到入职任务：${taskId}`)
+      const mutable = item as unknown as Record<string, unknown>
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null || value === undefined) delete mutable[key]
+        else mutable[key] = typeof value === 'string' ? clean(value) : value
+      }
+      item.updatedAt = LocalRecruitingStore.timestamp()
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action: 'task_update', actorId })
+      return item
+    })
+  }
+  async listOnboardingMaterials(onboardingId: string): Promise<OnboardingMaterialRecord[]> {
+    await this.getOnboarding(onboardingId)
+    if (this.repository) return (await this.repository.listOnboardingMaterials(onboardingId)).map((item) => this.mapRepositoryOnboardingMaterial(item))
+    const state = await this.store.read()
+    return state.onboardingMaterials.filter((item) => item.onboardingId === onboardingId)
+  }
+  async createOnboardingMaterial(onboardingId: string, input: CreateOnboardingMaterialInput, actorId = 'user-demo'): Promise<OnboardingMaterialRecord> {
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能新增材料', 409)
+    const code = clean(input.code).toLowerCase()
+    if (!/^[a-z0-9_]+$/.test(code)) throw new RecruitingWorkflowError('ONBOARDING_MATERIAL_CODE_INVALID', '材料编码只能包含小写字母、数字和下划线', 400)
+    const label = required(input.label, '材料名称')
+    const existing = await this.listOnboardingMaterials(onboardingId)
+    if (existing.some((item) => item.code === code)) throw new RecruitingWorkflowError('ONBOARDING_MATERIAL_EXISTS', '该材料已存在', 409)
+    if (this.repository) {
+      const item = await this.repository.createOnboardingMaterial({ onboardingId, code, label, isRequired: input.isRequired !== false, ...(input.notes !== undefined ? { notes: optionalClean(input.notes) ?? null } : {}) })
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action: 'material_create', actorId })
+      return this.mapRepositoryOnboardingMaterial(item)
+    }
+    return this.store.transaction((state) => {
+      const now = LocalRecruitingStore.timestamp()
+      const item: OnboardingMaterialRecord = { id: randomUUID(), onboardingId, code, label, status: 'pending', isRequired: input.isRequired !== false, ...(optionalClean(input.notes) ? { notes: optionalClean(input.notes)! } : {}), createdAt: now, updatedAt: now }
+      state.onboardingMaterials.push(item)
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action: 'material_create', actorId })
+      return item
+    })
+  }
+  async updateOnboardingMaterial(onboardingId: string, materialId: string, input: UpdateOnboardingMaterialInput, actorId = 'user-demo'): Promise<OnboardingMaterialRecord> {
+    if (input.status !== undefined && !['pending', 'collected', 'verified', 'waived'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '材料状态无效', 400)
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能修改材料', 409)
+    const now = LocalRecruitingStore.timestamp()
+    const patch = {
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.isRequired !== undefined ? { isRequired: input.isRequired } : {}),
+      ...(input.notes !== undefined ? { notes: optionalClean(input.notes) ?? null } : {}),
+      ...(input.status === 'pending' ? { collectedAt: null, verifiedAt: null, verifiedByUserId: null, waivedAt: null } : {}),
+      ...(input.status === 'collected' ? { collectedAt: now, verifiedAt: null, verifiedByUserId: null, waivedAt: null } : {}),
+      ...(input.status === 'verified' ? { collectedAt: now, verifiedAt: now, verifiedByUserId: actorId, waivedAt: null } : {}),
+      ...(input.status === 'waived' ? { waivedAt: now, verifiedAt: null, verifiedByUserId: null } : {}),
+    }
+    const action = input.status === 'collected' ? 'material_collect' : input.status === 'verified' ? 'material_verify' : input.status === 'waived' ? 'material_waive' : 'material_update'
+    if (this.repository) {
+      const item = await this.repository.updateOnboardingMaterial(onboardingId, materialId, patch)
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action, actorId })
+      return this.mapRepositoryOnboardingMaterial(item)
+    }
+    return this.store.transaction((state) => {
+      const item = state.onboardingMaterials.find((material) => material.id === materialId && material.onboardingId === onboardingId)
+      if (!item) throw new RecruitingNotFoundError(`未找到入职材料：${materialId}`)
+      const mutable = item as unknown as Record<string, unknown>
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null || value === undefined) delete mutable[key]
+        else mutable[key] = value
+      }
+      item.updatedAt = now
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action, actorId })
+      return item
+    })
+  }
+  async listOnboardingReminders(onboardingId: string): Promise<OnboardingReminderRecord[]> {
+    await this.getOnboarding(onboardingId)
+    if (this.repository) return (await this.repository.listOnboardingReminders(onboardingId)).map((item) => this.mapRepositoryOnboardingReminder(item))
+    const state = await this.store.read()
+    return state.onboardingReminders.filter((item) => item.onboardingId === onboardingId)
+  }
+  async refreshOnboardingReminders(onboardingId: string, actorId = 'user-demo'): Promise<OnboardingReminderRecord[]> {
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能刷新提醒', 409)
+    if (!onboarding.plannedStartDate || !isIsoDate(onboarding.plannedStartDate)) throw new RecruitingWorkflowError('ONBOARDING_SCHEDULE_DATE_REQUIRED', '请先设置计划入职日期', 400)
+    const schedule = buildOnboardingReminderSchedule(onboarding.plannedStartDate)
+    if (this.repository) {
+      for (const reminder of schedule) await this.repository.createOnboardingReminder({ onboardingId, ...reminder, channel: 'in_app' })
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action: 'reminders_refresh', actorId })
+      return (await this.repository.listOnboardingReminders(onboardingId)).map((item) => this.mapRepositoryOnboardingReminder(item))
+    }
+    return this.store.transaction((state) => {
+      const now = LocalRecruitingStore.timestamp()
+      for (const reminder of schedule) {
+        const existing = state.onboardingReminders.find((item) => item.onboardingId === onboardingId && item.milestone === reminder.milestone && item.audience === reminder.audience && item.channel === 'in_app')
+        if (existing) {
+          existing.scheduledAt = reminder.scheduledAt
+          existing.updatedAt = now
+        } else {
+          state.onboardingReminders.push({ id: randomUUID(), onboardingId, ...reminder, channel: 'in_app', status: 'scheduled', createdAt: now, updatedAt: now })
+        }
+      }
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action: 'reminders_refresh', actorId })
+      return state.onboardingReminders.filter((item) => item.onboardingId === onboardingId)
+    })
+  }
+  async listOnboardingIntegrations(onboardingId: string): Promise<OnboardingIntegrationRecord[]> {
+    await this.getOnboarding(onboardingId)
+    if (this.repository) return (await this.repository.listOnboardingIntegrations(onboardingId)).map((item) => this.mapRepositoryOnboardingIntegration(item))
+    const state = await this.store.read()
+    return state.onboardingIntegrations.filter((item) => item.onboardingId === onboardingId)
+  }
+  async updateOnboardingIntegration(onboardingId: string, integrationId: string, input: UpdateOnboardingIntegrationInput, actorId = 'user-demo'): Promise<OnboardingIntegrationRecord> {
+    if (input.status !== undefined && !['not_configured', 'pending', 'syncing', 'ready', 'failed'].includes(input.status)) throw new RecruitingWorkflowError('VALIDATION_ERROR', '集成状态无效', 400)
+    const onboarding = await this.getOnboarding(onboardingId)
+    if (!isOnboardingEditable(onboarding.status)) throw new RecruitingWorkflowError('ONBOARDING_NOT_EDITABLE', '当前入职记录已进入终态，不能修改系统集成', 409)
+    const now = LocalRecruitingStore.timestamp()
+    const lastError = input.status === 'failed' ? required(input.lastError, '集成失败原因') : input.lastError !== undefined ? optionalClean(input.lastError) ?? null : undefined
+    const patch = {
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.externalReference !== undefined ? { externalReference: optionalClean(input.externalReference) ?? null } : {}),
+      ...(lastError !== undefined ? { lastError } : {}),
+      ...(input.status && input.status !== 'not_configured' ? { lastAttemptAt: now } : {}),
+      ...(input.status === 'ready' ? { lastSuccessAt: now, lastError: null } : {}),
+    }
+    if (this.repository) {
+      const item = await this.repository.updateOnboardingIntegration(onboardingId, integrationId, patch)
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboardingId, action: 'integration_update', actorId, ...(input.status ? { metadata: { provider: item.provider, status: input.status } } : {}) })
+      return this.mapRepositoryOnboardingIntegration(item)
+    }
+    return this.store.transaction((state) => {
+      const item = state.onboardingIntegrations.find((integration) => integration.id === integrationId && integration.onboardingId === onboardingId)
+      if (!item) throw new RecruitingNotFoundError(`未找到入职系统集成：${integrationId}`)
+      const mutable = item as unknown as Record<string, unknown>
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null || value === undefined) delete mutable[key]
+        else mutable[key] = value
+      }
+      item.updatedAt = now
+      addEvent(state, { subjectType: 'onboarding', subjectId: onboardingId, action: 'integration_update', actorId, ...(input.status ? { metadata: { provider: item.provider, status: input.status } } : {}) })
+      return item
+    })
+  }
+  async onboardingAction(id: string, action: string, reason?: unknown, actorId = 'user-demo'): Promise<OnboardingRecord> {
+    const allowed: Record<string, OnboardingRecord['status'][]> = {
+      prepare: ['pending'],
+      schedule: ['preparing'],
+      complete: ['scheduled'],
+      no_show: ['scheduled'],
+      cancel: ['pending', 'preparing', 'scheduled'],
+    }
+    const nextStatus: Record<string, OnboardingRecord['status']> = {
+      prepare: 'preparing',
+      schedule: 'scheduled',
+      complete: 'completed',
+      no_show: 'no_show',
+      cancel: 'cancelled',
+    }
+    if (this.repository) {
+      const current = this.mapRepositoryOnboarding(await this.repository.getOnboarding(id))
+      const from = current.status
+      if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`, 409)
+      if (action === 'schedule') {
+        const missing = missingSchedulingFields(current)
+        if (missing.length) throw new RecruitingWorkflowError('ONBOARDING_SCHEDULE_INCOMPLETE', `安排报到前请补充：${missing.join('、')}`, 400)
+      }
+      if (action === 'complete') {
+        const tasks = (await this.repository.listOnboardingTasks(current.id)).map((item) => this.mapRepositoryOnboardingTask(item))
+        const materials = (await this.repository.listOnboardingMaterials(current.id)).map((item) => this.mapRepositoryOnboardingMaterial(item))
+        const incompleteTasks = tasks.filter((task) => task.isRequired && !['completed', 'not_required'].includes(task.status))
+        const incompleteMaterials = materials.filter((material) => material.isRequired && !['verified', 'waived'].includes(material.status))
+        if (incompleteTasks.length || incompleteMaterials.length) throw new RecruitingWorkflowError('ONBOARDING_COMPLETION_BLOCKED', `仍有 ${incompleteTasks.length} 项必选任务、${incompleteMaterials.length} 项必选材料未完成`, 409)
+      }
+      const validatedReason = action === 'cancel' || action === 'no_show' ? validateOnboardingReason(action, reason) : undefined
+      const timestamp = LocalRecruitingStore.timestamp()
+      const patch: {
+        status: OnboardingRecord['status']
+        archivedAt?: string
+        actualArrivalAt?: string
+        cancellationReasonCode?: string
+        cancellationNotes?: string
+        cancelledAt?: string
+        noShowReasonCode?: string
+        noShowNotes?: string
+        noShowAt?: string
+      } = {
+        status: nextStatus[action]!,
+        ...(action === 'complete' ? { archivedAt: timestamp, actualArrivalAt: timestamp } : {}),
+        ...(action === 'cancel' ? { cancelledAt: timestamp, ...(validatedReason?.reasonCode ? { cancellationReasonCode: validatedReason.reasonCode } : {}), ...(validatedReason?.notes ? { cancellationNotes: validatedReason.notes } : {}) } : {}),
+        ...(action === 'no_show' ? { noShowAt: timestamp, ...(validatedReason?.reasonCode ? { noShowReasonCode: validatedReason.reasonCode } : {}), ...(validatedReason?.notes ? { noShowNotes: validatedReason.notes } : {}) } : {}),
+      }
+      const patched = await this.repository.updateOnboarding(current.id, patch)
       if (action === 'complete') {
         const application = await this.repository.getApplication(current.applicationId)
         if (application.status !== 'onboarding_archived') await this.repository.updateApplicationStatus(application.id, 'onboarding_archived')
         await this.repository.appendWorkflowEvent({ subjectType: 'application', subjectId: application.id, action: 'status_changed', fromStatus: application.status, toStatus: 'onboarding_archived', actorId })
       }
-      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: current.id, action, fromStatus: from, toStatus: patched.status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
+      await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: current.id, action, fromStatus: from, toStatus: patched.status, actorId, ...(validatedReason?.auditReason ? { reason: validatedReason.auditReason } : {}) })
+      if (action === 'schedule') await this.refreshOnboardingReminders(current.id, actorId)
       return this.mapRepositoryOnboarding(patched)
     }
-    return this.store.transaction((state) => { const item = state.onboarding.find((x) => x.id === id); if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`); const from = item.status; const allowed: Record<string, string[]> = { schedule: ['pending', 'cancelled'], complete: ['pending', 'scheduled'], cancel: ['pending', 'scheduled'] }; if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`); if (action === 'cancel') required(reason, '取消原因'); const next: Record<string, OnboardingRecord['status']> = { schedule: 'scheduled', complete: 'completed', cancel: 'cancelled' }; item.status = next[action]!; const now = LocalRecruitingStore.timestamp(); if (action === 'complete') { item.archivedAt = now; const app = state.applications.find((x) => x.id === item.applicationId); if (app) { app.status = 'onboarding_archived'; app.updatedAt = now; addEvent(state, { subjectType: 'application', subjectId: app.id, action: 'status_changed', fromStatus: 'offer_accepted', toStatus: 'onboarding_archived', actorId }); } } item.updatedAt = now; addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action, fromStatus: from, toStatus: item.status, actorId, ...(reason ? { reason: clean(reason) } : {}) }); return item }) }
+    return this.store.transaction((state) => {
+      const item = state.onboarding.find((record) => record.id === id)
+      if (!item) throw new RecruitingNotFoundError(`未找到入职归档：${id}`)
+      const from = item.status
+      if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('ONBOARDING_INVALID_TRANSITION', `入职归档状态 ${from} 不允许执行 ${action}`, 409)
+      if (action === 'schedule') {
+        const missing = missingSchedulingFields(item)
+        if (missing.length) throw new RecruitingWorkflowError('ONBOARDING_SCHEDULE_INCOMPLETE', `安排报到前请补充：${missing.join('、')}`, 400)
+      }
+      if (action === 'complete') {
+        const incompleteTasks = state.onboardingTasks.filter((task) => task.onboardingId === item.id && task.isRequired && !['completed', 'not_required'].includes(task.status))
+        const incompleteMaterials = state.onboardingMaterials.filter((material) => material.onboardingId === item.id && material.isRequired && !['verified', 'waived'].includes(material.status))
+        if (incompleteTasks.length || incompleteMaterials.length) throw new RecruitingWorkflowError('ONBOARDING_COMPLETION_BLOCKED', `仍有 ${incompleteTasks.length} 项必选任务、${incompleteMaterials.length} 项必选材料未完成`, 409)
+      }
+      const validatedReason = action === 'cancel' || action === 'no_show' ? validateOnboardingReason(action, reason) : undefined
+      const now = LocalRecruitingStore.timestamp()
+      item.status = nextStatus[action]!
+      item.updatedAt = now
+      if (action === 'complete') {
+        item.actualArrivalAt = now
+        item.archivedAt = now
+        const app = state.applications.find((record) => record.id === item.applicationId)
+        if (app) {
+          const applicationFrom = app.status
+          app.status = 'onboarding_archived'
+          app.updatedAt = now
+          addEvent(state, { subjectType: 'application', subjectId: app.id, action: 'status_changed', fromStatus: applicationFrom, toStatus: 'onboarding_archived', actorId })
+        }
+      }
+      if (action === 'cancel') {
+        item.cancelledAt = now
+        if (validatedReason?.reasonCode) item.cancellationReasonCode = validatedReason.reasonCode as NonNullable<OnboardingRecord['cancellationReasonCode']>
+        if (validatedReason?.notes) item.cancellationNotes = validatedReason.notes
+      }
+      if (action === 'no_show') {
+        item.noShowAt = now
+        if (validatedReason?.reasonCode) item.noShowReasonCode = validatedReason.reasonCode as NonNullable<OnboardingRecord['noShowReasonCode']>
+        if (validatedReason?.notes) item.noShowNotes = validatedReason.notes
+      }
+      addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action, fromStatus: from, toStatus: item.status, actorId, ...(validatedReason?.auditReason ? { reason: validatedReason.auditReason } : {}) })
+      if (action === 'schedule' && item.plannedStartDate) {
+        const timestamp = LocalRecruitingStore.timestamp()
+        for (const reminder of buildOnboardingReminderSchedule(item.plannedStartDate)) {
+          const existing = state.onboardingReminders.find((entry) => entry.onboardingId === item.id && entry.milestone === reminder.milestone && entry.audience === reminder.audience && entry.channel === 'in_app')
+          if (existing) {
+            existing.scheduledAt = reminder.scheduledAt
+            existing.updatedAt = timestamp
+          } else {
+            state.onboardingReminders.push({ id: randomUUID(), onboardingId: item.id, ...reminder, channel: 'in_app', status: 'scheduled', createdAt: timestamp, updatedAt: timestamp })
+          }
+        }
+        addEvent(state, { subjectType: 'onboarding', subjectId: item.id, action: 'reminders_refresh', actorId })
+      }
+      return item
+    })
+  }
   async createOffer(input: CreateOfferInput, actorId = 'user-demo'): Promise<OfferRecord> {
+    const templateFields = normalizeOfferTemplateFields(input.templateFields)
+    const invoiceTitle = normalizeOfferInvoiceField(input.invoiceTitle, '发票抬头', 200)
+    const taxNumber = normalizeOfferInvoiceField(input.taxNumber, '企业税号', 100)
     if (this.repository) {
       const application = await this.repository.getApplication(required(input.applicationId, '申请'))
-      if (!['interviewing', 'offer_approval'].includes(application.status)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID', '当前申请不允许创建 Offer')
+      if (!['interviewing', 'offer_approval', 'offer_cancelled'].includes(application.status)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID', '当前申请不允许创建 Offer')
       const offer = await this.repository.createOffer({ applicationId: application.id, status: 'draft', approvalStatus: 'pending' })
-      const compensation = { baseSalary: input.baseSalary, ...(input.bonus ? { bonus: input.bonus } : {}), ...(input.equity ? { equity: input.equity } : {}) }
-      const version = await this.repository.createOfferVersion({ offerId: offer.id, positionTitle: required(input.positionTitle, '职位名称'), departmentId: required(input.departmentId, '部门'), employmentType: required(input.employmentType, '用工类型'), startDate: input.startDate ?? null, compensation: compensation as unknown as Record<string, unknown>, benefits: input.benefits ?? [], content: required(input.content, 'Offer 内容') })
+      const compensation = { baseSalary: input.baseSalary, ...(input.probationSalary ? { probationSalary: input.probationSalary } : {}), ...(input.bonus ? { bonus: input.bonus } : {}), ...(input.equity ? { equity: input.equity } : {}) }
+      const version = await this.repository.createOfferVersion({ offerId: offer.id, positionTitle: required(input.positionTitle, '职位名称'), departmentId: required(input.departmentId, '部门'), employmentType: required(input.employmentType, '用工类型'), startDate: input.startDate ?? null, reportingLocation: input.reportingLocation?.trim() || null, invoiceTitle: invoiceTitle || null, taxNumber: taxNumber || null, templateFields: templateFields ?? {}, compensation: compensation as unknown as Record<string, unknown>, benefits: input.benefits ?? [], materials: input.materials ?? [], content: required(input.content, 'Offer 内容') })
       const updated = await this.repository.updateOffer(offer.id, { currentVersionId: version.id })
       await this.repository.appendWorkflowEvent({ subjectType: 'offer', subjectId: offer.id, action: 'create', toStatus: 'draft', actorId })
       return this.mapRepositoryOffer(updated)
     }
-    return this.store.transaction(state=>{ const app=applicationOrThrow(state,required(input.applicationId,'申请')); if(!isLocalOfferEligible(app, state)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID','只有第二轮复试已确认通过的申请才能创建 Offer', 409); const t=LocalRecruitingStore.timestamp(); const offer:OfferRecord={id:randomUUID(),code:`OFF-${state.nextOfferNumber++}`,applicationId:app.id,status:'draft',approval:{status:'pending',approver:'待审批'},version:1,createdAt:t,updatedAt:t}; const v:OfferVersionRecord={id:randomUUID(),offerId:offer.id,version:1,positionTitle:required(input.positionTitle,'职位名称'),departmentId:required(input.departmentId,'部门'),employmentType:required(input.employmentType,'用工类型'),...(input.startDate?{startDate:input.startDate}:{}),compensation:{baseSalary:input.baseSalary},benefits:input.benefits??[],content:required(input.content,'Offer 内容'),createdAt:t}; state.offers.push(offer); state.offerVersions.push(v); offer.currentVersionId=v.id; addEvent(state,{subjectType:"offer",subjectId:offer.id,action:"create",toStatus:"draft",actorId}); return offer }) }
+    return this.store.transaction(state=>{ const app=applicationOrThrow(state,required(input.applicationId,'申请')); if(!isLocalOfferEligible(app, state)) throw new RecruitingWorkflowError('OFFER_APPLICATION_INVALID','只有第二轮复试已确认通过的申请才能创建 Offer', 409); const t=LocalRecruitingStore.timestamp(); const offer:OfferRecord={id:randomUUID(),code:`OFF-${state.nextOfferNumber++}`,applicationId:app.id,status:'draft',approval:{status:'pending',approver:'待审批'},version:1,createdAt:t,updatedAt:t}; const v:OfferVersionRecord={id:randomUUID(),offerId:offer.id,version:1,positionTitle:required(input.positionTitle,'职位名称'),departmentId:required(input.departmentId,'部门'),employmentType:required(input.employmentType,'用工类型'),...(input.startDate?{startDate:input.startDate}:{}),...(input.reportingLocation?.trim()?{reportingLocation:input.reportingLocation.trim()}:{}),invoiceTitle:invoiceTitle??'',taxNumber:taxNumber??'',templateFields:templateFields??{},compensation:{baseSalary:input.baseSalary,...(input.probationSalary?{probationSalary:input.probationSalary}:{}),...(input.bonus?{bonus:input.bonus}:{}),...(input.equity?{equity:input.equity}:{})},benefits:input.benefits??[],materials:input.materials??[],content:required(input.content,'Offer 内容'),createdAt:t}; state.offers.push(offer); state.offerVersions.push(v); offer.currentVersionId=v.id; addEvent(state,{subjectType:"offer",subjectId:offer.id,action:"create",toStatus:"draft",actorId}); return offer }) }
   async updateOffer(id:string,input:Partial<CreateOfferInput>, actorId = 'user-demo'):Promise<OfferRecord>{
+    const templateFields = normalizeOfferTemplateFields(input.templateFields)
+    const invoiceTitle = normalizeOfferInvoiceField(input.invoiceTitle, '发票抬头', 200)
+    const taxNumber = normalizeOfferInvoiceField(input.taxNumber, '企业税号', 100)
     if (this.repository) {
       const offer = await this.repository.getOffer(id)
-      if (offer.status !== 'draft') throw new RecruitingWorkflowError('OFFER_IMMUTABLE', '只有草稿 Offer 可以修改')
+      if (!['draft', 'sent', 'cancelled'].includes(offer.status)) throw new RecruitingWorkflowError('OFFER_IMMUTABLE', '当前状态的 Offer 不允许修改')
+      if (await this.repository.getOnboardingByOfferId(offer.id)) throw new RecruitingWorkflowError('OFFER_IMMUTABLE', '已进入入职流程的 Offer 不允许修改')
       const versions = await this.repository.listOfferVersions(offer.id)
       const previous = versions[0]
       if (!previous) throw new RecruitingNotFoundError('Offer 还没有版本记录')
-      const priorCompensation = previous.compensation as { baseSalary?: { amount: number; currency: string }; bonus?: { amount: number; currency: string }; equity?: string }
+      const priorCompensation = previous.compensation as { baseSalary?: { amount: number; currency: string }; probationSalary?: { amount: number; currency: string }; bonus?: { amount: number; currency: string }; equity?: string }
       const startDate = input.startDate !== undefined ? input.startDate : previous.startDate
+      const reportingLocation = input.reportingLocation !== undefined ? input.reportingLocation.trim() : previous.reportingLocation
       const equity = input.equity !== undefined ? input.equity : priorCompensation.equity
       const bonus = input.bonus !== undefined ? input.bonus : priorCompensation.bonus
       const baseSalary = input.baseSalary ?? priorCompensation.baseSalary
       if (!baseSalary) throw new RecruitingWorkflowError('OFFER_BASE_SALARY_REQUIRED', 'Offer 缺少基本薪资', 400)
-      const compensation = { baseSalary, ...(bonus ? { bonus } : {}), ...(equity ? { equity } : {}) }
-      const version = await this.repository.createOfferVersion({ offerId: offer.id, positionTitle: input.positionTitle?.trim() || previous.positionTitle, departmentId: input.departmentId?.trim() || previous.departmentId, employmentType: input.employmentType || previous.employmentType, startDate: startDate ?? null, compensation: compensation as unknown as Record<string, unknown>, benefits: input.benefits ?? previous.benefits, content: input.content?.trim() || previous.content })
+      const probationSalary = input.probationSalary !== undefined ? input.probationSalary : priorCompensation.probationSalary
+      const compensation = { baseSalary, ...(probationSalary ? { probationSalary } : {}), ...(bonus ? { bonus } : {}), ...(equity ? { equity } : {}) }
+      const version = await this.repository.createOfferVersion({ offerId: offer.id, positionTitle: input.positionTitle?.trim() || previous.positionTitle, departmentId: input.departmentId?.trim() || previous.departmentId, employmentType: input.employmentType || previous.employmentType, startDate: startDate ?? null, reportingLocation: reportingLocation || null, invoiceTitle: invoiceTitle !== undefined ? invoiceTitle || null : previous.invoiceTitle, taxNumber: taxNumber !== undefined ? taxNumber || null : previous.taxNumber, templateFields: templateFields === undefined ? previous.templateFields ?? {} : { ...previous.templateFields, ...templateFields }, compensation: compensation as unknown as Record<string, unknown>, benefits: input.benefits ?? previous.benefits, materials: input.materials ?? previous.materials, content: input.content?.trim() || previous.content })
       const updated = await this.repository.updateOffer(offer.id, { currentVersionId: version.id, version: offer.version + 1 })
-      await this.repository.appendWorkflowEvent({ subjectType: 'offer', subjectId: offer.id, action: 'revise', fromStatus: 'draft', toStatus: 'draft', actorId })
+      await this.repository.appendWorkflowEvent({ subjectType: 'offer', subjectId: offer.id, action: 'revise', fromStatus: offer.status, toStatus: offer.status, actorId })
       return this.mapRepositoryOffer(updated)
     }
-    return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);if(o.status!=='draft')throw new RecruitingWorkflowError('OFFER_IMMUTABLE','只有草稿 Offer 可以修改');const old=state.offerVersions.filter(x=>x.offerId===id).sort((a,b)=>b.version-a.version)[0]!;const startDate=input.startDate!==undefined?input.startDate:old.startDate;const equity=input.equity!==undefined?input.equity:old.compensation.equity;const bonus=input.bonus!==undefined?input.bonus:old.compensation.bonus;const baseSalary=input.baseSalary??old.compensation.baseSalary;const compensation:{baseSalary:{amount:number;currency:string};bonus?:{amount:number;currency:string};equity?:string}={baseSalary,...(bonus?{bonus}:{}),...(equity?{equity}:{})};const v:OfferVersionRecord={...old,id:randomUUID(),version:old.version+1,positionTitle:input.positionTitle?.trim()||old.positionTitle,departmentId:input.departmentId?.trim()||old.departmentId,employmentType:input.employmentType||old.employmentType,...(startDate?{startDate}:{}),compensation,benefits:input.benefits??old.benefits,content:input.content?.trim()||old.content,createdAt:LocalRecruitingStore.timestamp()};state.offerVersions.push(v);o.currentVersionId=v.id;o.version++;o.updatedAt=LocalRecruitingStore.timestamp();addEvent(state,{subjectType:'offer',subjectId:o.id,action:'revise',fromStatus:'draft',toStatus:'draft',actorId});return o})}
+    return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);if(!['draft','sent','cancelled'].includes(o.status))throw new RecruitingWorkflowError('OFFER_IMMUTABLE','当前状态的 Offer 不允许修改');if(state.onboarding.some((item)=>item.offerId===id))throw new RecruitingWorkflowError('OFFER_IMMUTABLE','已进入入职流程的 Offer 不允许修改');const fromStatus=o.status;const old=state.offerVersions.filter(x=>x.offerId===id).sort((a,b)=>b.version-a.version)[0]!;const startDate=input.startDate!==undefined?input.startDate:old.startDate;const reportingLocation=input.reportingLocation!==undefined?input.reportingLocation.trim():old.reportingLocation;const equity=input.equity!==undefined?input.equity:old.compensation.equity;const bonus=input.bonus!==undefined?input.bonus:old.compensation.bonus;const baseSalary=input.baseSalary??old.compensation.baseSalary;const probationSalary=input.probationSalary!==undefined?input.probationSalary:old.compensation.probationSalary;const compensation:{baseSalary:{amount:number;currency:string};probationSalary?:{amount:number;currency:string};bonus?:{amount:number;currency:string};equity?:string}={baseSalary,...(probationSalary?{probationSalary}:{}),...(bonus?{bonus}:{}),...(equity?{equity}:{})};const v:OfferVersionRecord={...old,id:randomUUID(),version:old.version+1,positionTitle:input.positionTitle?.trim()||old.positionTitle,departmentId:input.departmentId?.trim()||old.departmentId,employmentType:input.employmentType||old.employmentType,...(startDate?{startDate}:{}),...(reportingLocation?{reportingLocation}:{}),invoiceTitle:invoiceTitle!==undefined?invoiceTitle:old.invoiceTitle??'',taxNumber:taxNumber!==undefined?taxNumber:old.taxNumber??'',templateFields:templateFields===undefined?old.templateFields??{}:{...old.templateFields,...templateFields},compensation,benefits:input.benefits??old.benefits,materials:input.materials??old.materials,content:input.content?.trim()||old.content,createdAt:LocalRecruitingStore.timestamp()};state.offerVersions.push(v);o.currentVersionId=v.id;o.version++;o.updatedAt=LocalRecruitingStore.timestamp();addEvent(state,{subjectType:'offer',subjectId:o.id,action:'revise',fromStatus,toStatus:fromStatus,actorId});return o})}
   async offerAction(id:string,action:string,reason?:unknown,actorId = 'user-demo'):Promise<OfferRecord|OnboardingRecord>{
     if (this.repository) {
       const offer = await this.repository.getOffer(id)
       const from = offer.status
       const timestamp = LocalRecruitingStore.timestamp()
       if (action === 'archive_onboarding') {
-        const existing = await this.repository.getOnboardingByOfferId(offer.id)
-        if (existing) return this.mapRepositoryOnboarding(existing)
-        if (from !== 'accepted') throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态 ${from} 不允许执行 ${action}`)
-        const record = await this.repository.createOnboarding({ applicationId: offer.applicationId, offerId: offer.id, status: 'pending' })
-        await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: record.id, action, fromStatus: 'accepted', toStatus: 'pending', actorId })
-        return this.mapRepositoryOnboarding(record)
+        const versions = await this.repository.listOfferVersions(offer.id)
+        const currentVersion = versions.find((version) => version.id === offer.currentVersionId)
+          ?? [...versions].sort((left, right) => right.version - left.version)[0]
+        let existing = await this.repository.getOnboardingByOfferId(offer.id)
+        if (!existing && from !== 'accepted') throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态 ${from} 不允许执行 ${action}`)
+        let created = false
+        if (!existing) {
+          existing = await this.repository.createOnboarding({
+            applicationId: offer.applicationId,
+            offerId: offer.id,
+            status: 'pending',
+            ...(currentVersion?.startDate ? { plannedStartDate: currentVersion.startDate } : {}),
+          })
+          created = true
+        } else if (!existing.plannedStartDate && currentVersion?.startDate) {
+          existing = await this.repository.updateOnboarding(existing.id, { plannedStartDate: currentVersion.startDate })
+        }
+        const onboarding = this.mapRepositoryOnboarding(existing)
+        const tasks = await this.repository.listOnboardingTasks(onboarding.id)
+        const existingTaskKeys = new Set(tasks.map((task) => task.templateKey ?? `${task.category}\u0000${task.title}`))
+        for (const task of defaultOnboardingTasks()) {
+          const key = task.templateKey ?? `${task.category}\u0000${task.title}`
+          if (!existingTaskKeys.has(key)) await this.repository.createOnboardingTask({ onboardingId: onboarding.id, ...task })
+        }
+        const materialLabels = currentVersion?.materials.length ? currentVersion.materials : defaultOnboardingMaterials
+        const materials = await this.repository.listOnboardingMaterials(onboarding.id)
+        const existingMaterialCodes = new Set(materials.map((material) => material.code))
+        for (const material of onboardingMaterialTemplates(materialLabels)) {
+          if (!existingMaterialCodes.has(material.code)) await this.repository.createOnboardingMaterial({ onboardingId: onboarding.id, ...material })
+        }
+        const integrations = await this.repository.listOnboardingIntegrations(onboarding.id)
+        const existingProviders = new Set(integrations.map((integration) => integration.provider))
+        for (const provider of defaultOnboardingIntegrationProviders) {
+          if (!existingProviders.has(provider)) await this.repository.createOnboardingIntegration({ onboardingId: onboarding.id, provider })
+        }
+        if (onboarding.plannedStartDate) {
+          const reminders = await this.repository.listOnboardingReminders(onboarding.id)
+          for (const reminder of buildOnboardingReminderSchedule(onboarding.plannedStartDate)) {
+            if (!reminders.some((item) => item.milestone === reminder.milestone && item.audience === reminder.audience && item.channel === 'in_app')) {
+              await this.repository.createOnboardingReminder({ onboardingId: onboarding.id, ...reminder, channel: 'in_app' })
+            }
+          }
+        }
+        if (created) await this.repository.appendWorkflowEvent({ subjectType: 'onboarding', subjectId: onboarding.id, action, fromStatus: 'accepted', toStatus: 'pending', actorId })
+        return onboarding
       }
-      const allowed: Record<string, string[]> = { submit_approval: ['draft'], reject: ['pending_approval'], approve: ['pending_approval'], send: ['approved'], accept: ['sent'], decline: ['sent'], expire: ['sent'], cancel: ['draft', 'pending_approval', 'approved', 'sent'] }
-      if (!allowed[action] || !allowed[action]!.includes(from)) throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态 ${from} 不允许执行 ${action}`)
-      if (['decline', 'cancel', 'reject'].includes(action)) required(reason, '原因')
-      const next: Record<string, string> = { submit_approval: 'pending_approval', approve: 'approved', send: 'sent', accept: 'accepted', decline: 'declined', cancel: 'cancelled', reject: 'draft', expire: 'expired' }
-      const patch: { status: string; version: number; approvalStatus?: string; sentAt?: string; respondedAt?: string; expiresAt?: string } = { status: next[action]!, version: offer.version + 1 }
-      if (action === 'submit_approval') patch.approvalStatus = 'pending'
-      else if (action === 'approve') patch.approvalStatus = 'approved'
-      else if (action === 'reject') patch.approvalStatus = 'rejected'
-      else if (action === 'cancel') patch.approvalStatus = 'cancelled'
-      if (action === 'send') patch.sentAt = timestamp
-      if (action === 'accept' || action === 'decline') patch.respondedAt = timestamp
-      if (action === 'expire') patch.expiresAt = offer.expiresAt ?? timestamp
-      const updated = await this.repository.updateOffer(offer.id, patch)
-      await this.repository.appendWorkflowEvent({ subjectType: 'offer', subjectId: offer.id, action, fromStatus: from, toStatus: updated.status, actorId, ...(reason ? { reason: clean(reason) } : {}) })
-      return this.mapRepositoryOffer(updated)
+      const transition = transitionOfferWorkflow(from, action, reason)
+      const result = await this.repository.transitionOffer(offer.id, {
+        action,
+        fromStatus: transition.fromOfferStatus,
+        toStatus: transition.offerStatus,
+        applicationStatus: transition.applicationStatus,
+        actorId,
+        ...(transition.reason ? { reason: transition.reason } : {}),
+      })
+      return this.mapRepositoryOffer(result.offer)
     }
-    return this.store.transaction(state=>{const o=state.offers.find(x=>x.id===id);if(!o)throw new RecruitingNotFoundError(`未找到 Offer：${id}`);const t=LocalRecruitingStore.timestamp();const from=o.status;const next:Record<string,string>={submit_approval:'pending_approval',approve:'approved',send:'sent',accept:'accepted',decline:'declined',cancel:'cancelled',reject:'draft',expire:'expired'};if(action==='archive_onboarding'){const existing=state.onboarding.find(x=>x.offerId===o.id);if(existing)return existing;if(from!=='accepted')throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);const r:OnboardingRecord={id:randomUUID(),applicationId:o.applicationId,offerId:o.id,status:'pending',createdAt:t,updatedAt:t};state.onboarding.push(r);addEvent(state,{subjectType:'onboarding',subjectId:r.id,action,fromStatus:'accepted',toStatus:'pending',actorId});return r}const allowed:Record<string,string[]>={submit_approval:['draft'],reject:['pending_approval'],approve:['pending_approval'],send:['approved'],accept:['sent'],decline:['sent'],expire:['sent'],cancel:['draft','pending_approval','approved','sent']};if(!allowed[action]||!allowed[action]!.includes(from))throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION',`Offer 状态 ${from} 不允许执行 ${action}`);if(['decline','cancel','reject'].includes(action))required(reason,'原因');o.status=next[action] as OfferRecord['status'];if(action==='submit_approval')o.approval={status:'pending',approver:'待审批'};else if(action==='approve')o.approval={status:'approved',approver:'当前审批人',actedAt:t};else if(action==='reject')o.approval={status:'rejected',approver:'当前审批人',comment:clean(reason),actedAt:t};else if(action==='cancel')o.approval.status='cancelled';if(action==='accept'||action==='decline')o.respondedAt=t;if(action==='expire')o.expiresAt=o.expiresAt??t;o.version++;o.updatedAt=t;addEvent(state,{subjectType:'offer',subjectId:o.id,action,fromStatus:from,toStatus:o.status,actorId,...(reason?{reason:clean(reason)}:{})});return o})}
+    return this.store.transaction((state) => {
+      const offer = state.offers.find((record) => record.id === id)
+      if (!offer) throw new RecruitingNotFoundError(`未找到 Offer：${id}`)
+      const timestamp = LocalRecruitingStore.timestamp()
+      const from = offer.status
+      if (action === 'archive_onboarding') {
+        const versions = state.offerVersions.filter((version) => version.offerId === offer.id)
+        const currentVersion = versions.find((version) => version.id === offer.currentVersionId)
+          ?? [...versions].sort((left, right) => right.version - left.version)[0]
+        let onboarding = state.onboarding.find((record) => record.offerId === offer.id)
+        if (!onboarding && from !== 'accepted') throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态 ${from} 不允许执行 ${action}`)
+        let created = false
+        if (!onboarding) {
+          onboarding = {
+            id: randomUUID(),
+            applicationId: offer.applicationId,
+            offerId: offer.id,
+            status: 'pending',
+            ...(currentVersion?.startDate ? { plannedStartDate: currentVersion.startDate } : {}),
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          }
+          state.onboarding.push(onboarding)
+          created = true
+        } else if (!onboarding.plannedStartDate && currentVersion?.startDate) {
+          onboarding.plannedStartDate = currentVersion.startDate
+          onboarding.updatedAt = timestamp
+        }
+        const existingTaskKeys = new Set(state.onboardingTasks.filter((task) => task.onboardingId === onboarding!.id).map((task) => task.templateKey ?? `${task.category}\u0000${task.title}`))
+        for (const task of defaultOnboardingTasks()) {
+          const key = task.templateKey ?? `${task.category}\u0000${task.title}`
+          if (!existingTaskKeys.has(key)) state.onboardingTasks.push({ id: randomUUID(), onboardingId: onboarding.id, status: 'pending', createdAt: timestamp, updatedAt: timestamp, ...task })
+        }
+        const materialLabels = currentVersion?.materials.length ? currentVersion.materials : defaultOnboardingMaterials
+        const existingMaterialCodes = new Set(state.onboardingMaterials.filter((material) => material.onboardingId === onboarding!.id).map((material) => material.code))
+        for (const material of onboardingMaterialTemplates(materialLabels)) {
+          if (!existingMaterialCodes.has(material.code)) state.onboardingMaterials.push({ id: randomUUID(), onboardingId: onboarding.id, status: 'pending', ...material, createdAt: timestamp, updatedAt: timestamp })
+        }
+        const existingProviders = new Set(state.onboardingIntegrations.filter((integration) => integration.onboardingId === onboarding!.id).map((integration) => integration.provider))
+        for (const provider of defaultOnboardingIntegrationProviders) {
+          if (!existingProviders.has(provider)) state.onboardingIntegrations.push({ id: randomUUID(), onboardingId: onboarding.id, provider, status: 'not_configured', createdAt: timestamp, updatedAt: timestamp })
+        }
+        if (onboarding.plannedStartDate) {
+          for (const reminder of buildOnboardingReminderSchedule(onboarding.plannedStartDate)) {
+            const existing = state.onboardingReminders.some((item) => item.onboardingId === onboarding!.id && item.milestone === reminder.milestone && item.audience === reminder.audience && item.channel === 'in_app')
+            if (!existing) state.onboardingReminders.push({ id: randomUUID(), onboardingId: onboarding.id, ...reminder, channel: 'in_app', status: 'scheduled', createdAt: timestamp, updatedAt: timestamp })
+          }
+        }
+        if (created) addEvent(state, { subjectType: 'onboarding', subjectId: onboarding.id, action, fromStatus: 'accepted', toStatus: 'pending', actorId })
+        return onboarding
+      }
+      const transition = transitionOfferWorkflow(from, action, reason)
+      const application = state.applications.find((record) => record.id === offer.applicationId)
+      if (!application) throw new RecruitingNotFoundError(`未找到 Offer 关联的申请：${offer.applicationId}`)
+      const fromApplicationStatus = application.status
+      offer.status = transition.offerStatus
+      application.status = transition.applicationStatus
+      application.updatedAt = timestamp
+      if ((action === 'send' || action === 'resend' || action === 'resend_cancelled') && !offer.sentAt) offer.sentAt = timestamp
+      if (action === 'accept' || action === 'decline') offer.respondedAt = timestamp
+      if (action === 'expire') offer.expiresAt = offer.expiresAt ?? timestamp
+      offer.version++
+      offer.updatedAt = timestamp
+      addEvent(state, { subjectType: 'offer', subjectId: offer.id, action, fromStatus: from, toStatus: offer.status, actorId, ...(transition.reason ? { reason: transition.reason } : {}) })
+      addEvent(state, { subjectType: 'application', subjectId: application.id, action: 'status_changed', fromStatus: fromApplicationStatus, toStatus: application.status, actorId })
+      return offer
+    })
+  }
   async listWorkflowEvents(filter?: { subjectType?: WorkflowEventRecord['subjectType']; candidateId?: string; departmentId?: string; limit?: number }): Promise<Array<WorkflowEventRecord & { subjectLabel: string }>> {
     const state = await this.stateView()
     const limit = Math.max(1, Math.min(filter?.limit ?? 200, 500))

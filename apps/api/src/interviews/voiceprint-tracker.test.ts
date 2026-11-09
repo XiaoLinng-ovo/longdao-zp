@@ -66,8 +66,8 @@ describe('session voice matching', () => {
 
   it('bounds voice profiles and never exposes invalid or mixed voice vectors', () => {
     const tracker = new SessionVoiceprintTracker()
-    const rows = tracker.identify('s', Array.from({ length: 20 }, (_, i) => segment(`a${i}`, [1, 0])))
-    assert.equal(rows.filter(row => row.speakerId.startsWith('voice_')).length, 16)
+    const rows = tracker.identify('s', Array.from({ length: 80 }, (_, i) => segment(`a${i}`, [1, 0])))
+    assert.equal(rows.filter(row => row.speakerId.startsWith('voice_')).length, 64)
     for (const extra of [{ speakerMixed: true }, { speakerVerified: false }]) {
       const [row] = tracker.identify('s', [segment('unsafe', [1, 0], extra)])
       assert.equal(row?.speakerId, 'unsafe')

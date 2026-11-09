@@ -95,7 +95,7 @@ beforeEach(() => {
   const track = { readyState: 'live' }
   capture = { stream: { getAudioTracks: () => [track] } as unknown as MediaStream, microphoneLabel: 'USB microphone', meetingLabel: 'meeting output', setPaused: vi.fn(), stop: vi.fn(() => { track.readyState = 'ended' }) }
   vi.mocked(createInterviewAudioCapture).mockResolvedValue(capture)
-  vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+  vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, status: 'scheduled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
   vi.mocked(apiClient.getJson).mockImplementation(async path => ({ data: path === '/candidates' ? [{ id: 'candidate-1', fullName: '测试候选人' }] : path === '/jobs' ? [{ id: 'job-1', title: '测试岗位' }] : { checks: { externalServices: { funasr: 'ok', llm: 'ok' } } } }) as never)
   vi.mocked(findActiveLiveInterviewSession).mockResolvedValue(null)
   vi.mocked(getQuestionPreparation).mockResolvedValue({ status: 'ready', completedGroups: [] })
@@ -141,7 +141,7 @@ describe('live interview meeting audio', () => {
     expect(root!.textContent).not.toContain('待保存录音：')
     expect(capture.stop).not.toHaveBeenCalled()
   })
-  it('restores separate recognition alternatives without duplicating them in the main dialogue', async () => {
+  it('uses the selected recognition result without showing recognition alternatives', async () => {
     const text = '我负责平台开发。团队一共八个人。我还承担测试和上线工作。'
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', interviewId: 'interview-1', status: 'active', externalStatus: 'ready', startedAt: '2026-10-23T00:00:00Z', createdBy: 'u', currentQuestion: '' }, segments: [
       { id: 'alternative', sessionId: 'session-1', speakerId: 'chunk_15000:stream_15000', role: 'unknown', confidence: .35,
@@ -151,13 +151,9 @@ describe('live interview meeting audio', () => {
     ] })
     await mount()
     const dialogue = root!.querySelector('.utterance')!
-    const comparison = dialogue.querySelector<HTMLDetailsElement>('.transcript-comparison')!
-    expect(comparison.open).toBe(false)
-    expect(comparison.textContent).toContain('识别版本对照 · 00:15–00:30')
-    expect(comparison.textContent).toContain('我负责平台的开发。')
-    expect(comparison.textContent).toContain(text)
-    expect(comparison.textContent).toContain('流式识别 · 未完成')
-    expect(comparison.textContent).toContain('录音分段识别 · 当前采用')
+    expect(dialogue.querySelector('.transcript-comparison')).toBeNull()
+    expect(dialogue.textContent).not.toContain('识别版本对照')
+    expect(dialogue.textContent).not.toContain('我负责平台的开发。')
     expect(dialogue.querySelector(':scope > p')?.textContent).toBe(text)
     expect(root!.querySelectorAll('.utterance')).toHaveLength(1)
     expect(analyzeLiveSegment).not.toHaveBeenCalled()
@@ -452,7 +448,7 @@ describe('live interview meeting audio', () => {
     button('结束面试').click(); await flush()
     expect(router.currentRoute.value.path).toBe('/interviews/interview-1')
     expect(capture.stop).toHaveBeenCalledOnce()
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-2', round: 1, application: {} } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-2', round: 1, status: 'scheduled', application: {} } as never)
     vi.mocked(createLiveInterviewSession).mockResolvedValue({ id: 'session-2' } as never)
     vi.mocked(createInterviewAudioCapture).mockResolvedValue({ ...capture, stream: { getAudioTracks: () => [{ readyState: 'live' }] } as unknown as MediaStream, stop: vi.fn() })
     await router.push('/interviews/interview-2/live'); await flush(); await start()
@@ -665,7 +661,7 @@ describe('live interview chronological transcript', () => {
       { ...speech('first', '第一段发言。', 0), speakerId: 'voice_a', audioSource: 'microphone' },
       { ...speech('second', '第二段发言。', 1500), speakerId: 'voice_b', audioSource: 'microphone' },
     ]
-    vi.mocked(findActiveLiveInterviewSession).mockImplementation(async () => ({ session: { id: 'session-1', status: 'completed' }, segments: saved.map(row => ({ ...row })) }) as never)
+    vi.mocked(findActiveLiveInterviewSession).mockImplementation(async () => ({ session: { id: 'session-1', status: 'active' }, segments: saved.map(row => ({ ...row })) }) as never)
     vi.mocked(correctLiveSegmentRole).mockImplementation(async (id, role, ids) => {
       const selected = ids?.length ? ids : [id]
       saved = saved.map(row => selected.includes(row.id) ? { ...row, role, confidence: 1, speakerConfirmed: true } : row)
@@ -1175,6 +1171,62 @@ describe('live interview chronological transcript', () => {
   })
 })
 
+describe('closed interview live-room guard', () => {
+  const history = [
+    { id: 'question-1', sessionId: 'session-1', speakerId: 'voice_a', role: 'interviewer' as const, confidence: 1, text: '请介绍一个招聘项目。', startMs: 0, endMs: 1000, status: 'transcribed' },
+    { id: 'answer-1', sessionId: 'session-1', speakerId: 'voice_b', role: 'candidate' as const, confidence: 1, text: '我负责需求澄清、候选人寻访和入职跟进。', startMs: 1500, endMs: 5000, status: 'transcribed' },
+  ]
+
+  it('does not offer recording controls or create a session for a completed interview', async () => {
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, status: 'completed', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    await mount()
+
+    expect(root!.textContent).toContain('面试已完成')
+    expect(root!.textContent).toContain('该面试已完成，暂无实时面试记录，不能重新创建实时会话。')
+    expect(root!.querySelector('[aria-labelledby="recording-authorization-title"]')).toBeNull()
+    expect(root!.querySelector('.audio-capture-settings')).toBeNull()
+    expect(button('开始面试')).toBeUndefined()
+    expect(button('仅手动记录')).toBeUndefined()
+    expect(button('继续')).toBeUndefined()
+    expect(button('结束面试')).toBeUndefined()
+    expect(restorePendingAudio).not.toHaveBeenCalled()
+    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
+    expect(createLiveInterviewSession).not.toHaveBeenCalled()
+  })
+
+  it('keeps a completed interview read-only when an old active session still exists', async () => {
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, status: 'completed', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-1', status: 'active' }, segments: history } as never)
+    await mount()
+
+    expect(root!.querySelector('.session-state')!.textContent).toContain('面试已完成')
+    expect(root!.textContent).toContain(history[1]!.text)
+    expect(root!.textContent).not.toContain('录音已暂停')
+    expect(button('继续')).toBeUndefined()
+    expect(button('暂停')).toBeUndefined()
+    expect(button('结束面试')).toBeUndefined()
+    expect(button('面试官')).toBeUndefined()
+    expect(button('候选人')).toBeUndefined()
+    expect(button('回听本段')).toBeDefined()
+    expect(restorePendingAudio).not.toHaveBeenCalled()
+    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
+    expect(createLiveInterviewSession).not.toHaveBeenCalled()
+    expect(endLiveInterviewSession).not.toHaveBeenCalled()
+  })
+
+  it('does not offer a live session for a cancelled interview', async () => {
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, status: 'cancelled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    await mount()
+
+    expect(root!.querySelector('.session-state')!.textContent).toContain('面试已取消')
+    expect(root!.textContent).toContain('面试已取消，不能创建实时面试会话。')
+    expect(button('开始面试')).toBeUndefined()
+    expect(button('继续')).toBeUndefined()
+    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
+    expect(createLiveInterviewSession).not.toHaveBeenCalled()
+  })
+})
+
 describe('streaming reconnection lifecycle', () => {
   class Connection extends EventTarget {
     static OPEN = 1; static CLOSING = 2
@@ -1507,7 +1559,7 @@ describe('live interview question navigation', () => {
   })
   it('keeps final-round boss reference questions read-only', async () => {
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: completeBank(true), engine: 'llm' } as never)
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 2, application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 2, status: 'scheduled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     await mountReference(); await openReference('boss')
     expect(root!.querySelectorAll('[data-group="boss"] .question-select')).toHaveLength(5)
     expect(root!.querySelector('[data-reference="ai"]')).toBeNull()
@@ -1598,7 +1650,7 @@ describe('AI generated capability bank lifecycle', () => {
 describe('regeneration feedback and safeguards', () => {
   it('only regenerates the open department sheet and preserves every other sheet', async () => {
     const original = completeBank(true)
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', status: 'scheduled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: original, engine: 'llm' } as never)
     const changed = original.map(question => ({ ...question, question: '新生成：' + question.question }))
     vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: changed, engine: 'llm' } as never)
@@ -1681,7 +1733,7 @@ describe('regeneration feedback and safeguards', () => {
 
 describe('第二轮面试题库', () => {
   it('第二轮BOSS能力题不会被自动追问替换', async () => {
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', status: 'scheduled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     const bank = completeBank(true), pending = deferred<never>()
     vi.mocked(analyzeLiveSegment).mockReturnValue(pending.promise)
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
@@ -1695,7 +1747,7 @@ describe('第二轮面试题库', () => {
     expect(root!.querySelector('.question-select[aria-pressed="true"]')).toBeNull()
   })
   it('第二轮展示25道生成题，BOSS题可选并记录来源', async () => {
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', status: 'scheduled', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     const bank = completeBank(true)
     vi.mocked(waitForPreparedInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session: { id: 'session-2', currentQuestion: bank[0].question, status: 'active' }, segments: [] } as never)
@@ -1714,7 +1766,7 @@ expect(regenerationButton().textContent).toContain('重新生成当前表')
     expect(updateLiveInterviewQuestion).not.toHaveBeenCalled()
   })
   it('第二轮不能用第一轮20题的重新生成响应替换现有25题', async () => {
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', status: 'scheduled', title: '复试', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     const bank = completeBank(true)
     vi.mocked(getInterviewQuestions).mockResolvedValue({ questions: bank, engine: 'llm' } as never)
     vi.mocked(generateInterviewQuestions).mockResolvedValue({ questions: completeBank(), engine: 'llm' } as never)
@@ -1776,7 +1828,7 @@ await tick(119999)
     expect(root!.querySelector('.generation-success')).toBeNull()
   })
   it('复试等待提示正确显示四组问题，并显示已等待时间', async () => {
-    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-2', applicationId: 'app-1', round: 2, stage: 'final', status: 'scheduled', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
     vi.mocked(waitForPreparedInterviewQuestions).mockImplementation(async (_id, options) => {
       options.onState?.({ status: 'generating', completedGroups: ['ai'] })
       return deferred<never>().promise

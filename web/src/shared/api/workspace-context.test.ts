@@ -12,6 +12,12 @@ describe('workspace-bound API requests', () => {
     await createApiClient({ fetcher }).getJson('/jobs', { headers: { 'x-workspace-id': 'company-b' } })
     expect(new Headers(fetcher.mock.calls[0][1].headers).get('x-workspace-id')).toBe('company-a')
   })
+  it('binds Offer templates to the selected enterprise', async () => {
+    setWorkspaceContext('company-a')
+    const fetcher = vi.fn().mockResolvedValue(response([]))
+    await createApiClient({ fetcher }).getJson('/offer-templates')
+    expect(new Headers(fetcher.mock.calls[0][1].headers).get('x-workspace-id')).toBe('company-a')
+  })
   it('does not bind authentication or explicit workspace management to a previous tenant', async () => {
     setWorkspaceContext('company-a')
     const fetcher = vi.fn().mockImplementation(async () => response([]))

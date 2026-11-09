@@ -106,10 +106,10 @@ describe('Interview API', () => {
     expect((await loadInterviews()).map((row) => row.entityId)).toEqual(['first', 'second'])
   })
 
-  it('sends a direct completion without fabricated feedback', async () => {
-    vi.mocked(apiClient.postJson).mockResolvedValue({ data: { status: 'completed' } } as never)
-    await completeInterview('interview-1', 'reject')
-    expect(apiClient.postJson).toHaveBeenCalledWith('/interviews/interview-1/complete', { outcome: 'reject' })
+  it('sends cancellation as a direct completion without fabricated feedback', async () => {
+    vi.mocked(apiClient.postJson).mockResolvedValue({ data: { status: 'cancelled' } } as never)
+    await completeInterview('interview-1', 'cancelled')
+    expect(apiClient.postJson).toHaveBeenCalledWith('/interviews/interview-1/complete', { outcome: 'cancelled' })
   })
 
   it('preserves the actual outcome and a genuine zero AI score in list records', async () => {

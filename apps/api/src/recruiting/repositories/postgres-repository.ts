@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { recordStageDecisionWithExecutor } from '../../interviews/question-sheet-repository.js'
 import { RecruitingWorkflowError } from '../workflow.js'
-import { interviewOutcome, summaryScore, validateDirectInterviewOutcome, type InterviewResult } from '../interview-result.js'
+import { interviewOutcome, summaryScore, validateInterviewOutcome, type InterviewResult } from '../interview-result.js'
 import { prepareInterviewScheduleUpdate } from '../interview-schedule.js'
 import { OFFER_ELIGIBILITY_SQL } from '../offer-eligibility.js'
 import { applyResumeReview, type ResumeReviewInput } from '../resume-scoring.js'
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg'
+import { bindTenantSearchPath } from '../../db/connection.js'
 
 // DATE 列按字面返回，避免驱动按本地午夜解析 Date 后序列化出现时区偏移（差一天）。
 import { types as pgTypes } from 'pg'
@@ -36,8 +37,12 @@ import type {
   JobSpecVersionCreateInput, JobDescriptionVersionCreateInput,
   InterviewDbRecord, InterviewParticipantDbRecord, InterviewCreateInput, InterviewUpdateInput,
   InterviewFeedbackDbRecord, InterviewFeedbackUpsertInput, InterviewFeedbackUpdateInput,
-  OfferDbRecord, OfferVersionDbRecord, OfferCreateInput, OfferUpdateInput, OfferVersionCreateInput,
-  OnboardingDbRecord, OnboardingCreateInput, OnboardingUpdateInput,
+  OfferDbRecord, OfferVersionDbRecord, OfferCreateInput, OfferUpdateInput, OfferTransitionInput, OfferTransitionResult, OfferVersionCreateInput,
+  OfferTemplateDbRecord, OfferTemplateCreateInput, OfferTemplateUpdateInput,
+  OnboardingDbRecord, OnboardingCreateInput, OnboardingUpdateInput, OnboardingTaskDbRecord, OnboardingTaskCreateInput, OnboardingTaskUpdateInput,
+  OnboardingMaterialDbRecord, OnboardingMaterialCreateInput, OnboardingMaterialUpdateInput,
+  OnboardingReminderDbRecord, OnboardingReminderCreateInput, OnboardingReminderUpdateInput,
+  OnboardingIntegrationDbRecord, OnboardingIntegrationCreateInput, OnboardingIntegrationUpdateInput,
   WorkflowEventDbRecord, WorkflowEventCreateInput, WorkflowEventFilter,
 } from './types.js'
 
@@ -143,7 +148,7 @@ export class NormalizedRecruitingRepository {
 
   constructor(poolOrConfig: RepositoryPool | PoolConfig = poolConfigFromEnv(), options: RepositoryOptions = {}) {
     this.ownsPool = !isRepositoryPool(poolOrConfig)
-    this.pool = isRepositoryPool(poolOrConfig) ? poolOrConfig : new Pool(poolOrConfig)
+    this.pool = isRepositoryPool(poolOrConfig) ? poolOrConfig : bindTenantSearchPath(new Pool(poolOrConfig))
     this.generateBusinessId = options.generatedBusinessId ?? defaultGeneratedBusinessId
     this.organizationId = text(options.organizationId) || undefined
   }
@@ -179,9 +184,33 @@ export class NormalizedRecruitingRepository {
     return this.scopedWhere('o', values, conditions)
   }
 
+  private offerTemplateWhere(values: unknown[], conditions: string[] = []): string {
+    return this.scopedWhere('t', values, conditions)
+  }
+
   private onboardingWhere(values: unknown[], conditions: string[] = []): string {
     if (this.organizationId) conditions.push('a.organization_id=r.organization_id', 'EXISTS (SELECT 1 FROM offers o JOIN jobs j ON j.id=a.job_id WHERE o.id=r.offer_id AND o.application_id=r.application_id AND o.organization_id=r.organization_id AND j.organization_id=r.organization_id)')
     return this.scopedWhere('r', values, conditions)
+  }
+
+  private onboardingTaskWhere(values: unknown[], conditions: string[] = []): string {
+    if (this.organizationId) conditions.push('r.organization_id=t.organization_id')
+    return this.scopedWhere('t', values, conditions)
+  }
+
+  private onboardingMaterialWhere(values: unknown[], conditions: string[] = []): string {
+    if (this.organizationId) conditions.push('r.organization_id=m.organization_id')
+    return this.scopedWhere('m', values, conditions)
+  }
+
+  private onboardingReminderWhere(values: unknown[], conditions: string[] = []): string {
+    if (this.organizationId) conditions.push('r.organization_id=n.organization_id')
+    return this.scopedWhere('n', values, conditions)
+  }
+
+  private onboardingIntegrationWhere(values: unknown[], conditions: string[] = []): string {
+    if (this.organizationId) conditions.push('r.organization_id=i.organization_id')
+    return this.scopedWhere('i', values, conditions)
   }
 
   async close(): Promise<void> {
@@ -231,7 +260,7 @@ export class NormalizedRecruitingRepository {
     return this.transaction(async (client) => {
       const id = uuidOrGenerated(input.id)
       const requestNo = businessNumber('REQ', 'rr', input.businessId ?? input.requestNo ?? input.id, this.generateBusinessId)
-      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId)
+      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId, this.organizationId)
       const requestedById = await resolveForeignKey(client, 'users', 'id', 'email', input.requestedById)
       const hiringManagerId = input.hiringManagerId ? await resolveForeignKey(client, 'users', 'id', 'email', input.hiringManagerId).catch(() => null) : null
       const row = await queryOne<RecruitmentRequestRow>(client,
@@ -252,7 +281,7 @@ export class NormalizedRecruitingRepository {
       const values: unknown[] = []
       const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
       if (input.title !== undefined) add('title', required(input.title, 'title'))
-      if (input.departmentId !== undefined) add('department_id', await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId), '::uuid')
+      if (input.departmentId !== undefined) add('department_id', await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId, this.organizationId), '::uuid')
       if (input.requestedById !== undefined) add('requested_by', await resolveForeignKey(client, 'users', 'id', 'email', input.requestedById), '::uuid')
       if (input.headcount !== undefined) add('headcount', input.headcount)
       if (input.budgetMin !== undefined) add('budget_min', input.budgetMin)
@@ -329,7 +358,7 @@ export class NormalizedRecruitingRepository {
       const id = uuidOrGenerated(input.id)
       const jobNo = businessNumber('JOB', 'job', input.businessId ?? input.jobNo ?? input.id, this.generateBusinessId)
       const requestId = await resolveForeignKey(client, 'recruitment_requests', 'id', 'request_no', input.recruitmentRequestId, this.organizationId)
-      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId)
+      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId, this.organizationId)
       if (!departmentId) throw new RepositoryValidationError('departmentId is required for a job')
       const createdById = await resolveForeignKey(client, 'users', 'id', 'email', input.createdById)
       const row = await queryOne<JobRow>(client,
@@ -349,7 +378,7 @@ export class NormalizedRecruitingRepository {
       const assignments: string[] = []
       const values: unknown[] = []
       const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
-      if (input.departmentId !== undefined) add('department_id', await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId), '::uuid')
+      if (input.departmentId !== undefined) add('department_id', await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId, this.organizationId), '::uuid')
       if (input.title !== undefined) add('title', required(input.title, 'title'))
       if (input.status !== undefined) add('status', input.status)
       if (input.headcount !== undefined) add('headcount', input.headcount)
@@ -772,68 +801,14 @@ export class NormalizedRecruitingRepository {
       }
 
       if (action === 'submit' || action === 'resubmit') {
-        if (current.status !== 'draft' && current.status !== 'rejected') {
+        if (!['draft', 'rejected', 'pending_approval'].includes(current.status)) {
           throw new RepositoryValidationError(`Recruitment request status ${current.status} cannot be submitted`)
         }
-        const instanceId = randomUUID()
-        const stepId = randomUUID()
-        const organizationValues = this.organizationId ? [this.organizationId] : []
-        const instanceIndex = organizationValues.length + 1
-        const requestIndex = instanceIndex + 1
-        const actorIndex = requestIndex + 1
-        const organizationColumn = this.organizationId ? 'organization_id, ' : ''
-        const organizationValue = this.organizationId ? '$1::uuid, ' : ''
-        const instanceValues = [...organizationValues, instanceId, requestId, isUuid(actorId) ? actorId : null]
-        const instanceOrganization = this.organizationId ? ' AND organization_id = $1::uuid' : ''
-        await client.query(
-          `INSERT INTO approval_instances (${organizationColumn}id, subject_type, subject_id, version, status, current_step, created_by, updated_at)
-           SELECT ${organizationValue}$${instanceIndex}::uuid, 'recruitment_request', $${requestIndex}::uuid,
-                  COALESCE(MAX(version), 0) + 1, 'pending', 1, $${actorIndex}::uuid, now()
-           FROM approval_instances
-           WHERE subject_type = 'recruitment_request' AND subject_id = $${requestIndex}::uuid${instanceOrganization}`,
-          instanceValues,
-        )
-        const stepValues = [...organizationValues, stepId, instanceId]
-        const stepInstanceIndex = organizationValues.length + 2
-        await client.query(
-          `INSERT INTO approval_steps (${organizationColumn}id, approval_instance_id, step_no, approver_role_code, status)
-           VALUES (${organizationValue}$${organizationValues.length + 1}::uuid, $${stepInstanceIndex}::uuid, 1, 'approver', 'pending')`,
-          stepValues,
-        )
-        return updateRequest('pending_approval')
+        return updateRequest('approved')
       }
 
       if (action === 'approve' || action === 'reject') {
-        if (current.status !== 'pending_approval') {
-          throw new RepositoryValidationError(`Recruitment request status ${current.status} cannot be approved`)
-        }
-        const instanceValues: unknown[] = [requestId]
-        const instanceOrganization = this.organizationId ? ` AND organization_id = $${instanceValues.push(this.organizationId)}::uuid` : ''
-        const instance = await queryOne<{ id: string; status: string }>(client,
-          `SELECT id, status FROM approval_instances
-           WHERE subject_type = 'recruitment_request' AND subject_id = $1::uuid AND status = 'pending'${instanceOrganization}
-           ORDER BY version DESC, created_at DESC LIMIT 1 FOR UPDATE`, instanceValues)
-        const stepValues: unknown[] = [instance.id]
-        const stepOrganization = this.organizationId ? ` AND organization_id = $${stepValues.push(this.organizationId)}::uuid` : ''
-        const step = await queryOne<{ id: string; status: string }>(client,
-          `SELECT id, status FROM approval_steps
-           WHERE approval_instance_id = $1::uuid AND status = 'pending'${stepOrganization}
-           ORDER BY step_no LIMIT 1 FOR UPDATE`, stepValues)
-        const decision = action === 'approve' ? 'approved' : 'rejected'
-        const recordValues: unknown[] = [randomUUID(), instance.id, step.id, isUuid(actorId) ? actorId : null, decision, normalizedReason]
-        if (this.organizationId) recordValues.push(this.organizationId)
-        await client.query(
-          `INSERT INTO approval_records (${this.organizationId ? 'organization_id, ' : ''}id, approval_instance_id, approval_step_id, actor_user_id, decision, comment)
-           VALUES (${this.organizationId ? '$7::uuid, ' : ''}$1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)`,
-          recordValues,
-        )
-        const stepUpdateValues: unknown[] = [step.id, decision]
-        const stepUpdateOrganization = this.organizationId ? ` AND organization_id = $${stepUpdateValues.push(this.organizationId)}::uuid` : ''
-        await client.query(`UPDATE approval_steps SET status = $2, acted_at = now() WHERE id = $1::uuid${stepUpdateOrganization}`, stepUpdateValues)
-        const instanceUpdateValues: unknown[] = [instance.id, decision]
-        const instanceUpdateOrganization = this.organizationId ? ` AND organization_id = $${instanceUpdateValues.push(this.organizationId)}::uuid` : ''
-        await client.query(`UPDATE approval_instances SET status = $2, completed_at = now(), updated_at = now() WHERE id = $1::uuid${instanceUpdateOrganization}`, instanceUpdateValues)
-        return updateRequest(decision)
+        throw new RepositoryValidationError('RECRUITMENT_APPROVAL_DISABLED')
       }
 
       if (action === 'withdraw' || action === 'cancel') {
@@ -842,22 +817,6 @@ export class NormalizedRecruitingRepository {
           : ['draft', 'pending_approval', 'rejected']
         if (!allowed.includes(current.status)) {
           throw new RepositoryValidationError(`Recruitment request status ${current.status} cannot be ${action}ed`)
-        }
-        if (current.status === 'pending_approval') {
-          const instanceValues: unknown[] = [requestId]
-          const instanceOrganization = this.organizationId ? ` AND organization_id = $${instanceValues.push(this.organizationId)}::uuid` : ''
-          const instanceResult = await client.query<{ id: string }>(
-            `SELECT id FROM approval_instances
-             WHERE subject_type = 'recruitment_request' AND subject_id = $1::uuid AND status = 'pending'${instanceOrganization}
-             ORDER BY version DESC, created_at DESC LIMIT 1 FOR UPDATE`, instanceValues)
-          const instance = instanceResult.rows[0]
-          if (!instance) throw new RepositoryValidationError('当前需求无可撤销的审批实例')
-          const stepValues: unknown[] = [instance.id]
-          const stepOrganization = this.organizationId ? ` AND organization_id = $${stepValues.push(this.organizationId)}::uuid` : ''
-          await client.query(`UPDATE approval_steps SET status = 'cancelled', acted_at = now() WHERE approval_instance_id = $1::uuid AND status = 'pending'${stepOrganization}`, stepValues)
-          const instanceUpdateValues: unknown[] = [instance.id]
-          const instanceUpdateOrganization = this.organizationId ? ` AND organization_id = $${instanceUpdateValues.push(this.organizationId)}::uuid` : ''
-          await client.query(`UPDATE approval_instances SET status = 'cancelled', completed_at = now(), updated_at = now() WHERE id = $1::uuid${instanceUpdateOrganization}`, instanceUpdateValues)
         }
         return updateRequest(action === 'withdraw' ? 'withdrawn' : 'cancelled')
       }
@@ -1039,7 +998,7 @@ export class NormalizedRecruitingRepository {
        FROM interviews i JOIN applications a ON a.id = i.application_id AND a.organization_id = i.organization_id
        LEFT JOIN LATERAL (
          SELECT e.metadata FROM workflow_events e
-         WHERE e.subject_type = 'interview' AND e.subject_id = i.id AND e.organization_id = i.organization_id AND e.event_type = 'conclude'
+         WHERE e.subject_type = 'interview' AND e.subject_id = i.id AND e.organization_id = i.organization_id AND e.event_type IN ('conclude','correct_conclusion')
          ORDER BY e.created_at DESC, e.id DESC LIMIT 1
        ) conclusion ON true
        LEFT JOIN LATERAL (
@@ -1066,12 +1025,16 @@ export class NormalizedRecruitingRepository {
   async createInterview(input: InterviewCreateInput): Promise<InterviewDbRecord> {
     return this.transaction(async (client) => {
       const applicationId = await resolveRequiredForeignKey(client, 'applications', 'id', 'application_no', input.applicationId, 'applicationId', this.organizationId)
+      await client.query('SELECT id FROM applications WHERE id = $1::uuid FOR UPDATE', [applicationId])
       const participants = await Promise.all((input.participants ?? []).map(async (participant) => ({
         ...participant,
         userId: await resolveActorId(client, participant.userId, { required: true, allowDisplayName: true, organizationId: this.organizationId }) as string,
       })))
       const interviewNo = businessNumber('INT', 'int', input.businessId ?? input.id, this.generateBusinessId)
       const round = input.round ?? await this.nextInterviewRound(client, applicationId)
+      if (!Number.isInteger(round) || round < 1 || round > 2) throw new RepositoryValidationError('系统仅支持初试和复试两轮面试')
+      const existingRounds = await client.query<{ round: number }>('SELECT round FROM interviews WHERE application_id = $1::uuid FOR UPDATE', [applicationId])
+      if (existingRounds.rows.some((item) => Number(item.round) === round)) throw new RepositoryValidationError(`${round === 1 ? '初试' : '复试'}已经存在，不能重复创建`)
       // 阶段跟着轮次走：第 1 轮=初试，第 2 轮及以后=复试（与迁移 0021 的口径一致，面试问题表按阶段归属）。
       const stage = round >= 2 ? 'final' : 'initial'
       const row = await queryOne<InterviewRow>(client,
@@ -1135,8 +1098,8 @@ export class NormalizedRecruitingRepository {
     })
   }
 
-  async concludeInterview(idOrBusinessId: string, outcome: 'continue' | 'offer' | 'reject', actorId: string, directCompletion = false): Promise<InterviewDbRecord> {
-    if (!['continue', 'offer', 'reject'].includes(outcome)) throw new RepositoryValidationError('无效的面试结论')
+  async concludeInterview(idOrBusinessId: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled', actorId: string, directCompletion = false): Promise<InterviewDbRecord> {
+    if (!['continue', 'offer', 'reject', 'cancelled'].includes(outcome)) throw new RepositoryValidationError('无效的面试结论')
     return this.transaction(async (client) => {
       const id = await resolveEntityId(client, 'interviews', 'interview_no', 'INT', 'int', idOrBusinessId, this.organizationId)
       const initial = await this.getInterviewWithExecutor(client, id)
@@ -1145,10 +1108,13 @@ export class NormalizedRecruitingRepository {
         'SELECT status, organization_id FROM applications WHERE id = $1::uuid FOR UPDATE', [initial.applicationId])
       await client.query('SELECT id FROM interviews WHERE id = $1::uuid FOR UPDATE', [initial.id])
       const interview = await this.getInterviewWithExecutor(client, initial.id)
-      if (directCompletion) validateDirectInterviewOutcome(interview, outcome)
-      if (interview.status === 'cancelled') throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认结论', 409)
+      validateInterviewOutcome(interview, outcome)
       const previous = (await client.query<{ metadata: { outcome?: string } }>(
         "SELECT metadata FROM workflow_events WHERE subject_type = 'interview' AND subject_id = $1::uuid AND event_type = 'conclude' ORDER BY created_at DESC LIMIT 1", [interview.id])).rows[0]
+      if (interview.status === 'cancelled') {
+        if (previous?.metadata.outcome === 'cancelled' && outcome === 'cancelled') return interview
+        throw new RecruitingWorkflowError('INTERVIEW_CANCELLED', '已取消的面试不能确认其他结论', 409)
+      }
       if (previous && previous.metadata.outcome !== outcome) throw new RecruitingWorkflowError('INTERVIEW_ALREADY_CONCLUDED', '该面试已确认其他结论，请在当前面试阶段继续处理', 409)
       const advance = (interview.stage === 'initial' || (!interview.stage && interview.round === 1)) && outcome === 'continue'
       const completingFinalOffer = application.status === 'offer_approval' && outcome === 'offer' && (interview.stage === 'final' || interview.round >= 2)
@@ -1162,13 +1128,94 @@ export class NormalizedRecruitingRepository {
         'SELECT interviewer_id, status FROM interview_feedback WHERE interview_id = $1::uuid FOR UPDATE', [interview.id])).rows
       const missingRequired = interview.participants.some(person => person.required && (person.role ?? 'interviewer') === 'interviewer'
         && !feedback.some(item => item.interviewer_id === person.userId && item.status === 'locked'))
-      if (!directCompletion && (!feedback.length || feedback.some(item => item.status !== 'locked') || missingRequired)) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试官反馈锁定后才能完成面试')
+      if (!directCompletion && outcome !== 'cancelled' && (!feedback.length || feedback.some(item => item.status !== 'locked') || missingRequired)) throw new RecruitingWorkflowError('INTERVIEW_FEEDBACK_INCOMPLETE', '所有面试官反馈锁定后才能完成面试')
       if (advance) await recordStageDecisionWithExecutor(client, interview.applicationId, 'initial', 'advanced', actor)
-      else if (directCompletion) await recordStageDecisionWithExecutor(client, interview.applicationId, interview.round >= 2 ? 'final' : 'initial', outcome === 'offer' ? 'hired' : 'rejected', actor)
-      await client.query("UPDATE interviews SET status = 'completed', updated_at = now() WHERE id = $1::uuid", [interview.id])
+      else if (directCompletion && outcome !== 'cancelled') await recordStageDecisionWithExecutor(client, interview.applicationId, interview.round >= 2 ? 'final' : 'initial', outcome === 'offer' ? 'hired' : 'rejected', actor)
+      const nextInterviewStatus = outcome === 'cancelled' ? 'cancelled' : 'completed'
+      await client.query('UPDATE interviews SET status = $2, updated_at = now() WHERE id = $1::uuid', [interview.id, nextInterviewStatus])
+      // 面试一旦有了结论，仍处于 active/paused 的实时会话必须在同一事务内关闭。
+      // 否则已完成（或已取消）的面试会残留"可续写"的会话：转写与摘要因会话未结束而
+      // 永不生成，旧页面还能继续往已完成面试里追加发言。completed 会触发后处理队列，
+      // 已取消的面试则标记为 failed，避免为取消的面试白白消耗 AI 摘要额度。
+      await client.query(
+        "UPDATE interview_live_sessions SET status = CASE WHEN $2 = 'completed' THEN 'completed' ELSE 'failed' END, ended_at = COALESCE(ended_at, now()), updated_at = now() WHERE interview_id = $1::uuid AND status IN ('active','paused')",
+        [interview.id, nextInterviewStatus])
       const nextStatus = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
       await client.query('UPDATE applications SET status = $2, rejected_reason = CASE WHEN $2 = \'rejected\' THEN \'面试未通过\' ELSE rejected_reason END, updated_at = now() WHERE id = $1::uuid', [interview.applicationId, nextStatus])
-      await this.appendWorkflowEventWithExecutor(client, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus: interview.status, toStatus: 'completed', actorId: actor, metadata: { outcome, ...(directCompletion ? { completionMode: 'direct' } : {}) } })
+      await this.appendWorkflowEventWithExecutor(client, { subjectType: 'interview', subjectId: interview.id, action: 'conclude', fromStatus: interview.status, toStatus: nextInterviewStatus, actorId: actor, metadata: { outcome, ...(directCompletion ? { completionMode: 'direct' } : {}) } })
+      return this.getInterviewWithExecutor(client, interview.id)
+    })
+  }
+
+  async correctInterviewConclusion(idOrBusinessId: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled', reason: string, actorId: string): Promise<InterviewDbRecord> {
+    const correctionReason = required(reason, '更正原因').trim()
+    if (!correctionReason) throw new RepositoryValidationError('更正原因不能为空')
+    if (correctionReason.length > 1000) throw new RepositoryValidationError('更正原因不能超过 1000 个字符')
+    if (!['continue', 'offer', 'reject', 'cancelled'].includes(outcome)) throw new RepositoryValidationError('无效的面试结论')
+    return this.transaction(async (client) => {
+      const id = await resolveEntityId(client, 'interviews', 'interview_no', 'INT', 'int', idOrBusinessId, this.organizationId)
+      const initial = await this.getInterviewWithExecutor(client, id)
+      const application = await queryOne<{ status: string; organization_id: string }>(client,
+        'SELECT status, organization_id FROM applications WHERE id = $1::uuid FOR UPDATE', [initial.applicationId])
+      await client.query('SELECT id FROM interviews WHERE id = $1::uuid FOR UPDATE', [initial.id])
+      const interview = await this.getInterviewWithExecutor(client, initial.id)
+      validateInterviewOutcome(interview, outcome)
+      const previous = (await client.query<{ metadata: { outcome?: string } }>(
+        "SELECT metadata FROM workflow_events WHERE subject_type = 'interview' AND subject_id = $1::uuid AND organization_id = $2::uuid AND event_type IN ('conclude','correct_conclusion') ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+        [interview.id, application.organization_id])).rows[0]
+      const previousOutcome = previous?.metadata.outcome
+      if (!previousOutcome || !['continue', 'offer', 'reject', 'cancelled'].includes(previousOutcome)) {
+        throw new RecruitingWorkflowError('INTERVIEW_NOT_CONCLUDED', '该面试尚无可更正的结论', 409)
+      }
+      if (previousOutcome === outcome) throw new RecruitingWorkflowError('INTERVIEW_CONCLUSION_UNCHANGED', '新结论与当前结论相同', 400)
+
+      const stage = interview.stage === 'final' || interview.round >= 2 ? 'final' : 'initial'
+      const downstream = await client.query<{ id: string }>(
+        `SELECT i.id FROM interviews i WHERE i.application_id = $1::uuid AND i.organization_id = $2::uuid AND i.round > $3
+          AND (i.status = 'completed' OR EXISTS (SELECT 1 FROM interview_feedback f WHERE f.interview_id = i.id)
+            OR EXISTS (SELECT 1 FROM interview_live_sessions s WHERE s.interview_id = i.id AND s.status IN ('active','completed')))
+          LIMIT 1 FOR UPDATE`,
+        [interview.applicationId, application.organization_id, interview.round])
+      const offerOrOnboarding = await client.query<{ id: string }>(
+        `SELECT id FROM offers WHERE application_id = $1::uuid AND organization_id = $2::uuid
+         UNION ALL SELECT id FROM onboarding_records WHERE application_id = $1::uuid AND organization_id = $2::uuid LIMIT 1`,
+        [interview.applicationId, application.organization_id])
+      if (downstream.rows.length || offerOrOnboarding.rows.length) {
+        throw new RecruitingWorkflowError('INTERVIEW_CONCLUSION_HAS_DOWNSTREAM', '后续面试、Offer 或入职流程已建立，不能直接更正；请先处理后续流程记录', 409)
+      }
+
+      const actor = await resolveActorId(client, actorId, { required: true, organizationId: application.organization_id }) as string
+      const decision = outcome === 'continue' ? 'advanced' : outcome === 'offer' ? 'hired' : outcome === 'reject' ? 'rejected' : null
+      if (stage === 'initial' && previousOutcome === 'continue' && outcome !== 'continue') {
+        await client.query(
+          `UPDATE interviews i SET status = 'cancelled', updated_at = now() WHERE i.application_id = $1::uuid AND i.organization_id = $2::uuid AND i.round > $3 AND i.status = 'scheduled'
+            AND EXISTS (SELECT 1 FROM workflow_events e WHERE e.subject_type = 'application' AND e.subject_id = i.application_id
+              AND e.event_type = 'advance_to_final_interview' AND e.metadata->>'interviewId' = i.id::text AND e.organization_id = i.organization_id)`,
+          [interview.applicationId, application.organization_id, interview.round])
+      }
+      if (stage === 'initial' && previousOutcome !== 'continue' && outcome === 'continue') {
+        await client.query(
+          `UPDATE interviews i SET status = 'scheduled', updated_at = now() WHERE i.application_id = $1::uuid AND i.organization_id = $2::uuid AND i.stage = 'final' AND i.status = 'cancelled'
+            AND EXISTS (SELECT 1 FROM workflow_events e WHERE e.subject_type = 'application' AND e.subject_id = i.application_id
+              AND e.event_type = 'advance_to_final_interview' AND e.metadata->>'interviewId' = i.id::text AND e.organization_id = i.organization_id)`,
+          [interview.applicationId, application.organization_id])
+      }
+      if (decision) await recordStageDecisionWithExecutor(client, interview.applicationId, stage, decision, actor, true)
+      else await client.query(
+        'UPDATE interview_stage_reviews SET decision = NULL, decided_by = NULL, decided_at = NULL, updated_at = now() WHERE application_id = $1::uuid AND stage = $2',
+        [interview.applicationId, stage])
+
+      const nextInterviewStatus = outcome === 'cancelled' ? 'cancelled' : 'completed'
+      await client.query('UPDATE interviews SET status = $2, updated_at = now() WHERE id = $1::uuid', [interview.id, nextInterviewStatus])
+      const nextApplicationStatus = outcome === 'offer' ? 'offer_approval' : outcome === 'reject' ? 'rejected' : 'interviewing'
+      await client.query(
+        `UPDATE applications SET status = $2, rejected_reason = CASE WHEN $2 = 'rejected' THEN '面试未通过' ELSE NULL END, updated_at = now() WHERE id = $1::uuid`,
+        [interview.applicationId, nextApplicationStatus])
+      await this.appendWorkflowEventWithExecutor(client, {
+        subjectType: 'interview', subjectId: interview.id, action: 'correct_conclusion',
+        fromStatus: previousOutcome, toStatus: outcome, actorId: actor, reason: correctionReason,
+        metadata: { previousOutcome, outcome, applicationStatusBefore: application.status, applicationStatusAfter: nextApplicationStatus },
+      })
       return this.getInterviewWithExecutor(client, interview.id)
     })
   }
@@ -1339,6 +1386,62 @@ export class NormalizedRecruitingRepository {
     })
   }
 
+  async transitionOffer(id: string, input: OfferTransitionInput): Promise<OfferTransitionResult> {
+    return this.transaction(async (client) => {
+      const offerId = required(id, 'offer id')
+      if (!isUuid(offerId)) throw new RepositoryValidationError('offer transitions require the database uuid')
+
+      const initial = await this.getOfferWithExecutor(client, offerId)
+      const applicationValues: unknown[] = [initial.applicationId]
+      const applicationScope = this.organizationId ? ` AND organization_id = $${applicationValues.push(this.organizationId)}::uuid` : ''
+      await client.query(`SELECT id FROM applications WHERE id = $1::uuid${applicationScope} FOR UPDATE`, applicationValues)
+
+      const offerValues: unknown[] = [offerId]
+      const offerWhere = this.offerWhere(offerValues, [`o.id = $1::uuid`])
+      await client.query(`SELECT o.id FROM offers o ${offerWhere} FOR UPDATE`, offerValues)
+
+      const offer = await this.getOfferWithExecutor(client, offerId)
+      if (offer.status !== input.fromStatus) {
+        throw new RecruitingWorkflowError('OFFER_INVALID_TRANSITION', `Offer 状态已变更为 ${offer.status}，请刷新后重试`)
+      }
+      const application = await this.getApplicationWithExecutor(client, offer.applicationId)
+      if (!offer.currentVersionId) throw new RecruitingWorkflowError('OFFER_VERSION_REQUIRED', 'Offer 缺少当前版本，无法变更状态')
+
+      const versionValues: unknown[] = [offer.currentVersionId, offer.id]
+      const versionScope = this.organizationId ? ` AND organization_id = $${versionValues.push(this.organizationId)}::uuid` : ''
+      const version = await client.query(`SELECT id FROM offer_versions WHERE id = $1::uuid AND offer_id = $2::uuid${versionScope}`, versionValues)
+      if (!version.rows[0]) throw new RecruitingWorkflowError('OFFER_VERSION_NOT_FOUND', 'Offer 当前版本不属于该 Offer，无法变更状态')
+
+      const sentAtSql = input.action === 'send' || input.action === 'resend' || input.action === 'resend_cancelled' ? 'sent_at = COALESCE(sent_at, now()),' : ''
+      const respondedAtSql = input.action === 'accept' || input.action === 'decline' ? 'responded_at = now(),' : ''
+      const expiresAtSql = input.action === 'expire' ? 'expires_at = COALESCE(expires_at, now()),' : ''
+      const updatedOffer = await queryOne<OfferRow>(client,
+        `UPDATE offers
+         SET status = $1, ${sentAtSql}${respondedAtSql}${expiresAtSql} version = version + 1, updated_at = now()
+         WHERE id = $2::uuid
+         RETURNING ${OFFER_COLUMNS}`,
+        [input.toStatus, offer.id])
+
+      const updatedApplication = await queryOne<ApplicationRow>(client,
+        `UPDATE applications SET status = $1, updated_at = now() WHERE id = $2::uuid RETURNING ${APPLICATION_COLUMNS}`,
+        [input.applicationStatus, offer.applicationId])
+
+      await this.appendWorkflowEventWithExecutor(client, {
+        subjectType: 'offer', subjectId: offer.id, action: input.action,
+        fromStatus: input.fromStatus, toStatus: input.toStatus, actorId: input.actorId,
+        ...(input.reason ? { reason: input.reason } : {}),
+        metadata: { applicationId: offer.applicationId, fromApplicationStatus: application.status },
+      })
+      await this.appendWorkflowEventWithExecutor(client, {
+        subjectType: 'application', subjectId: offer.applicationId, action: 'status_changed',
+        fromStatus: application.status, toStatus: input.applicationStatus, actorId: input.actorId,
+        metadata: { offerId: offer.id, offerAction: input.action },
+      })
+
+      return { offer: mapOffer(updatedOffer), application: mapApplication(updatedApplication) }
+    })
+  }
+
   async listOfferVersions(offerId?: string): Promise<OfferVersionDbRecord[]> {
     const values: string[] = []
     const conditions = text(offerId) ? [`v.offer_id = $${values.push(required(offerId, 'offerId'))}::uuid`] : []
@@ -1355,17 +1458,74 @@ export class NormalizedRecruitingRepository {
         await this.getOfferWithExecutor(client, offerId)
         await client.query('SELECT id FROM offers WHERE id=$1::uuid AND organization_id=$2::uuid FOR UPDATE', [offerId, this.organizationId])
       }
-      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId)
+      const departmentId = await resolveForeignKey(client, 'departments', 'id', 'code', input.departmentId, this.organizationId)
       const version = input.version ?? await nextVersionFor(client, 'offer_versions', 'offer_id', offerId)
       const row = await queryOne<OfferVersionRow>(client,
-        `INSERT INTO offer_versions (id, offer_id, version, position_title, department_id, employment_type, start_date, compensation, benefits, content${this.organizationId ? ', organization_id' : ''})
-         VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6, $7::date, $8::jsonb, $9::jsonb, $10${this.organizationId ? ', $11::uuid' : ''})
+        `INSERT INTO offer_versions (id, offer_id, version, position_title, department_id, employment_type, start_date, reporting_location, invoice_title, tax_number, compensation, benefits, materials, content, template_fields${this.organizationId ? ', organization_id' : ''})
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6, $7::date, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15::jsonb${this.organizationId ? ', $16::uuid' : ''})
          RETURNING ${OFFER_VERSION_RETURNING}`,
         [uuidOrGenerated(input.id), offerId, version, required(input.positionTitle, 'positionTitle'), departmentId,
-         required(input.employmentType, 'employmentType'), input.startDate ?? null, JSON.stringify(input.compensation ?? {}),
-         JSON.stringify(input.benefits ?? []), input.content ?? '', ...(this.organizationId ? [this.organizationId] : [])])
+         required(input.employmentType, 'employmentType'), input.startDate ?? null, input.reportingLocation ?? null, input.invoiceTitle ?? null, input.taxNumber ?? null, JSON.stringify(input.compensation ?? {}),
+         JSON.stringify(input.benefits ?? []), JSON.stringify(input.materials ?? []), input.content ?? '', JSON.stringify(input.templateFields ?? {}), ...(this.organizationId ? [this.organizationId] : [])])
       return mapOfferVersion(row)
     })
+  }
+
+  // ===== Offer Markdown 模板 =====
+  async listOfferTemplates(): Promise<OfferTemplateDbRecord[]> {
+    const values: unknown[] = []
+    const where = this.offerTemplateWhere(values)
+    const result = await this.pool.query<OfferTemplateRow>(`${OFFER_TEMPLATE_SELECT} ${where} ORDER BY t.is_default DESC, t.is_active DESC, t.updated_at DESC, t.id`, values)
+    return result.rows.map(mapOfferTemplate)
+  }
+
+  async createOfferTemplate(input: OfferTemplateCreateInput): Promise<OfferTemplateDbRecord> {
+    if (!this.organizationId) throw new RepositoryValidationError('Offer templates require an organization')
+    return this.transaction(async (client) => {
+      const isDefault = input.isDefault === true
+      const isActive = input.isActive !== false
+      if (isDefault && !isActive) throw new RepositoryValidationError('A default offer template must be active')
+      if (isDefault) await client.query('UPDATE offer_templates SET is_default = false WHERE organization_id = $1::uuid AND is_default = true', [this.organizationId])
+      const row = await queryOne<OfferTemplateRow>(client,
+        `INSERT INTO offer_templates (id, organization_id, name, filename, content, is_active, is_default, created_by)
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::uuid)
+         RETURNING ${OFFER_TEMPLATE_COLUMNS}`,
+        [uuidOrGenerated(input.id), this.organizationId, required(input.name, 'name'), required(input.filename, 'filename'), input.content ?? '', isActive, isDefault, input.createdById ?? null])
+      return mapOfferTemplate(row)
+    })
+  }
+
+  async updateOfferTemplate(id: string, input: OfferTemplateUpdateInput): Promise<OfferTemplateDbRecord> {
+    if (!this.organizationId) throw new RepositoryValidationError('Offer templates require an organization')
+    return this.transaction(async (client) => {
+      const templateId = required(id, 'offer template id')
+      const current = await this.getOfferTemplateWithExecutor(client, templateId)
+      const nextActive = input.isActive ?? current.isActive
+      const nextDefault = input.isDefault ?? current.isDefault
+      if (input.isDefault === true && !nextActive) throw new RepositoryValidationError('A default offer template must be active')
+      if (input.isDefault === true) await client.query('UPDATE offer_templates SET is_default = false WHERE organization_id = $1::uuid AND id <> $2::uuid AND is_default = true', [this.organizationId, templateId])
+      const assignments: string[] = []
+      const values: unknown[] = []
+      const add = (column: string, value: unknown) => { assignments.push(`${column} = $${values.push(value)}`) }
+      if (input.name !== undefined) add('name', required(input.name, 'name'))
+      if (input.filename !== undefined) add('filename', required(input.filename, 'filename'))
+      if (input.content !== undefined) add('content', input.content)
+      if (input.isActive !== undefined) add('is_active', input.isActive)
+      if (input.isDefault !== undefined || (current.isDefault && input.isActive === false)) add('is_default', nextActive ? nextDefault : false)
+      if (!assignments.length) return current
+      values.push(templateId)
+      const where = this.offerTemplateWhere(values, [`t.id = $${values.length}::uuid`])
+      const row = await queryOne<OfferTemplateRow>(client, `UPDATE offer_templates SET ${assignments.join(', ')} WHERE id IN (SELECT t.id FROM offer_templates t ${where}) RETURNING ${OFFER_TEMPLATE_COLUMNS}`, values)
+      return mapOfferTemplate(row)
+    })
+  }
+
+  async deleteOfferTemplate(id: string): Promise<void> {
+    if (!this.organizationId) throw new RepositoryValidationError('Offer templates require an organization')
+    const values: unknown[] = [required(id, 'offer template id')]
+    const where = this.offerTemplateWhere(values, ['t.id = $1::uuid'])
+    const result = await this.pool.query(`DELETE FROM offer_templates WHERE id IN (SELECT t.id FROM offer_templates t ${where})`, values)
+    if ((result as { rowCount?: number }).rowCount === 0) throw new RepositoryNotFoundError(`Offer template not found: ${id}`)
   }
 
   // ===== 入职归档 =====
@@ -1411,12 +1571,24 @@ export class NormalizedRecruitingRepository {
         if (offer.applicationId !== applicationId) throw new RepositoryValidationError('Offer and onboarding application must match')
       }
       const row = await queryOne<OnboardingRow>(client,
-        `INSERT INTO onboarding_records (id, application_id, offer_id, planned_start_date, status, notes${this.organizationId ? ', organization_id' : ''})
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6${this.organizationId ? ', $7::uuid' : ''})
+        `INSERT INTO onboarding_records (
+           id, application_id, offer_id, planned_start_date, planned_start_time,
+           reporting_mode, reporting_location, reporting_contact_name, reporting_contact_phone,
+           hr_owner_name, hiring_manager_name, work_city, office_location, risk_notes, status, notes
+           ${this.organizationId ? ', organization_id' : ''}
+         ) VALUES (
+           $1::uuid, $2::uuid, $3::uuid, $4::date, $5::time,
+           $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+           ${this.organizationId ? ', $17::uuid' : ''}
+         )
          ON CONFLICT (offer_id) DO UPDATE SET offer_id = EXCLUDED.offer_id
          ${this.organizationId ? 'WHERE onboarding_records.organization_id = EXCLUDED.organization_id AND onboarding_records.application_id = EXCLUDED.application_id' : ''}
          RETURNING ${ONBOARDING_COLUMNS}`,
-        [uuidOrGenerated(input.id), applicationId, offerId, input.plannedStartDate ?? null, input.status ?? 'pending', input.notes ?? null, ...(this.organizationId ? [this.organizationId] : [])])
+        [uuidOrGenerated(input.id), applicationId, offerId, input.plannedStartDate ?? null, input.plannedStartTime ?? null,
+          input.reportingMode ?? null, input.reportingLocation ?? null, input.reportingContactName ?? null, input.reportingContactPhone ?? null,
+          input.hrOwnerName ?? null, input.hiringManagerName ?? null, input.workCity ?? null, input.officeLocation ?? null,
+          input.riskNotes ?? null, input.status ?? 'pending', input.notes ?? null,
+          ...(this.organizationId ? [this.organizationId] : [])])
       return mapOnboarding(row)
     })
   }
@@ -1427,6 +1599,23 @@ export class NormalizedRecruitingRepository {
       const values: unknown[] = []
       const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
       if (input.plannedStartDate !== undefined) add('planned_start_date', input.plannedStartDate, '::date')
+      if (input.plannedStartTime !== undefined) add('planned_start_time', input.plannedStartTime, '::time')
+      if (input.reportingMode !== undefined) add('reporting_mode', input.reportingMode)
+      if (input.reportingLocation !== undefined) add('reporting_location', input.reportingLocation)
+      if (input.reportingContactName !== undefined) add('reporting_contact_name', input.reportingContactName)
+      if (input.reportingContactPhone !== undefined) add('reporting_contact_phone', input.reportingContactPhone)
+      if (input.hrOwnerName !== undefined) add('hr_owner_name', input.hrOwnerName)
+      if (input.hiringManagerName !== undefined) add('hiring_manager_name', input.hiringManagerName)
+      if (input.workCity !== undefined) add('work_city', input.workCity)
+      if (input.officeLocation !== undefined) add('office_location', input.officeLocation)
+      if (input.riskNotes !== undefined) add('risk_notes', input.riskNotes)
+      if (input.cancellationReasonCode !== undefined) add('cancellation_reason_code', input.cancellationReasonCode)
+      if (input.cancellationNotes !== undefined) add('cancellation_notes', input.cancellationNotes)
+      if (input.cancelledAt !== undefined) add('cancelled_at', input.cancelledAt, '::timestamptz')
+      if (input.noShowReasonCode !== undefined) add('no_show_reason_code', input.noShowReasonCode)
+      if (input.noShowNotes !== undefined) add('no_show_notes', input.noShowNotes)
+      if (input.noShowAt !== undefined) add('no_show_at', input.noShowAt, '::timestamptz')
+      if (input.actualArrivalAt !== undefined) add('actual_arrival_at', input.actualArrivalAt, '::timestamptz')
       if (input.status !== undefined) add('status', input.status)
       if (input.notes !== undefined) add('notes', input.notes)
       if (input.archivedAt !== undefined) add('archived_at', input.archivedAt, '::timestamptz')
@@ -1437,6 +1626,158 @@ export class NormalizedRecruitingRepository {
       const row = await queryOne<OnboardingRow>(client, `UPDATE onboarding_records SET ${assignments.join(', ')} WHERE id IN (SELECT r.id FROM onboarding_records r LEFT JOIN applications a ON a.id=r.application_id ${where}) RETURNING ${ONBOARDING_COLUMNS}`, values)
       return mapOnboarding(row)
     })
+  }
+
+  async listOnboardingTasks(onboardingId?: string): Promise<OnboardingTaskDbRecord[]> {
+    const values: unknown[] = []
+    const conditions: string[] = []
+    if (onboardingId !== undefined) conditions.push(`t.onboarding_id = $${values.push(required(onboardingId, 'onboarding id'))}::uuid`)
+    const where = this.onboardingTaskWhere(values, conditions)
+    const result = await this.pool.query<OnboardingTaskRow>(`${ONBOARDING_TASK_SELECT} ${where} ORDER BY t.category, t.created_at`, values)
+    return result.rows.map(mapOnboardingTask)
+  }
+
+  async createOnboardingTask(input: OnboardingTaskCreateInput): Promise<OnboardingTaskDbRecord> {
+    const values: unknown[] = [uuidOrGenerated(input.id), required(input.onboardingId, 'onboarding id'), required(input.title, '任务标题'), input.category, input.status ?? 'pending', input.isRequired !== false, input.ownerRole ?? null, input.templateKey ?? null, input.ownerName ?? null, input.dueDate ?? null, input.notes ?? null]
+    const organizationFilter = this.organizationId ? ' AND r.organization_id = $12::uuid' : ''
+    if (this.organizationId) values.push(this.organizationId)
+    const row = await queryOne<OnboardingTaskRow>(this.pool, `INSERT INTO onboarding_tasks (id, organization_id, onboarding_id, title, category, status, is_required, owner_role, template_key, owner_name, due_date, notes)
+      SELECT $1::uuid, r.organization_id, r.id, $3, $4, $5, $6, $7, $8, $9, $10::date, $11 FROM onboarding_records r WHERE r.id = $2::uuid${organizationFilter}
+      ON CONFLICT (onboarding_id, template_key) WHERE template_key IS NOT NULL DO UPDATE SET updated_at = onboarding_tasks.updated_at
+      RETURNING ${ONBOARDING_TASK_RETURNING}`, values)
+    return mapOnboardingTask(row)
+  }
+
+  async updateOnboardingTask(onboardingId: string, taskId: string, input: OnboardingTaskUpdateInput): Promise<OnboardingTaskDbRecord> {
+    const assignments: string[] = []
+    const values: unknown[] = []
+    const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
+    if (input.title !== undefined) add('title', input.title)
+    if (input.category !== undefined) add('category', input.category)
+    if (input.status !== undefined) add('status', input.status)
+    if (input.isRequired !== undefined) add('is_required', input.isRequired)
+    if (input.ownerRole !== undefined) add('owner_role', input.ownerRole)
+    if (input.templateKey !== undefined) add('template_key', input.templateKey)
+    if (input.ownerName !== undefined) add('owner_name', input.ownerName)
+    if (input.dueDate !== undefined) add('due_date', input.dueDate, '::date')
+    if (input.notes !== undefined) add('notes', input.notes)
+    if (input.blockedReason !== undefined) add('blocked_reason', input.blockedReason)
+    if (input.completedAt !== undefined) add('completed_at', input.completedAt, '::timestamptz')
+    if (!assignments.length) throw new RepositoryValidationError('No onboarding task fields to update')
+    values.push(required(onboardingId, 'onboarding id'), required(taskId, 'onboarding task id'))
+    const where = this.onboardingTaskWhere(values, [`t.onboarding_id = $${values.length - 1}::uuid`, `t.id = $${values.length}::uuid`])
+    const row = await queryOne<OnboardingTaskRow>(this.pool, `UPDATE onboarding_tasks SET ${assignments.join(', ')} WHERE id IN (SELECT t.id ${ONBOARDING_TASK_FROM} ${where}) RETURNING ${ONBOARDING_TASK_RETURNING}`, values)
+    return mapOnboardingTask(row)
+  }
+
+  async listOnboardingMaterials(onboardingId?: string): Promise<OnboardingMaterialDbRecord[]> {
+    const values: unknown[] = []
+    const conditions: string[] = []
+    if (onboardingId !== undefined) conditions.push(`m.onboarding_id = $${values.push(required(onboardingId, 'onboarding id'))}::uuid`)
+    const where = this.onboardingMaterialWhere(values, conditions)
+    const result = await this.pool.query<OnboardingMaterialRow>(`SELECT ${ONBOARDING_MATERIAL_COLUMNS} ${ONBOARDING_MATERIAL_FROM} ${where} ORDER BY m.is_required DESC, m.created_at, m.id`, values)
+    return result.rows.map(mapOnboardingMaterial)
+  }
+
+  async createOnboardingMaterial(input: OnboardingMaterialCreateInput): Promise<OnboardingMaterialDbRecord> {
+    const values: unknown[] = [uuidOrGenerated(input.id), required(input.onboardingId, 'onboarding id'), required(input.code, 'material code'), required(input.label, 'material label'), input.status ?? 'pending', input.isRequired !== false, input.notes ?? null]
+    const organizationFilter = this.organizationId ? ' AND r.organization_id = $8::uuid' : ''
+    if (this.organizationId) values.push(this.organizationId)
+    const row = await queryOne<OnboardingMaterialRow>(this.pool, `INSERT INTO onboarding_materials (id, organization_id, onboarding_id, code, label, status, is_required, notes)
+      SELECT $1::uuid, r.organization_id, r.id, $3, $4, $5, $6, $7 FROM onboarding_records r WHERE r.id = $2::uuid${organizationFilter}
+      ON CONFLICT (onboarding_id, code) DO UPDATE SET label = EXCLUDED.label, is_required = onboarding_materials.is_required OR EXCLUDED.is_required, notes = COALESCE(EXCLUDED.notes, onboarding_materials.notes), updated_at = now()
+      RETURNING ${ONBOARDING_MATERIAL_RETURNING}`, values)
+    return mapOnboardingMaterial(row)
+  }
+
+  async updateOnboardingMaterial(onboardingId: string, materialId: string, input: OnboardingMaterialUpdateInput): Promise<OnboardingMaterialDbRecord> {
+    const assignments: string[] = []
+    const values: unknown[] = []
+    const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
+    if (input.status !== undefined) add('status', input.status)
+    if (input.isRequired !== undefined) add('is_required', input.isRequired)
+    if (input.collectedAt !== undefined) add('collected_at', input.collectedAt, '::timestamptz')
+    if (input.verifiedAt !== undefined) add('verified_at', input.verifiedAt, '::timestamptz')
+    if (input.verifiedByUserId !== undefined) add('verified_by_user_id', input.verifiedByUserId, '::uuid')
+    if (input.waivedAt !== undefined) add('waived_at', input.waivedAt, '::timestamptz')
+    if (input.notes !== undefined) add('notes', input.notes)
+    if (!assignments.length) throw new RepositoryValidationError('No onboarding material fields to update')
+    values.push(required(onboardingId, 'onboarding id'), required(materialId, 'onboarding material id'))
+    const where = this.onboardingMaterialWhere(values, [`m.onboarding_id = $${values.length - 1}::uuid`, `m.id = $${values.length}::uuid`])
+    const row = await queryOne<OnboardingMaterialRow>(this.pool, `UPDATE onboarding_materials SET ${assignments.join(', ')} WHERE id IN (SELECT m.id ${ONBOARDING_MATERIAL_FROM} ${where}) RETURNING ${ONBOARDING_MATERIAL_RETURNING}`, values)
+    return mapOnboardingMaterial(row)
+  }
+
+  async listOnboardingReminders(onboardingId?: string): Promise<OnboardingReminderDbRecord[]> {
+    const values: unknown[] = []
+    const conditions: string[] = []
+    if (onboardingId !== undefined) conditions.push(`n.onboarding_id = $${values.push(required(onboardingId, 'onboarding id'))}::uuid`)
+    const where = this.onboardingReminderWhere(values, conditions)
+    const result = await this.pool.query<OnboardingReminderRow>(`SELECT ${ONBOARDING_REMINDER_COLUMNS} ${ONBOARDING_REMINDER_FROM} ${where} ORDER BY n.scheduled_at, n.milestone, n.audience`, values)
+    return result.rows.map(mapOnboardingReminder)
+  }
+
+  async createOnboardingReminder(input: OnboardingReminderCreateInput): Promise<OnboardingReminderDbRecord> {
+    const values: unknown[] = [uuidOrGenerated(input.id), required(input.onboardingId, 'onboarding id'), input.milestone, input.audience, input.channel ?? 'in_app', input.status ?? 'scheduled', required(input.scheduledAt, 'scheduledAt')]
+    const organizationFilter = this.organizationId ? ' AND r.organization_id = $8::uuid' : ''
+    if (this.organizationId) values.push(this.organizationId)
+    const row = await queryOne<OnboardingReminderRow>(this.pool, `INSERT INTO onboarding_reminders (id, organization_id, onboarding_id, milestone, audience, channel, status, scheduled_at)
+      SELECT $1::uuid, r.organization_id, r.id, $3, $4, $5, $6, $7::timestamptz FROM onboarding_records r WHERE r.id = $2::uuid${organizationFilter}
+      ON CONFLICT (onboarding_id, milestone, audience, channel) DO UPDATE SET scheduled_at = EXCLUDED.scheduled_at, status = CASE WHEN onboarding_reminders.status IN ('sent','failed','skipped') THEN onboarding_reminders.status ELSE EXCLUDED.status END, updated_at = now()
+      RETURNING ${ONBOARDING_REMINDER_RETURNING}`, values)
+    return mapOnboardingReminder(row)
+  }
+
+  async updateOnboardingReminder(onboardingId: string, reminderId: string, input: OnboardingReminderUpdateInput): Promise<OnboardingReminderDbRecord> {
+    const assignments: string[] = []
+    const values: unknown[] = []
+    const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
+    if (input.status !== undefined) add('status', input.status)
+    if (input.scheduledAt !== undefined) add('scheduled_at', input.scheduledAt, '::timestamptz')
+    if (input.sentAt !== undefined) add('sent_at', input.sentAt, '::timestamptz')
+    if (input.failedAt !== undefined) add('failed_at', input.failedAt, '::timestamptz')
+    if (input.failureReason !== undefined) add('failure_reason', input.failureReason)
+    if (!assignments.length) throw new RepositoryValidationError('No onboarding reminder fields to update')
+    values.push(required(onboardingId, 'onboarding id'), required(reminderId, 'onboarding reminder id'))
+    const where = this.onboardingReminderWhere(values, [`n.onboarding_id = $${values.length - 1}::uuid`, `n.id = $${values.length}::uuid`])
+    const row = await queryOne<OnboardingReminderRow>(this.pool, `UPDATE onboarding_reminders SET ${assignments.join(', ')} WHERE id IN (SELECT n.id ${ONBOARDING_REMINDER_FROM} ${where}) RETURNING ${ONBOARDING_REMINDER_RETURNING}`, values)
+    return mapOnboardingReminder(row)
+  }
+
+  async listOnboardingIntegrations(onboardingId?: string): Promise<OnboardingIntegrationDbRecord[]> {
+    const values: unknown[] = []
+    const conditions: string[] = []
+    if (onboardingId !== undefined) conditions.push(`i.onboarding_id = $${values.push(required(onboardingId, 'onboarding id'))}::uuid`)
+    const where = this.onboardingIntegrationWhere(values, conditions)
+    const result = await this.pool.query<OnboardingIntegrationRow>(`SELECT ${ONBOARDING_INTEGRATION_COLUMNS} ${ONBOARDING_INTEGRATION_FROM} ${where} ORDER BY i.provider, i.id`, values)
+    return result.rows.map(mapOnboardingIntegration)
+  }
+
+  async createOnboardingIntegration(input: OnboardingIntegrationCreateInput): Promise<OnboardingIntegrationDbRecord> {
+    const values: unknown[] = [uuidOrGenerated(input.id), required(input.onboardingId, 'onboarding id'), input.provider, input.status ?? 'not_configured']
+    const organizationFilter = this.organizationId ? ' AND r.organization_id = $5::uuid' : ''
+    if (this.organizationId) values.push(this.organizationId)
+    const row = await queryOne<OnboardingIntegrationRow>(this.pool, `INSERT INTO onboarding_integrations (id, organization_id, onboarding_id, provider, status)
+      SELECT $1::uuid, r.organization_id, r.id, $3, $4 FROM onboarding_records r WHERE r.id = $2::uuid${organizationFilter}
+      ON CONFLICT (onboarding_id, provider) DO UPDATE SET updated_at = onboarding_integrations.updated_at
+      RETURNING ${ONBOARDING_INTEGRATION_RETURNING}`, values)
+    return mapOnboardingIntegration(row)
+  }
+
+  async updateOnboardingIntegration(onboardingId: string, integrationId: string, input: OnboardingIntegrationUpdateInput): Promise<OnboardingIntegrationDbRecord> {
+    const assignments: string[] = []
+    const values: unknown[] = []
+    const add = (column: string, value: unknown, cast = '') => { assignments.push(`${column} = $${values.push(value)}${cast}`) }
+    if (input.status !== undefined) add('status', input.status)
+    if (input.externalReference !== undefined) add('external_reference', input.externalReference)
+    if (input.lastAttemptAt !== undefined) add('last_attempt_at', input.lastAttemptAt, '::timestamptz')
+    if (input.lastSuccessAt !== undefined) add('last_success_at', input.lastSuccessAt, '::timestamptz')
+    if (input.lastError !== undefined) add('last_error', input.lastError)
+    if (!assignments.length) throw new RepositoryValidationError('No onboarding integration fields to update')
+    values.push(required(onboardingId, 'onboarding id'), required(integrationId, 'onboarding integration id'))
+    const where = this.onboardingIntegrationWhere(values, [`i.onboarding_id = $${values.length - 1}::uuid`, `i.id = $${values.length}::uuid`])
+    const row = await queryOne<OnboardingIntegrationRow>(this.pool, `UPDATE onboarding_integrations SET ${assignments.join(', ')} WHERE id IN (SELECT i.id ${ONBOARDING_INTEGRATION_FROM} ${where}) RETURNING ${ONBOARDING_INTEGRATION_RETURNING}`, values)
+    return mapOnboardingIntegration(row)
   }
 
   // ===== 流程事件（审计轨迹）=====
@@ -1565,6 +1906,12 @@ export class NormalizedRecruitingRepository {
     return mapOffer(row)
   }
 
+  private async getOfferTemplateWithExecutor(client: RepositoryClient, id: string): Promise<OfferTemplateDbRecord> {
+    const values: unknown[] = [id]
+    const row = await queryOne<OfferTemplateRow>(client, `${OFFER_TEMPLATE_SELECT} ${this.offerTemplateWhere(values, ['t.id = $1::uuid'])}`, values)
+    return mapOfferTemplate(row)
+  }
+
   private async getOnboardingWithExecutor(client: RepositoryClient, id: string): Promise<OnboardingDbRecord> {
     const values: unknown[] = [id]
     const row = await queryOne<OnboardingRow>(client, `${ONBOARDING_SELECT} ${this.onboardingWhere(values, ['r.id = $1::uuid'])}`, values)
@@ -1592,7 +1939,7 @@ async function resolveForeignKey(client: RepositoryClient, table: string, idColu
   if (value === null || value === undefined || !text(value)) return null
   const reference = text(value)
   const normalizedBusinessId = normalizeTableBusinessId(table, reference)
-  const scopedTables = new Set(['recruitment_requests', 'jobs', 'candidates', 'applications', 'resumes', 'interviews', 'offers'])
+  const scopedTables = new Set(['departments', 'recruitment_requests', 'jobs', 'candidates', 'applications', 'resumes', 'interviews', 'offers'])
   const scoped = organizationId && scopedTables.has(table)
   const conditions = isUuid(reference) ? [`${idColumn} = $1::uuid`] : [`(${businessColumn} = $1 OR ${businessColumn} = $2)`]
   const values: unknown[] = isUuid(reference) ? [reference] : [reference, normalizedBusinessId]
@@ -1718,8 +2065,20 @@ interface JobDescriptionVersionRow extends QueryResultRow { id: string; job_id: 
 interface InterviewRow extends QueryResultRow { id: string; interview_no: string; application_id: string; round: number; stage: string; type: string; title: string; status: string; scheduled_start_at: string | Date | null; scheduled_end_at: string | Date | null; timezone: string | null; location: string | null; meeting_url: string | null; participants: unknown; created_at: string | Date; updated_at: string | Date }
 interface InterviewFeedbackRow extends QueryResultRow { id: string; interview_id: string; interviewer_id: string; status: string; overall_score: string | number | null; recommendation: string | null; ratings: unknown; strengths: unknown; concerns: unknown; notes: string | null; submitted_at: string | Date | null; locked_at: string | Date | null }
 interface OfferRow extends QueryResultRow { id: string; application_id: string; status: string; current_version_id: string | null; approval_status: string; sent_at: string | Date | null; responded_at: string | Date | null; expires_at: string | Date | null; version: number; created_at: string | Date; updated_at: string | Date }
-interface OfferVersionRow extends QueryResultRow { id: string; offer_id: string; version: number; position_title: string; department_id: string; employment_type: string; start_date: string | Date | null; compensation: unknown; benefits: unknown; content: string; created_at: string | Date }
-interface OnboardingRow extends QueryResultRow { id: string; application_id: string; offer_id: string; planned_start_date: string | Date | null; status: string; notes: string | null; archived_at: string | Date | null; created_at: string | Date; updated_at: string | Date }
+interface OfferVersionRow extends QueryResultRow { id: string; offer_id: string; version: number; position_title: string; department_id: string; employment_type: string; start_date: string | Date | null; reporting_location: string | null; invoice_title: string | null; tax_number: string | null; template_fields?: import('../offer-template-fields.js').OfferTemplateFields; compensation: unknown; benefits: unknown; materials: unknown; content: string; created_at: string | Date }
+interface OfferTemplateRow extends QueryResultRow { id: string; name: string; filename: string; content: string; is_active: boolean; is_default: boolean; created_by: string | null; created_at: string | Date; updated_at: string | Date }
+interface OnboardingRow extends QueryResultRow {
+  id: string; application_id: string; offer_id: string; planned_start_date: string | Date | null; planned_start_time: string | null
+  reporting_mode: 'onsite' | 'remote' | 'hybrid' | null; reporting_location: string | null; reporting_contact_name: string | null; reporting_contact_phone: string | null
+  hr_owner_name: string | null; hiring_manager_name: string | null; work_city: string | null; office_location: string | null; risk_notes: string | null
+  cancellation_reason_code: string | null; cancellation_notes: string | null; cancelled_at: string | Date | null
+  no_show_reason_code: string | null; no_show_notes: string | null; no_show_at: string | Date | null; actual_arrival_at: string | Date | null
+  status: string; notes: string | null; archived_at: string | Date | null; created_at: string | Date; updated_at: string | Date
+}
+interface OnboardingTaskRow extends QueryResultRow { id: string; onboarding_id: string; title: string; category: 'hr' | 'it' | 'admin' | 'manager' | 'training' | 'candidate'; status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'not_required'; is_required: boolean; owner_role: 'recruiter' | 'hiring_manager' | 'admin' | 'hr_admin' | 'candidate' | null; template_key: string | null; owner_name: string | null; due_date: string | Date | null; notes: string | null; blocked_reason: string | null; completed_at: string | Date | null; created_at: string | Date; updated_at: string | Date }
+interface OnboardingMaterialRow extends QueryResultRow { id: string; onboarding_id: string; code: string; label: string; status: 'pending' | 'collected' | 'verified' | 'waived'; is_required: boolean; collected_at: string | Date | null; verified_at: string | Date | null; verified_by_user_id: string | null; waived_at: string | Date | null; notes: string | null; created_at: string | Date; updated_at: string | Date }
+interface OnboardingReminderRow extends QueryResultRow { id: string; onboarding_id: string; milestone: '7_days' | '3_days' | 'day_of'; audience: 'candidate' | 'hr' | 'manager' | 'it' | 'admin'; channel: 'in_app' | 'email'; status: 'scheduled' | 'sent' | 'failed' | 'skipped'; scheduled_at: string | Date; sent_at: string | Date | null; failed_at: string | Date | null; failure_reason: string | null; created_at: string | Date; updated_at: string | Date }
+interface OnboardingIntegrationRow extends QueryResultRow { id: string; onboarding_id: string; provider: 'oa' | 'it_service_desk' | 'access_control' | 'email_account' | 'hris'; status: 'not_configured' | 'pending' | 'syncing' | 'ready' | 'failed'; external_reference: string | null; last_attempt_at: string | Date | null; last_success_at: string | Date | null; last_error: string | null; created_at: string | Date; updated_at: string | Date }
 interface WorkflowEventRow extends QueryResultRow { id: string; subject_type: string; subject_id: string; event_type: string; from_status: string | null; to_status: string | null; actor_user_id: string | null; actor_name?: string | null; reason: string | null; metadata: unknown; created_at: string | Date }
 
 const REQUEST_COLUMNS = 'id, request_no, title, department_id, NULL::text AS department_name, requested_by, hiring_manager_id, headcount, budget_min, budget_max, employment_type, work_mode, location, reason, status, version, created_at, updated_at'
@@ -1736,12 +2095,14 @@ const JD_VERSION_COLUMNS = 'id, job_id, version, title, content, status, created
 const INTERVIEW_COLUMNS = 'id, interview_no, application_id, round, stage, type, title, status, scheduled_start_at, scheduled_end_at, timezone, location, meeting_url, participants, created_at, updated_at'
 const FEEDBACK_COLUMNS = 'f.id, f.interview_id, f.interviewer_id, f.status, f.overall_score, f.recommendation, f.ratings, f.strengths, f.concerns, f.notes, f.submitted_at, f.locked_at'
 const OFFER_COLUMNS = 'id, application_id, status, current_version_id, approval_status, sent_at, responded_at, expires_at, version, created_at, updated_at'
-const OFFER_VERSION_COLUMNS = 'v.id, v.offer_id, v.version, v.position_title, v.department_id, v.employment_type, v.start_date, v.compensation, v.benefits, v.content, v.created_at'
-const ONBOARDING_COLUMNS = 'id, application_id, offer_id, planned_start_date, status, notes, archived_at, created_at, updated_at'
+const OFFER_VERSION_COLUMNS = 'v.id, v.offer_id, v.version, v.position_title, v.department_id, v.employment_type, v.start_date, v.reporting_location, v.invoice_title, v.tax_number, v.template_fields, v.compensation, v.benefits, v.materials, v.content, v.created_at'
+const ONBOARDING_COLUMNS = 'id, application_id, offer_id, planned_start_date, planned_start_time::text, reporting_mode, reporting_location, reporting_contact_name, reporting_contact_phone, hr_owner_name, hiring_manager_name, work_city, office_location, risk_notes, cancellation_reason_code, cancellation_notes, cancelled_at, no_show_reason_code, no_show_notes, no_show_at, actual_arrival_at, status, notes, archived_at, created_at, updated_at'
 const WORKFLOW_EVENT_COLUMNS = 'id, subject_type, subject_id, event_type, from_status, to_status, actor_user_id, reason, metadata, created_at'
 // RETURNING 子句里没有 FROM 别名，必须使用不带前缀的列清单。
 const FEEDBACK_RETURNING = 'id, interview_id, interviewer_id, status, overall_score, recommendation, ratings, strengths, concerns, notes, submitted_at, locked_at'
-const OFFER_VERSION_RETURNING = 'id, offer_id, version, position_title, department_id, employment_type, start_date, compensation, benefits, content, created_at'
+const OFFER_VERSION_RETURNING = 'id, offer_id, version, position_title, department_id, employment_type, start_date, reporting_location, invoice_title, tax_number, template_fields, compensation, benefits, materials, content, created_at'
+const OFFER_TEMPLATE_COLUMNS = 'id, name, filename, content, is_active, is_default, created_by, created_at, updated_at'
+const OFFER_TEMPLATE_SELECT = `SELECT ${OFFER_TEMPLATE_COLUMNS} FROM offer_templates t`
 
 const REQUEST_SELECT = `SELECT rr.id, rr.request_no, rr.title, rr.department_id, d.name AS department_name, d.code AS department_code, rr.requested_by, u.display_name AS requester_name, u.email AS requester_email, rr.hiring_manager_id, rr.headcount, rr.budget_min, rr.budget_max, rr.employment_type, rr.work_mode, rr.location, rr.reason, rr.status, approval_instance.approval_status, approval_instance.approval_provider, approval_instance.approval_external_instance_id, rr.version, rr.created_at, rr.updated_at
   FROM recruitment_requests rr
@@ -1774,9 +2135,22 @@ const FEEDBACK_FROM = `FROM interview_feedback f JOIN interviews i ON i.id = f.i
 const FEEDBACK_SELECT = `SELECT ${FEEDBACK_COLUMNS} ${FEEDBACK_FROM}`
 const OFFER_SELECT = `SELECT o.id, o.application_id, o.status, o.current_version_id, o.approval_status, o.sent_at, o.responded_at, o.expires_at, o.version, o.created_at, o.updated_at
   FROM offers o`
-const ONBOARDING_SELECT = `SELECT r.id, r.application_id, r.offer_id, r.planned_start_date, r.status, r.notes, r.archived_at, r.created_at, r.updated_at
+const ONBOARDING_SELECT = `SELECT r.id, r.application_id, r.offer_id, r.planned_start_date, r.planned_start_time::text, r.reporting_mode, r.reporting_location, r.reporting_contact_name, r.reporting_contact_phone, r.hr_owner_name, r.hiring_manager_name, r.work_city, r.office_location, r.risk_notes, r.cancellation_reason_code, r.cancellation_notes, r.cancelled_at, r.no_show_reason_code, r.no_show_notes, r.no_show_at, r.actual_arrival_at, r.status, r.notes, r.archived_at, r.created_at, r.updated_at
   FROM onboarding_records r
   LEFT JOIN applications a ON a.id = r.application_id`
+const ONBOARDING_TASK_COLUMNS = 't.id, t.onboarding_id, t.title, t.category, t.status, t.is_required, t.owner_role, t.template_key, t.owner_name, t.due_date, t.notes, t.blocked_reason, t.completed_at, t.created_at, t.updated_at'
+const ONBOARDING_TASK_RETURNING = 'id, onboarding_id, title, category, status, is_required, owner_role, template_key, owner_name, due_date, notes, blocked_reason, completed_at, created_at, updated_at'
+const ONBOARDING_TASK_FROM = 'FROM onboarding_tasks t JOIN onboarding_records r ON r.id = t.onboarding_id'
+const ONBOARDING_TASK_SELECT = `SELECT ${ONBOARDING_TASK_COLUMNS} ${ONBOARDING_TASK_FROM}`
+const ONBOARDING_MATERIAL_COLUMNS = 'm.id, m.onboarding_id, m.code, m.label, m.status, m.is_required, m.collected_at, m.verified_at, m.verified_by_user_id, m.waived_at, m.notes, m.created_at, m.updated_at'
+const ONBOARDING_MATERIAL_RETURNING = 'id, onboarding_id, code, label, status, is_required, collected_at, verified_at, verified_by_user_id, waived_at, notes, created_at, updated_at'
+const ONBOARDING_MATERIAL_FROM = 'FROM onboarding_materials m JOIN onboarding_records r ON r.id = m.onboarding_id'
+const ONBOARDING_REMINDER_COLUMNS = 'n.id, n.onboarding_id, n.milestone, n.audience, n.channel, n.status, n.scheduled_at, n.sent_at, n.failed_at, n.failure_reason, n.created_at, n.updated_at'
+const ONBOARDING_REMINDER_RETURNING = 'id, onboarding_id, milestone, audience, channel, status, scheduled_at, sent_at, failed_at, failure_reason, created_at, updated_at'
+const ONBOARDING_REMINDER_FROM = 'FROM onboarding_reminders n JOIN onboarding_records r ON r.id = n.onboarding_id'
+const ONBOARDING_INTEGRATION_COLUMNS = 'i.id, i.onboarding_id, i.provider, i.status, i.external_reference, i.last_attempt_at, i.last_success_at, i.last_error, i.created_at, i.updated_at'
+const ONBOARDING_INTEGRATION_RETURNING = 'id, onboarding_id, provider, status, external_reference, last_attempt_at, last_success_at, last_error, created_at, updated_at'
+const ONBOARDING_INTEGRATION_FROM = 'FROM onboarding_integrations i JOIN onboarding_records r ON r.id = i.onboarding_id'
 
 function mapRecruitmentRequest(row: RecruitmentRequestRow): RecruitmentRequestRecord {
   return { id: row.id, businessId: row.request_no, legacyId: legacyId('REQ', row.request_no), code: row.request_no, title: row.title, departmentId: row.department_code ?? row.department_id ?? '', departmentName: row.department_name, requestedById: row.requested_by, requesterName: row.requester_name ?? null, requesterEmail: row.requester_email ?? null, hiringManagerId: row.hiring_manager_id, headcount: row.headcount, budgetMin: numberValue(row.budget_min), budgetMax: numberValue(row.budget_max), employmentType: row.employment_type, workMode: row.work_mode, location: row.location, reason: row.reason, status: row.status, ...(row.approval_status ? { approvalStatus: row.approval_status } : {}), ...(row.approval_provider ? { approvalProvider: row.approval_provider } : {}), ...(row.approval_external_instance_id ? { approvalExternalInstanceId: row.approval_external_instance_id } : {}), version: row.version, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
@@ -1823,11 +2197,31 @@ function mapOffer(row: OfferRow): OfferDbRecord {
 }
 
 function mapOfferVersion(row: OfferVersionRow): OfferVersionDbRecord {
-  return { id: row.id, offerId: row.offer_id, version: Number(row.version), positionTitle: row.position_title, departmentId: row.department_id, employmentType: row.employment_type, startDate: dateText(row.start_date), compensation: jsonObject(row.compensation), benefits: jsonArray<string>(row.benefits), content: row.content, createdAt: iso(row.created_at) }
+  return { id: row.id, offerId: row.offer_id, version: Number(row.version), positionTitle: row.position_title, departmentId: row.department_id, employmentType: row.employment_type, startDate: dateText(row.start_date), reportingLocation: row.reporting_location, invoiceTitle: row.invoice_title, taxNumber: row.tax_number, templateFields: row.template_fields ?? {}, compensation: jsonObject(row.compensation), benefits: jsonArray<string>(row.benefits), materials: jsonArray<string>(row.materials), content: row.content, createdAt: iso(row.created_at) }
+}
+
+function mapOfferTemplate(row: OfferTemplateRow): OfferTemplateDbRecord {
+  return { id: row.id, name: row.name, filename: row.filename, content: row.content, isActive: row.is_active, isDefault: row.is_default, createdById: row.created_by, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapOnboarding(row: OnboardingRow): OnboardingDbRecord {
-  return { id: row.id, applicationId: row.application_id, offerId: row.offer_id, plannedStartDate: dateText(row.planned_start_date), status: row.status, notes: row.notes, archivedAt: row.archived_at ? iso(row.archived_at) : null, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  return { id: row.id, applicationId: row.application_id, offerId: row.offer_id, plannedStartDate: dateText(row.planned_start_date), plannedStartTime: row.planned_start_time, reportingMode: row.reporting_mode, reportingLocation: row.reporting_location, reportingContactName: row.reporting_contact_name, reportingContactPhone: row.reporting_contact_phone, hrOwnerName: row.hr_owner_name, hiringManagerName: row.hiring_manager_name, workCity: row.work_city, officeLocation: row.office_location, riskNotes: row.risk_notes, cancellationReasonCode: row.cancellation_reason_code, cancellationNotes: row.cancellation_notes, cancelledAt: row.cancelled_at ? iso(row.cancelled_at) : null, noShowReasonCode: row.no_show_reason_code, noShowNotes: row.no_show_notes, noShowAt: row.no_show_at ? iso(row.no_show_at) : null, actualArrivalAt: row.actual_arrival_at ? iso(row.actual_arrival_at) : null, status: row.status, notes: row.notes, archivedAt: row.archived_at ? iso(row.archived_at) : null, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapOnboardingTask(row: OnboardingTaskRow): OnboardingTaskDbRecord {
+  return { id: row.id, onboardingId: row.onboarding_id, title: row.title, category: row.category, status: row.status, isRequired: row.is_required, ownerRole: row.owner_role, templateKey: row.template_key, ownerName: row.owner_name, dueDate: dateText(row.due_date), notes: row.notes, blockedReason: row.blocked_reason, completedAt: row.completed_at ? iso(row.completed_at) : null, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapOnboardingMaterial(row: OnboardingMaterialRow): OnboardingMaterialDbRecord {
+  return { id: row.id, onboardingId: row.onboarding_id, code: row.code, label: row.label, status: row.status, isRequired: row.is_required, collectedAt: row.collected_at ? iso(row.collected_at) : null, verifiedAt: row.verified_at ? iso(row.verified_at) : null, verifiedByUserId: row.verified_by_user_id, waivedAt: row.waived_at ? iso(row.waived_at) : null, notes: row.notes, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapOnboardingReminder(row: OnboardingReminderRow): OnboardingReminderDbRecord {
+  return { id: row.id, onboardingId: row.onboarding_id, milestone: row.milestone, audience: row.audience, channel: row.channel, status: row.status, scheduledAt: iso(row.scheduled_at), sentAt: row.sent_at ? iso(row.sent_at) : null, failedAt: row.failed_at ? iso(row.failed_at) : null, failureReason: row.failure_reason, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+}
+
+function mapOnboardingIntegration(row: OnboardingIntegrationRow): OnboardingIntegrationDbRecord {
+  return { id: row.id, onboardingId: row.onboarding_id, provider: row.provider, status: row.status, externalReference: row.external_reference, lastAttemptAt: row.last_attempt_at ? iso(row.last_attempt_at) : null, lastSuccessAt: row.last_success_at ? iso(row.last_success_at) : null, lastError: row.last_error, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function mapWorkflowEvent(row: WorkflowEventRow): WorkflowEventDbRecord {

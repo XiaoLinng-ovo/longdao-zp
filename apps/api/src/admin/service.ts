@@ -46,41 +46,6 @@ export interface AdminDepartmentRecord {
 export interface AdminDepartmentCreate { name?: string }
 export interface AdminDepartmentUpdate { name?: string; isActive?: boolean }
 
-export interface DingTalkApprovalDepartmentConfig {
-  id: string
-  code: string
-  name: string
-  isActive: boolean
-  dingTalkDepartmentId: number | null
-  processCode: string | null
-  configured: boolean
-}
-
-export interface DingTalkApprovalUserMapping {
-  id: string
-  displayName: string
-  email: string
-  departmentName: string | null
-  dingTalkUserId: string | null
-  configured: boolean
-}
-
-export interface DingTalkApprovalConfig {
-  subjectType: 'recruitment_request'
-  callbackUrl: string | null
-  callbackUrlConfigured: boolean
-  departments: DingTalkApprovalDepartmentConfig[]
-  users: DingTalkApprovalUserMapping[]
-}
-
-export interface DingTalkApprovalConfigPatch {
-  departmentId?: string
-  dingTalkDepartmentId?: string | number | null
-  processCode?: string | null
-  userId?: string
-  dingTalkUserId?: string | null
-}
-
 export interface AdminDepartmentDeleteResult {
   id: string;
   code: string;
@@ -124,7 +89,14 @@ export interface AdminUserCreateResult {
   generatedPassword: boolean;
 }
 
-const ACCOUNT_ROLES = new Set(['recruiter', 'hiring_manager', 'approver', 'interviewer', 'hr_admin', 'admin']);
+const LEGACY_ENTERPRISE_ROLES = new Set(['recruiter', 'hiring_manager', 'approver', 'interviewer', 'hr_admin']);
+const ACCOUNT_ROLES = new Set(['recruiter', 'admin', ...LEGACY_ENTERPRISE_ROLES]);
+function normalizeAccountRole(value: unknown): 'recruiter' {
+  const role = String(value ?? 'recruiter');
+  if (role === 'admin') throw new AdminValidationError('企业账号统一为普通用户，系统管理员只能通过平台专用授权设置');
+  if (LEGACY_ENTERPRISE_ROLES.has(role)) return 'recruiter';
+  throw new AdminValidationError('请选择有效的账号类型');
+}
 
 function generateAccountPassword(): string {
   const groups = ['ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnopqrstuvwxyz', '23456789', '!@#$%*-_'];
@@ -173,6 +145,12 @@ export interface AiPromptSkillUpdate {
   isActive?: boolean
 }
 
+export interface AiSharingSettings {
+  enabled: boolean
+  activeOrganizationCount: number
+  sharedOrganizationCount: number
+}
+
 const USER_SELECT = `
   SELECT u.id, u.email, u.display_name, u.is_active, u.last_login_at, u.created_at,
          d.code AS department_code,
@@ -192,7 +170,7 @@ function toUser(row: Record<string, unknown>): AdminUserRecord {
     id: String(row.id),
     email: String(row.email),
     displayName: String(row.display_name),
-    role: String(row.role),
+    role: 'recruiter',
     departmentCode: row.department_code === null || row.department_code === undefined ? null : String(row.department_code),
     isActive: Boolean(row.is_active),
     lastLoginAt: row.last_login_at instanceof Date ? row.last_login_at.toISOString() : (row.last_login_at as string | null) ?? null,
@@ -238,6 +216,14 @@ const AI_SKILL_SELECT = `SELECT s.id, s.name, s.target_type, s.content, s.is_act
   ARRAY(SELECT b.job_id FROM ai_resume_scoring_skill_jobs b JOIN jobs j ON j.id = b.job_id WHERE b.skill_id = s.id AND (s.organization_id IS NULL OR j.organization_id = s.organization_id) ORDER BY b.job_id) AS job_ids
   FROM ai_prompt_skills s`
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+const DEPARTMENT_NAME_MAX_LENGTH = 80
+
+function normalizeDepartmentName(value: unknown): string {
+  const name = String(value ?? '').trim()
+  if (!name) throw new AdminValidationError('部门名称不能为空')
+  if (name.length > DEPARTMENT_NAME_MAX_LENGTH) throw new AdminValidationError(`部门名称不能超过 ${DEPARTMENT_NAME_MAX_LENGTH} 个字符`)
+  return name
+}
 
 /**
  * 管理后台服务：用户/角色/系统设置/审计日志的查询与维护。
@@ -268,12 +254,13 @@ export class AdminService {
     const displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
     const organizationId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
     const departmentCode = typeof input.departmentCode === 'string' ? input.departmentCode.trim() : '';
-    const role = input.role ?? 'recruiter';
+    const requestedRole = input.role ?? 'recruiter';
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) throw new AdminValidationError('请输入有效的登录邮箱');
     if (!displayName || displayName.length > 80) throw new AdminValidationError('姓名不能为空且不能超过 80 个字符');
     if (!UUID_PATTERN.test(organizationId)) throw new AdminValidationError('请选择有效企业');
     if (!departmentCode || departmentCode.length > 100) throw new AdminValidationError('请选择有效部门');
-    if (!ACCOUNT_ROLES.has(role)) throw new AdminValidationError('请选择有效的业务角色，不能创建平台管理员');
+    if (!ACCOUNT_ROLES.has(String(requestedRole))) throw new AdminValidationError('请选择有效的账号类型');
+    const role = normalizeAccountRole(requestedRole);
     if (input.password !== undefined && typeof input.password !== 'string') throw new AdminValidationError('密码格式无效');
     const generatedPassword = input.password === undefined || input.password === '';
     const initialPassword = generatedPassword ? generateAccountPassword() : input.password!;
@@ -285,10 +272,13 @@ export class AdminService {
       // Lock the organization before membership insertion to serialize seat allocation.
       const organization = await client.query('SELECT id FROM organizations WHERE id = $1 AND organization_service_available(id) FOR NO KEY UPDATE', [organizationId]);
       if (!organization.rows[0]) throw new AdminValidationError('企业不存在或服务不可用');
-      const department = await client.query('SELECT id FROM departments WHERE code = $1 AND is_active = true FOR SHARE', [departmentCode]);
+      const department = await client.query(
+        'SELECT id FROM departments WHERE code = $1 AND organization_id = $2::uuid AND is_active = true FOR SHARE',
+        [departmentCode, organizationId]
+      );
       if (!department.rows[0]) throw new AdminValidationError('部门不存在或已停用');
       const roleResult = await client.query('SELECT id FROM roles WHERE code = $1', [role]);
-      if (!roleResult.rows[0]) throw new AdminValidationError('业务角色不存在');
+      if (!roleResult.rows[0]) throw new AdminValidationError('账号类型不存在');
       const existing = await client.query('SELECT id FROM users WHERE lower(email) = $1', [email]);
       if (existing.rows[0]) throw new AdminConflictError('该邮箱已存在，请使用其他邮箱');
       const id = randomUUID();
@@ -344,8 +334,9 @@ export class AdminService {
     }
 
     if (patch.role !== undefined) {
-      const role = await this.pool.query('SELECT id FROM roles WHERE code = $1', [String(patch.role)]);
-      if (!role.rows[0]) throw new AdminValidationError(`未找到角色：${patch.role}`);
+      const roleCode = normalizeAccountRole(patch.role);
+      const role = await this.pool.query('SELECT id FROM roles WHERE code = $1', [roleCode]);
+      if (!role.rows[0]) throw new AdminValidationError(`未找到账号类型：${roleCode}`);
       await this.pool.query('DELETE FROM user_roles WHERE user_id = $1', [id]);
       await this.pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [id, role.rows[0].id]);
     }
@@ -358,14 +349,22 @@ export class AdminService {
   }
 
   async listRoles(): Promise<AdminRoleRecord[]> {
-    const result = await this.pool.query('SELECT id, code, name FROM roles ORDER BY code');
-    return result.rows.map((row) => ({ id: String(row.id), code: String(row.code), name: String(row.name) }));
+    const result = await this.pool.query("SELECT id, code, name FROM roles WHERE code = 'recruiter' ORDER BY code");
+    const roles: AdminRoleRecord[] = [];
+    for (const row of result.rows) {
+      const code = String(row.code);
+      const normalizedCode = code === 'recruiter' ? 'recruiter' : null;
+      if (!normalizedCode || roles.some((item) => item.code === normalizedCode)) continue;
+      roles.push({ id: String(row.id), code: normalizedCode, name: '企业用户' });
+    }
+    return roles;
   }
 
   async listInterviewerOptions(organizationId?: string): Promise<InterviewerOptionRecord[]> {
     // Never fall back to the global address book if a workspace is missing.
     if (!organizationId) return []
-    // Account roles control picker visibility, not workspace permissions.
+    // 面试官选择器按当前企业成员关系取数。历史业务角色只保留兼容用途，
+    // 不再把招聘专员、HR、面试官等旧角色作为业务能力门槛。
     const result = await this.pool.query(
       `SELECT u.id, u.display_name, u.email, d.code AS department_code
          FROM organization_members m
@@ -373,10 +372,6 @@ export class AdminService {
          JOIN users u ON u.id = m.user_id
          LEFT JOIN departments d ON d.id = m.department_id
         WHERE m.organization_id = $1::uuid AND u.is_active = true
-          AND EXISTS (
-            SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
-             WHERE ur.user_id = u.id AND r.code IN ('hr_admin', 'hiring_manager', 'admin')
-          )
         ORDER BY u.display_name, u.email`, [organizationId]
     )
     return result.rows.map((row) => ({
@@ -507,18 +502,27 @@ export class AdminService {
   }
 
   async listDepartments(activeOnly = false): Promise<AdminDepartmentRecord[]> {
-    const result = await this.pool.query(`SELECT id, code, name, is_active, created_at, updated_at FROM departments ${activeOnly ? 'WHERE is_active = true' : ''} ORDER BY name, code`)
+    const conditions: string[] = []
+    const values: unknown[] = []
+    if (this.organizationId) conditions.push(`organization_id = $${values.push(this.organizationId)}::uuid`)
+    if (activeOnly) conditions.push('is_active = true')
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    const result = await this.pool.query(`SELECT id, code, name, is_active, created_at, updated_at FROM departments ${where} ORDER BY name, code`, values)
     return result.rows.map(toDepartment)
   }
 
   async createDepartment(input: AdminDepartmentCreate, actorId: string, requestId?: string): Promise<AdminDepartmentRecord> {
-    const name = String(input.name ?? '').trim()
-    if (!name) throw new AdminValidationError('部门名称不能为空')
+    const name = normalizeDepartmentName(input.name)
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const code = `dept-${randomUUID().replaceAll('-', '').slice(0, 12)}`
       try {
-        const result = await this.pool.query('INSERT INTO departments (code, name, is_active) VALUES ($1, $2, true) RETURNING id, code, name, is_active, created_at, updated_at', [code, name])
+        const result = await this.pool.query(
+          this.organizationId
+            ? 'INSERT INTO departments (code, name, is_active, organization_id) VALUES ($1, $2, true, $3::uuid) RETURNING id, code, name, is_active, created_at, updated_at'
+            : 'INSERT INTO departments (code, name, is_active) VALUES ($1, $2, true) RETURNING id, code, name, is_active, created_at, updated_at',
+          this.organizationId ? [code, name, this.organizationId] : [code, name]
+        )
         const department = toDepartment(result.rows[0])
         await this.appendAudit(actorId, 'admin.department.create', 'department', department.id, requestId, { code, name })
         return department
@@ -530,19 +534,24 @@ export class AdminService {
   }
 
   async updateDepartment(id: string, patch: AdminDepartmentUpdate, actorId: string, requestId?: string): Promise<AdminDepartmentRecord> {
-    const current = await this.pool.query('SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1', [id])
+    const current = await this.pool.query(
+      `SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1${this.organizationId ? ' AND organization_id = $2::uuid' : ''}`,
+      this.organizationId ? [id, this.organizationId] : [id]
+    )
     if (!current.rows[0]) throw new AdminNotFoundError(`未找到部门：${id}`)
     const sets: string[] = []
     const values: unknown[] = []
     if (patch.name !== undefined) {
-      const name = String(patch.name).trim()
-      if (!name) throw new AdminValidationError('部门名称不能为空')
+      const name = normalizeDepartmentName(patch.name)
       sets.push(`name = $${values.push(name)}`)
     }
     if (patch.isActive !== undefined) sets.push(`is_active = $${values.push(Boolean(patch.isActive))}`)
     if (!sets.length) return toDepartment(current.rows[0])
     values.push(id)
-    const result = await this.pool.query(`UPDATE departments SET ${sets.join(', ')}, updated_at = now() WHERE id = $${values.length} RETURNING id, code, name, is_active, created_at, updated_at`, values)
+    const idParameter = values.length
+    if (this.organizationId) values.push(this.organizationId)
+    const tenantCondition = this.organizationId ? ` AND organization_id = $${values.length}::uuid` : ''
+    const result = await this.pool.query(`UPDATE departments SET ${sets.join(', ')}, updated_at = now() WHERE id = $${idParameter}${tenantCondition} RETURNING id, code, name, is_active, created_at, updated_at`, values)
     const department = toDepartment(result.rows[0])
     await this.appendAudit(actorId, 'admin.department.update', 'department', department.id, requestId, { changed: Object.keys(patch), code: department.code })
     return department
@@ -561,21 +570,44 @@ export class AdminService {
    * 只有真正没有引用的部门才允许物理删除。审批策略属于部门自身配置，随删除一并清除。
    */
   async deleteDepartment(id: string, actorId: string, requestId?: string): Promise<AdminDepartmentDeleteResult> {
-    const current = await this.pool.query('SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1', [id])
+    const current = await this.pool.query(
+      `SELECT id, code, name, is_active, created_at, updated_at FROM departments WHERE id = $1${this.organizationId ? ' AND organization_id = $2::uuid' : ''}`,
+      this.organizationId ? [id, this.organizationId] : [id]
+    )
     if (!current.rows[0]) throw new AdminNotFoundError(`未找到部门：${id}`)
     const department = toDepartment(current.rows[0])
 
-    const blockers = await this.pool.query(
-      `SELECT
-         (SELECT count(*) FROM users WHERE department_id = $1)::int AS users,
-         (SELECT count(*) FROM recruitment_requests WHERE department_id = $1)::int AS requests,
-         (SELECT count(*) FROM jobs WHERE department_id = $1)::int AS jobs,
-         (SELECT count(*) FROM departments WHERE parent_id = $1)::int AS children`,
-      [id]
-    )
-    const counts = blockers.rows[0] as { users: number; requests: number; jobs: number; children: number }
+    const blockers = this.organizationId
+      ? await this.pool.query(
+        `SELECT
+           (SELECT count(*) FROM users u
+             WHERE u.department_id = $1
+               AND NOT EXISTS (
+                 SELECT 1 FROM organization_members current_member
+                  WHERE current_member.user_id = u.id AND current_member.organization_id = $2::uuid
+               ))::int AS users,
+           (SELECT count(*) FROM organization_members WHERE department_id = $1 AND organization_id = $2::uuid)::int AS members,
+           (SELECT count(*) FROM organization_invitations WHERE department_id = $1 AND organization_id = $2::uuid AND accepted_at IS NULL AND revoked_at IS NULL)::int AS invitations,
+           (SELECT count(*) FROM recruitment_requests WHERE department_id = $1 AND organization_id = $2::uuid)::int AS requests,
+           (SELECT count(*) FROM jobs WHERE department_id = $1 AND organization_id = $2::uuid)::int AS jobs,
+           (SELECT count(*) FROM departments WHERE parent_id = $1 AND organization_id = $2::uuid)::int AS children`,
+        [id, this.organizationId]
+      )
+      : await this.pool.query(
+        `SELECT
+           (SELECT count(*) FROM users WHERE department_id = $1)::int AS users,
+           (SELECT count(*) FROM organization_members WHERE department_id = $1)::int AS members,
+           (SELECT count(*) FROM organization_invitations WHERE department_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL)::int AS invitations,
+           (SELECT count(*) FROM recruitment_requests WHERE department_id = $1)::int AS requests,
+           (SELECT count(*) FROM jobs WHERE department_id = $1)::int AS jobs,
+           (SELECT count(*) FROM departments WHERE parent_id = $1)::int AS children`,
+        [id]
+      )
+    const counts = blockers.rows[0] as { users: number; members: number; invitations: number; requests: number; jobs: number; children: number }
     const parts: string[] = []
     if (counts.users) parts.push(`${counts.users} 个用户`)
+    if (counts.members) parts.push(`${counts.members} 个企业成员`)
+    if (counts.invitations) parts.push(`${counts.invitations} 个待接受邀请`)
     if (counts.requests) parts.push(`${counts.requests} 个招聘需求`)
     if (counts.jobs) parts.push(`${counts.jobs} 个岗位`)
     if (counts.children) parts.push(`${counts.children} 个子部门`)
@@ -586,7 +618,7 @@ export class AdminService {
     }
 
     const policies = await this.pool.query('SELECT count(*)::int AS count FROM department_approval_policies WHERE department_id = $1', [id])
-    await this.pool.query('DELETE FROM departments WHERE id = $1', [id])
+    await this.pool.query(`DELETE FROM departments WHERE id = $1${this.organizationId ? ' AND organization_id = $2::uuid' : ''}`, this.organizationId ? [id, this.organizationId] : [id])
     const removedApprovalPolicies = Number((policies.rows[0] as { count?: number } | undefined)?.count ?? 0)
     await this.appendAudit(actorId, 'admin.department.delete', 'department', department.id, requestId, {
       code: department.code,
@@ -611,6 +643,13 @@ export class AdminService {
     return Object.fromEntries(result.rows.map((row) => [String(row.key), row.value]));
   }
 
+  async getRecruitmentReportsEnabled(): Promise<boolean> {
+    const result = await this.pool.query<{ value: unknown }>(
+      "SELECT value FROM system_settings WHERE key = 'recruitment_reports_enabled'",
+    );
+    return result.rows[0]?.value === true;
+  }
+
   async updateSettings(patch: Record<string, unknown>, actorId: string, requestId?: string): Promise<Record<string, unknown>> {
     for (const [key, value] of Object.entries(patch)) {
       await this.pool.query(
@@ -626,98 +665,6 @@ export class AdminService {
 
   async getDingTalkSettings(): ReturnType<typeof readDingTalkEnvSettings> {
     return readDingTalkEnvSettings()
-  }
-
-  async getDingTalkApprovalConfig(): Promise<DingTalkApprovalConfig> {
-    const [departments, users] = await Promise.all([
-      this.pool.query(`
-        SELECT d.id, d.code, d.name, d.is_active,
-               (SELECT m.external_id FROM external_entity_mappings m
-                  WHERE m.provider = 'dingtalk' AND m.external_type = 'department'
-                    AND m.internal_type = 'department' AND m.internal_id = d.id
-                  ORDER BY m.last_synced_at DESC LIMIT 1) AS dingtalk_department_id,
-               (SELECT p.process_code FROM department_approval_policies p
-                  WHERE p.department_id = d.id AND p.subject_type = 'recruitment_request'
-                    AND p.is_active = true LIMIT 1) AS process_code
-          FROM departments d
-         ORDER BY d.is_active DESC, d.name`),
-      this.pool.query(`
-        SELECT u.id, u.display_name, u.email, d.name AS department_name,
-               (SELECT m.external_id FROM external_entity_mappings m
-                  WHERE m.provider = 'dingtalk' AND m.external_type = 'user'
-                    AND m.internal_type = 'user' AND m.internal_id = u.id
-                  ORDER BY m.last_synced_at DESC LIMIT 1) AS dingtalk_user_id
-          FROM users u
-          LEFT JOIN departments d ON d.id = u.department_id
-         WHERE u.is_active = true
-         ORDER BY d.name NULLS LAST, u.display_name`),
-    ])
-    const callbackBase = process.env.DINGTALK_CALLBACK_BASE_URL?.trim().replace(/\/$/u, '') ?? ''
-    const callbackUrl = callbackBase ? `${callbackBase}/api/v1/integrations/dingtalk/approvals/callback` : null
-    return {
-      subjectType: 'recruitment_request',
-      callbackUrl,
-      callbackUrlConfigured: Boolean(callbackUrl),
-      departments: departments.rows.map((row) => {
-        const rawExternalId = row.dingtalk_department_id === null || row.dingtalk_department_id === undefined ? null : Number(row.dingtalk_department_id)
-        const departmentId = rawExternalId !== null && Number.isSafeInteger(rawExternalId) ? rawExternalId : null
-        const processCode = row.process_code ? String(row.process_code) : null
-        return { id: String(row.id), code: String(row.code), name: String(row.name), isActive: Boolean(row.is_active), dingTalkDepartmentId: departmentId, processCode, configured: departmentId !== null && Boolean(processCode) }
-      }),
-      users: users.rows.map((row) => {
-        const dingTalkUserId = row.dingtalk_user_id ? String(row.dingtalk_user_id) : null
-        return { id: String(row.id), displayName: String(row.display_name), email: String(row.email), departmentName: row.department_name ? String(row.department_name) : null, dingTalkUserId, configured: Boolean(dingTalkUserId) }
-      }),
-    }
-  }
-
-  async updateDingTalkApprovalConfig(patch: DingTalkApprovalConfigPatch, actorId: string, requestId?: string): Promise<DingTalkApprovalConfig> {
-    const departmentId = patch.departmentId?.trim()
-    const userId = patch.userId?.trim() ?? ''
-    if (!departmentId && !userId) throw new AdminValidationError('departmentId 或 userId 至少提供一个')
-    if (departmentId && userId) throw new AdminValidationError('一次只能保存部门审批配置或用户映射')
-
-    if (departmentId) {
-      const department = await this.pool.query('SELECT id FROM departments WHERE id = $1', [departmentId])
-      if (!department.rows[0]) throw new AdminNotFoundError(`未找到部门：${departmentId}`)
-      const processCode = patch.processCode?.trim() ?? ''
-      if (processCode.length > 200) throw new AdminValidationError('processCode 不能超过 200 个字符')
-      const rawDepartmentId = patch.dingTalkDepartmentId === null || patch.dingTalkDepartmentId === undefined ? '' : String(patch.dingTalkDepartmentId).trim()
-      if (rawDepartmentId && (!/^\d+$/u.test(rawDepartmentId) || !Number.isSafeInteger(Number(rawDepartmentId)) || Number(rawDepartmentId) <= 0)) {
-        throw new AdminValidationError('钉钉部门 ID 必须是正整数')
-      }
-      await this.pool.query(`DELETE FROM external_entity_mappings
-        WHERE provider = 'dingtalk' AND external_type = 'department' AND internal_type = 'department' AND internal_id = $1`, [departmentId])
-      if (rawDepartmentId) {
-        await this.pool.query(`INSERT INTO external_entity_mappings
-          (provider, external_type, external_id, internal_type, internal_id, metadata)
-          VALUES ('dingtalk', 'department', $1, 'department', $2, '{}'::jsonb)
-          ON CONFLICT (provider, external_type, external_id) DO UPDATE SET internal_id = EXCLUDED.internal_id, last_synced_at = now()`, [rawDepartmentId, departmentId])
-      }
-      if (processCode) {
-        await this.pool.query(`INSERT INTO department_approval_policies (department_id, subject_type, process_code, is_active)
-          VALUES ($1, 'recruitment_request', $2, true)
-          ON CONFLICT (department_id, subject_type) DO UPDATE SET process_code = EXCLUDED.process_code, is_active = true, updated_at = now()`, [departmentId, processCode])
-      } else {
-        await this.pool.query(`DELETE FROM department_approval_policies WHERE department_id = $1 AND subject_type = 'recruitment_request'`, [departmentId])
-      }
-      await this.appendAudit(actorId, 'admin.dingtalk_approval.department.update', 'department', departmentId, requestId, { configured: Boolean(rawDepartmentId && processCode), processCodeConfigured: Boolean(processCode), departmentMappingConfigured: Boolean(rawDepartmentId) })
-    } else {
-      const user = await this.pool.query('SELECT id FROM users WHERE id = $1', [userId])
-      if (!user.rows[0]) throw new AdminNotFoundError(`未找到用户：${userId}`)
-      const dingTalkUserId = patch.dingTalkUserId?.trim() ?? ''
-      if (dingTalkUserId.length > 200) throw new AdminValidationError('钉钉 userId 不能超过 200 个字符')
-      await this.pool.query(`DELETE FROM external_entity_mappings
-        WHERE provider = 'dingtalk' AND external_type = 'user' AND internal_type = 'user' AND internal_id = $1`, [userId])
-      if (dingTalkUserId) {
-        await this.pool.query(`INSERT INTO external_entity_mappings
-          (provider, external_type, external_id, internal_type, internal_id, metadata)
-          VALUES ('dingtalk', 'user', $1, 'user', $2, '{}'::jsonb)
-          ON CONFLICT (provider, external_type, external_id) DO UPDATE SET internal_id = EXCLUDED.internal_id, last_synced_at = now()`, [dingTalkUserId, userId])
-      }
-      await this.appendAudit(actorId, 'admin.dingtalk_approval.user.update', 'user', userId, requestId, { configured: Boolean(dingTalkUserId) })
-    }
-    return this.getDingTalkApprovalConfig()
   }
 
   async updateDingTalkSettings(patch: DingTalkEnvPatch, actorId: string, requestId?: string): ReturnType<typeof updateDingTalkEnvSettings> {
@@ -758,6 +705,54 @@ export class AdminService {
     const env = await updateAiEnvSettings(resolveEnvFilePath(), patch)
     await this.appendAudit(actorId, 'admin.ai_settings.update', 'env_file', null, requestId, { keys: Object.keys(patch) })
     return { ...readAiSettings(), env }
+  }
+
+  async getAiSharingSettings(): Promise<AiSharingSettings> {
+    const result = await this.pool.query(`
+      SELECT count(*)::int AS active_count,
+             count(*) FILTER (WHERE use_platform_ai = true AND platform_ai_source_organization_id IS NULL)::int AS shared_count
+        FROM organizations
+       WHERE status = 'active'`)
+    const row = result.rows[0] ?? {}
+    const activeOrganizationCount = Number(row.active_count ?? 0)
+    const sharedOrganizationCount = Number(row.shared_count ?? 0)
+    return {
+      enabled: activeOrganizationCount > 0 && sharedOrganizationCount === activeOrganizationCount,
+      activeOrganizationCount,
+      sharedOrganizationCount,
+    }
+  }
+
+  async updateAiSharingSettings(enabled: boolean, actorId: string, requestId?: string): Promise<AiSharingSettings> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const before = await client.query(`
+        SELECT count(*)::int AS active_count,
+               count(*) FILTER (WHERE use_platform_ai = true AND platform_ai_source_organization_id IS NULL)::int AS shared_count
+          FROM organizations
+         WHERE status = 'active'`)
+      const beforeRow = before.rows[0] ?? {}
+      await client.query(`
+        UPDATE organizations
+           SET use_platform_ai = $1,
+               platform_ai_source_organization_id = NULL
+         WHERE status = 'active'`, [enabled])
+      await this.appendAudit(actorId, 'admin.ai_sharing.update', 'organizations', null, requestId, {
+        enabled,
+        before: {
+          activeOrganizationCount: Number(beforeRow.active_count ?? 0),
+          sharedOrganizationCount: Number(beforeRow.shared_count ?? 0),
+        },
+      }, client)
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    return this.getAiSharingSettings()
   }
 
   /** 用给定（或当前生效）的连接拉取模型列表，供「先测试再保存模型」使用。 */

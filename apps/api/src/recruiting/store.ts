@@ -54,6 +54,10 @@ export function createSeedState(): RecruitingStoreState {
     offers: [],
     offerVersions: [],
     onboarding: [],
+    onboardingTasks: [],
+    onboardingMaterials: [],
+    onboardingReminders: [],
+    onboardingIntegrations: [],
     interviews: [],
     interviewFeedback: [],
     approvalInstances: [],
@@ -91,7 +95,14 @@ function migrateState(value: RecruitingStoreState): RecruitingStoreState {
   }
   if (!Array.isArray(value.offers)) value.offers = []
   if (!Array.isArray(value.offerVersions)) value.offerVersions = []
+  for (const version of value.offerVersions) {
+    if (!Array.isArray(version.materials)) version.materials = []
+  }
   if (!Array.isArray(value.onboarding)) value.onboarding = []
+  if (!Array.isArray(value.onboardingTasks)) value.onboardingTasks = []
+  if (!Array.isArray(value.onboardingMaterials)) value.onboardingMaterials = []
+  if (!Array.isArray(value.onboardingReminders)) value.onboardingReminders = []
+  if (!Array.isArray(value.onboardingIntegrations)) value.onboardingIntegrations = []
   if (!Number.isFinite(value.nextOfferNumber)) value.nextOfferNumber = Math.max(0, ...value.offers.map((item) => Number(item.code.replace('OFF-', '')) || 0)) + 1
   if (!Array.isArray(value.interviews)) value.interviews = []
   if (!Array.isArray(value.interviewFeedback)) value.interviewFeedback = []

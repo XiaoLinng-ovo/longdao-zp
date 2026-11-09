@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import AppShell from './app/layout/AppShell.vue'
 import WorkspaceContextBoundary from './shared/components/WorkspaceContextBoundary.vue'
 import { authSession, refreshAuthSession } from './modules/auth/session'
+import { loadRuntimeFeatures } from './shared/config/runtime-features'
 import { backgroundAudio } from './modules/interviews/utils/background-audio'
 import { WORKSPACE_CONTEXT_EVENT, WORKSPACE_CONTEXT_STORAGE_KEY } from './shared/api/workspace-context'
 
@@ -22,6 +23,7 @@ function storageChanged(event: StorageEvent) {
 }
 watch(() => [authSession.user?.id, authSession.user?.workspaceId, authSession.sessionId], () => {
   void backgroundAudio.recover().catch(() => undefined)
+  void loadRuntimeFeatures(authSession.user ? `${authSession.sessionId}:${authSession.user.id}` : '')
 }, { immediate: true, flush: 'post' })
 onMounted(() => {
   window.addEventListener('beforeunload', warnPendingAudio)

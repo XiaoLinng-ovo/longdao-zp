@@ -2,11 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, Search } from '@lucide/vue'
 import { authSession } from '../../../auth/session'
+import { isPlatformAdminRole } from '../../../auth/platform-roles'
 import { describeApiFailure } from '../../../../shared/utils/errorMessage'
 import UserDetailDrawer from '../components/UserDetailDrawer.vue'
 import {
   getPlatformUser,
   listPlatformUsers,
+  resetPlatformUserAiGenerationQuota,
   resetPlatformUserPassword,
   revokePlatformUserSessions,
   updatePlatformUserProfile,
@@ -17,7 +19,7 @@ import {
   type PlatformUserStatusFilter,
 } from '../api'
 
-type ActionKind = 'status' | 'revoke' | 'reset' | 'profile'
+type ActionKind = 'status' | 'revoke' | 'reset' | 'profile' | 'resetAiQuota'
 
 const users = ref<PlatformUserListItem[]>([])
 const total = ref(0)
@@ -37,16 +39,17 @@ const actionKind = ref<ActionKind | null>(null)
 const actionReason = ref('')
 const actionError = ref('')
 const actionSaving = ref(false)
+const actionWorkspaceId = ref('')
 const profileName = ref('')
 const profilePhone = ref('')
 const temporaryCredential = ref<{ email: string; password: string; revokedSessions: number } | null>(null)
 const copyNotice = ref('')
 
-const canWrite = computed(() => authSession.user?.platformRole === 'admin')
+const canWrite = computed(() => isPlatformAdminRole(authSession.user?.platformRole))
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const enabledOnPage = computed(() => users.value.filter((item) => item.isActive).length)
 const registrationsOnPage = computed(() => users.value.filter((item) => item.registrationSource === 'open_registration').length)
-const platformAdminsOnPage = computed(() => users.value.filter((item) => item.platformRole === 'admin').length)
+const platformAdminsOnPage = computed(() => users.value.filter((item) => isPlatformAdminRole(item.platformRole)).length)
 
 const roleLabels: Record<string, string> = {
   owner: '企业所有者',
@@ -63,6 +66,7 @@ const actionTitles: Record<ActionKind, string> = {
   revoke: '强制退出所有会话',
   reset: '重置登录密码',
   profile: '编辑基础资料',
+  resetAiQuota: '重置 AI 生成次数',
 }
 
 function time(value: string | null) {
@@ -135,11 +139,12 @@ async function turn(delta: number) {
   await load()
 }
 
-function openAction(kind: ActionKind) {
+function openAction(kind: ActionKind, workspaceId?: string) {
   if (!detail.value || !canWrite.value) return
   actionKind.value = kind
   actionReason.value = ''
   actionError.value = ''
+  actionWorkspaceId.value = workspaceId ?? ''
   copyNotice.value = ''
   if (kind === 'profile') {
     profileName.value = detail.value.user.displayName
@@ -151,6 +156,7 @@ function closeAction() {
   if (actionSaving.value) return
   actionKind.value = null
   actionError.value = ''
+  actionWorkspaceId.value = ''
 }
 
 async function submitAction() {
@@ -179,6 +185,15 @@ async function submitAction() {
         revokedSessions: result.revokedSessions,
       }
       notice.value = `密码已重置，并撤销 ${result.revokedSessions} 个活跃会话`
+      await loadDetail(account.user.id)
+    } else if (kind === 'resetAiQuota') {
+      const workspace = account.workspaces.find(item => item.id === actionWorkspaceId.value)
+      if (!workspace || workspace.serviceStatus !== 'trial') {
+        actionError.value = '请选择仍处于试用状态的企业'
+        return
+      }
+      const result = await resetPlatformUserAiGenerationQuota(account.user.id, workspace.id, actionReason.value.trim())
+      notice.value = `已将「${result.organizationName}」的 AI 生成次数从 ${result.previousGenerations} 次重置为 0 次`
       await loadDetail(account.user.id)
     } else {
       if (profileName.value.trim().length < 2) {
@@ -264,7 +279,7 @@ onMounted(() => load())
           <select v-model="platformRole" aria-label="平台身份" @change="load(true)">
             <option value="">全部平台身份</option>
             <option value="admin">平台管理员</option>
-            <option value="viewer">平台只读</option>
+            <option value="viewer">平台只读运营</option>
             <option value="none">普通账号</option>
           </select>
           <button class="search-button" type="submit" :disabled="loading">{{ loading ? '查询中' : '查询' }}</button>
@@ -357,6 +372,7 @@ onMounted(() => load())
         <p v-if="actionKind === 'status'" class="dialog-help">{{ detail?.user.isActive ? '停用后将立即撤销该用户全部有效登录会话。' : '启用后用户可重新登录，但不会恢复旧会话。' }}</p>
         <p v-else-if="actionKind === 'revoke'" class="dialog-help">该操作会立即撤销用户当前全部有效登录会话。</p>
         <p v-else-if="actionKind === 'reset'" class="dialog-help">系统将生成一次性临时密码，并立即撤销全部有效登录会话。临时密码只显示一次。</p>
+        <p v-else-if="actionKind === 'resetAiQuota'" class="dialog-help">{{ detail?.workspaces.find(item => item.id === actionWorkspaceId)?.name || '所选企业' }} 的试用 AI 额度由岗位说明书和 JD 共用。确认后次数归零，但不会删除历史调用记录。</p>
         <div v-else class="profile-fields">
           <label>姓名<input v-model="profileName" maxlength="80" /></label>
           <label>手机号<input v-model="profilePhone" type="tel" placeholder="留空表示清空" /></label>

@@ -13,6 +13,7 @@ export interface InterviewSummaryReport {
   version: 'actual-dialogue-v1' | 'whole-dialogue-v2'; generatedAt: string; model: string | null; overallScore: number | null; summary: string
   dimensions: SummaryDimension[]; strengths: SummaryFinding[]; concerns: SummaryFinding[]; unassessed: string[]; warnings: string[]
   recommendation?: SummaryRecommendation | null
+  reviewRequired?: boolean
   pairs: ActualInterviewPair[]; transcript: TranscriptTurn[]; advisoryOnly: true; applicationStatusMutation: 'none'
 }
 export interface InterviewSummaryView {

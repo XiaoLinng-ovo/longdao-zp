@@ -16,7 +16,7 @@ const error = ref('')
 const message = ref('')
 const pendingDecision = ref<'passed' | 'eliminated' | undefined>(props.initialAction === 'passed' || props.initialAction === 'eliminated' ? props.initialAction : undefined)
 const decisionReason = ref('')
-const includeTalent = ref(props.summary.talentPool)
+const activeDecision = computed(() => pendingDecision.value ?? props.summary.decision)
 const reviewOpen = computed(() => ['pending_analysis', 'analysis_queued', 'human_review'].includes(props.applicationStatus ?? ''))
 const editable = computed(() => props.canEdit && reviewOpen.value && !props.busy && props.summary.aiScore !== undefined)
 const advice = computed(() => {
@@ -32,7 +32,11 @@ async function save(input: ResumeReviewInput) {
   message.value = ''
   try {
     await updateResumeReview(props.summary.resultId, input)
-    message.value = input.decision === 'passed' ? '已通过，进入初试待邀约；可到面试管理安排线上或线下初试。' : input.decision === 'eliminated' ? '已淘汰，人才库选择已保存。' : '人才库选择已保存。'
+    message.value = input.decision === 'passed'
+      ? '已通过，进入初试待邀约；可到面试管理安排线上或线下初试。'
+      : input.decision === 'eliminated'
+        ? (input.talentPool ? '已淘汰，因 AI 评分达到 80 分及以上，已自动加入人才库。' : '已淘汰，因 AI 评分低于 80 分，不加入人才库。')
+        : '人才库选择已保存。'
     emit('saved')
     return true
   } catch (cause) {
@@ -45,7 +49,6 @@ async function save(input: ResumeReviewInput) {
 function chooseDecision(decision: 'passed' | 'eliminated') {
   pendingDecision.value = decision
   decisionReason.value = ''
-  includeTalent.value = props.summary.talentPool
   error.value = ''
 }
 async function confirmDecision() {
@@ -54,7 +57,7 @@ async function confirmDecision() {
     return
   }
   const input: ResumeReviewInput = { decision: pendingDecision.value, comment: decisionReason.value.trim() }
-  if (pendingDecision.value === 'eliminated' && props.summary.aiScore < 80) input.talentPool = includeTalent.value
+  if (pendingDecision.value === 'eliminated') input.talentPool = props.summary.aiScore >= 80
   if (await save(input)) pendingDecision.value = undefined
 }
 </script>
@@ -77,8 +80,12 @@ async function confirmDecision() {
       <span v-if="summary.talentPool" class="decision-tag">已加入人才库</span>
     </div>
     <div class="review-actions">
-      <button v-if="canEdit" class="btn btn-ghost pass-button" type="button" :disabled="!editable || saving || summary.aiScore === undefined" @click="chooseDecision('passed')">通过</button>
-      <button v-if="canEdit" class="btn btn-ghost eliminate-button" type="button" :disabled="!editable || saving || summary.aiScore === undefined" @click="chooseDecision('eliminated')">淘汰</button>
+      <button v-if="canEdit" class="btn btn-ghost pass-button" :class="{ 'decision-selected': activeDecision === 'passed' }" type="button" :aria-pressed="activeDecision === 'passed'" :title="activeDecision === 'passed' ? '当前已选择通过' : '选择通过'" :disabled="!editable || saving || summary.aiScore === undefined" @click="chooseDecision('passed')">
+        通过
+      </button>
+      <button v-if="canEdit" class="btn btn-ghost eliminate-button" :class="{ 'decision-selected': activeDecision === 'eliminated' }" type="button" :aria-pressed="activeDecision === 'eliminated'" :title="activeDecision === 'eliminated' ? '当前已选择淘汰' : '选择淘汰'" :disabled="!editable || saving || summary.aiScore === undefined" @click="chooseDecision('eliminated')">
+        淘汰
+      </button>
       <button v-if="canEdit && summary.aiScore !== undefined && (summary.aiScore < 80 || summary.talentPool)" class="btn btn-ghost" type="button" :disabled="saving || busy" @click="save({ talentPool: !summary.talentPool })">{{ summary.talentPool ? '移出人才库' : '加入人才库' }}</button>
     </div>
     <p v-if="busy" class="muted">简历正在解析，请完成后再进行评分或筛选。</p>
@@ -88,12 +95,11 @@ async function confirmDecision() {
 
     <div v-if="pendingDecision" class="review-form decision-confirm">
       <h4>{{ pendingDecision === 'passed' ? '确认通过，进入初试' : '确认淘汰' }}</h4>
-      <p v-if="summary.aiScore !== undefined">AI 评分：{{ summary.aiScore }}。{{ pendingDecision === 'passed' ? '通过后进入面试待安排' : '淘汰后保留简历和评分记录，不会删除候选人。' }}</p>
+      <p v-if="summary.aiScore !== undefined">AI 评分：{{ summary.aiScore }}。{{ pendingDecision === 'passed' ? '通过后进入面试待安排' : summary.aiScore >= 80 ? '淘汰后自动加入人才库，并保留简历和评分记录。' : '淘汰后不加入人才库，但会保留简历和评分记录。' }}</p>
       <p v-if="pendingDecision === 'passed' && summary.aiScore !== undefined && summary.aiScore < 80" class="warning">AI 建议淘汰，是否仍由人工确认通过并进入初试？</p>
       <p v-if="pendingDecision === 'eliminated' && summary.aiScore !== undefined && summary.aiScore >= 80" class="warning">AI 建议通过，是否仍由人工确认淘汰？</p>
       <label :for="`decision-reason-${summary.resultId}`">处理说明（可选）</label>
       <textarea :id="`decision-reason-${summary.resultId}`" v-model="decisionReason" rows="2" :disabled="saving"></textarea>
-      <label v-if="pendingDecision === 'eliminated' && summary.aiScore !== undefined && summary.aiScore < 80" class="talent-check"><input v-model="includeTalent" type="checkbox" :disabled="saving" />同时加入人才库，供后续岗位筛选</label>
       <div class="review-actions">
         <button class="btn btn-ghost" type="button" :disabled="saving" @click="pendingDecision = undefined">取消</button>
         <button class="btn btn-primary" type="button" :disabled="saving || !editable || summary.aiScore === undefined" @click="confirmDecision">{{ saving ? '保存中…' : '确认' }}</button>
@@ -129,11 +135,15 @@ async function confirmDecision() {
 .decision-tag { padding: 5px 9px; border-radius: 8px; background: #fff; font-size: 12px; }
 .review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .pass-button { color: #15803d; border-color: #bbf7d0; }.eliminate-button { color: #b91c1c; border-color: #fecaca; }
+.decision-selected { font-weight: 700; box-shadow: 0 0 0 2px currentColor, 0 4px 10px rgba(15, 23, 42, .12); }
+.decision-selected:disabled { opacity: 1; cursor: default; }
+.pass-button.decision-selected { background: #dcfce7; color: #166534; border-color: #22c55e; }
+.eliminate-button.decision-selected { background: #fee2e2; color: #991b1b; border-color: #ef4444; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .review-form { padding: 16px; border: 1px solid #bfdbfe; border-radius: 12px; margin: 15px 0; background: #f8fafc; }
 .review-form h4 { margin: 0 0 14px; }.review-form label { display: block; font-size: 13px; margin: 12px 0 6px; }
 .review-form textarea { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; background: #fff; font: inherit; }
-.review-form p { font-size: 13px; line-height: 1.7; }.talent-check { display: flex !important; gap: 8px; align-items: center; }.warning { color: #b45309; }
+.review-form p { font-size: 13px; line-height: 1.7; }.warning { color: #b45309; }
 .scoring-evidence { margin-top: 22px; border-top: 1px solid #e2e8f0; padding-top: 16px; }.scoring-evidence summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .evidence-item { margin: 12px 0; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; }.evidence-item h4 { margin: 0; font-size: 13px; }.evidence-item h4 span { margin-right: 8px; font-size: 11px; padding: 3px 6px; border-radius: 5px; background: #f1f5f9; }.matched { color: #15803d; }.conflict { color: #b91c1c; }.missing { color: #b45309; }.evidence-item p { font-size: 13px; line-height: 1.7; }.evidence-item blockquote { margin: 8px 0 0; padding: 8px 12px; border-left: 3px solid #93c5fd; background: #eff6ff; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .score-breakdown { grid-template-columns: 1fr; } }

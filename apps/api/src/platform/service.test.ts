@@ -12,22 +12,26 @@ test('platform lifecycle validates reason, optimistic version and future zoned d
   assert.equal(validateLifecyclePatch({...input,serviceStatus:'trial',trialEndsAt:'2099-01-01T08:00:00+08:00'}).deadline,'2099-01-01T00:00:00.000Z')
 })
 test('explicit platform domain separates tenant AI and tasks from global settings', () => {
-  for (const path of ['/api/v1/platform/customers','/api/v1/platform/audit-logs','/api/v1/admin/users','/api/v1/admin/settings','/api/v1/admin/security','/api/v1/admin/unknown']) assert.equal(isPlatformManagementPath(path),true,path)
-  for (const path of ['/api/v1/jobs','/api/v1/admin/ai-skills/a','/api/v1/admin/analysis-tasks','/api/v1/admin/recruitment-approval-settings']) assert.equal(isPlatformManagementPath(path),false,path)
-  for (const path of ['/api/v1/admin/ai-settings','/api/v1/admin/ai-connection-test']) assert.equal(isPlatformManagementPath(path),true,path)
+  for (const path of ['/api/v1/platform/customers','/api/v1/platform/audit-logs','/api/v1/admin/security','/api/v1/admin/unknown']) assert.equal(isPlatformManagementPath(path),true,path)
+  for (const path of ['/api/v1/jobs','/api/v1/admin/ai-skills/a','/api/v1/admin/analysis-tasks']) assert.equal(isPlatformManagementPath(path),false,path)
+  for (const path of ['/api/v1/admin/users','/api/v1/admin/settings','/api/v1/admin/ai-settings','/api/v1/admin/ai-connection-test']) assert.equal(isPlatformManagementPath(path),false,path)
 })
 test('non-database demo user is denied without a database query', async () => {
   const service = new PlatformService({query(){throw new Error('must not query')}} as unknown as Pool)
   await assert.rejects(service.requireAccess('user-admin'),{status:403,code:'PLATFORM_PERMISSION_REQUIRED'})
 })
+test('platform administrator can perform platform writes', async () => {
+  const service = new PlatformService({query:async()=>({rows:[{role:'admin'}]})} as unknown as Pool)
+  assert.equal(await service.requireAccess('11111111-1111-4111-8111-111111111111',true),'admin')
+})
 test('platform checks current grant on every request, before downstream cached replay', async () => {
   let role: 'admin'|'viewer'|undefined='admin', downstream=0, checks=0
   const middleware = createPlatformAccessMiddleware({async requireAccess(_id,write){checks++;if(!role || (write && role!=='admin')) throw Object.assign(new Error('denied'),{status:403});return role}})
-  const context = {url:new URL('http://test/api/v1/platform/customers'),req:{method:'GET'},res:{setHeader(){}},auth:{method:'session',user:{id:'user',role:'admin',platformRole:'admin'}}} as unknown as RequestContext
+  const context = {url:new URL('http://test/api/v1/platform/customers'),req:{method:'GET',headers:{}},res:{setHeader(){}},auth:{method:'session',user:{id:'user',role:'admin',platformRole:'admin'}}} as unknown as RequestContext
   await middleware(context,async()=>{downstream++});role=undefined
   await assert.rejects(async()=>{await middleware(context,async()=>{downstream++})},{status:403});assert.equal(downstream,1);assert.equal(checks,2)
   role='viewer';context.req.method='PATCH';await assert.rejects(async()=>{await middleware(context,async()=>{downstream++})},{status:403})
-  context.auth!.method='development-bootstrap';await assert.rejects(async()=>{await middleware(context,async()=>{downstream++})},{status:401});assert.equal(checks,3)
+  context.auth!.method='development-bootstrap';await assert.rejects(async()=>{await middleware(context,async()=>{downstream++})},{status:401});assert.equal(checks,2)
 })
 
 test('platform writes deny untrusted/missing origins, require CSRF and fail closed without production allowlist', () => {

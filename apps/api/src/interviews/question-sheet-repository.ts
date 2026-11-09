@@ -273,7 +273,7 @@ export class QuestionSheetNotFoundError extends Error {
   constructor(message: string) { super(message); this.name = 'QuestionSheetNotFoundError' }
 }
 
-export async function recordStageDecisionWithExecutor(client: RepositoryQueryExecutor, applicationId: string, stage: InterviewStage, decision: StageDecision, actorId: string): Promise<InterviewStageReviewRecord> {
+export async function recordStageDecisionWithExecutor(client: RepositoryQueryExecutor, applicationId: string, stage: InterviewStage, decision: StageDecision, actorId: string, allowRegression = false): Promise<InterviewStageReviewRecord> {
   const application = (await client.query(
     'SELECT id, organization_id, status FROM applications WHERE id = $1::uuid FOR UPDATE', [applicationId],
   )).rows[0]
@@ -281,7 +281,7 @@ export async function recordStageDecisionWithExecutor(client: RepositoryQueryExe
   const previous = (await client.query(
     'SELECT decision FROM interview_stage_reviews WHERE application_id = $1::uuid AND stage = $2', [applicationId, stage],
   )).rows[0]
-  if (stage === 'initial' && previous?.decision === 'advanced' && decision !== 'advanced') {
+  if (!allowRegression && stage === 'initial' && previous?.decision === 'advanced' && decision !== 'advanced') {
     throw new QuestionSheetConflictError('候选人已进入复试，请在复试阶段确认结论')
   }
   let nextInterview: NextRoundInterview | null = null

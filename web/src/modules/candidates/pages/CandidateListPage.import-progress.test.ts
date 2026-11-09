@@ -107,7 +107,7 @@ describe('resume import progress cleanup', () => {
   it('retains real analysis after upload completion, then stops polling and clears persistence when it finishes', async () => {
     batch.items = [item({ analysisTaskId: 'task-1', analysisStatus: 'processing' })]
     await mount()
-    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('1 份等待或正在分析')
+    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('文件上传：1/1 已完成；AI 分析：分析中 1，完成 0/1')
     expect(window.localStorage.getItem(storageKey)).toBe('batch-1')
     batch.items[0]!.analysisStatus = 'completed'
     batch.counts.completed = 1
@@ -120,7 +120,7 @@ describe('resume import progress cleanup', () => {
   it('counts deleted entries as finished without losing another active task in the same batch', async () => {
     batch.items = [item(), item({ id: 'item-2', analysisTaskId: 'task-2', analysisStatus: 'queued' })]
     await mount()
-    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('1/2，1 份等待或正在分析')
+    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('文件上传：2/2 已完成；AI 分析：排队 1，完成 0/2，已删除 1')
     expect(window.localStorage.getItem(storageKey)).toBe('batch-1')
     batch.items[1]!.analysisStatus = 'completed'
     await advance(5000)
@@ -129,9 +129,10 @@ describe('resume import progress cleanup', () => {
 
   it('continues following already uploaded tasks when the rest of the upload is cancelled', async () => {
     batch.status = 'cancelled'
+    batch.phase = 'cancelled'
     batch.items = [item({ analysisStatus: 'processing' }), item({ id: 'item-2', status: 'cancelled' })]
     await mount()
-    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('1/2，1 份等待或正在分析')
+    expect(root.querySelector('.resume-import-progress')?.textContent).toContain('文件上传：已停止；AI 分析：分析中 1，完成 0/2')
     await advance(5000)
     expect(readBatch).toHaveBeenCalledTimes(2)
     expect(window.localStorage.getItem(storageKey)).toBe('batch-1')
@@ -171,7 +172,7 @@ describe('resume import progress cleanup', () => {
   })
 
   it('reconciles progress immediately after candidate deletion', async () => {
-    authSession.user = { id: 'user-1', name: 'Recruiter', email: 'test@example.com', role: 'recruiter', departmentId: 'department-1' }
+    authSession.user = { id: 'user-1', name: '企业用户', email: 'test@example.com', role: 'recruiter', departmentId: 'department-1', workspaceId: 'workspace-1' }
     vi.mocked(loadCandidates).mockResolvedValue([{
       id: 'CAN-1', entityId: 'candidate-1', name: 'Candidate', job: 'Engineer', score: 80,
       aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-10-26',

@@ -13,6 +13,24 @@ describe('AdminService departments', () => {
     assert.deepEqual(departments[0], { id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-09-18T00:00:00.000Z', updatedAt: '2026-09-18T00:00:00.000Z' })
   })
 
+  it('scopes department listing to the selected enterprise', async () => {
+    const organizationId = '22222222-2222-4222-8222-222222222222'
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql, ...(values === undefined ? {} : { values }) })
+        return { rows: [row()] }
+      },
+    } as never
+
+    const departments = await new AdminService(pool, undefined, organizationId).listDepartments(false)
+
+    assert.equal(departments[0]?.name, '技术部')
+    assert.match(calls[0]?.sql ?? '', /WHERE organization_id = \$1::uuid/u)
+    assert.doesNotMatch(calls[0]?.sql ?? '', /is_active = true/u)
+    assert.deepEqual(calls[0]?.values, [organizationId])
+  })
+
   it('creates a department from its name with a generated unique code', async () => {
     const calls: Array<{ sql: string; values?: unknown[] }> = []
     const pool = {
@@ -60,7 +78,7 @@ describe('AdminService departments', () => {
       query: async (sql: string, values?: unknown[]) => {
         calls.push({ sql, values })
         if (sql.startsWith('SELECT id, code, name, is_active')) return { rows: [row({ code: 'dept-qa', name: '质量部' })] }
-        if (sql.includes('FROM users WHERE department_id')) return { rows: [{ users: 0, requests: 0, jobs: 0, children: 0 }] }
+        if (sql.includes('FROM users WHERE department_id')) return { rows: [{ users: 0, members: 0, invitations: 0, requests: 0, jobs: 0, children: 0 }] }
         if (sql.includes('FROM department_approval_policies')) return { rows: [{ count: 2 }] }
         return { rows: [] }
       },
@@ -81,7 +99,7 @@ describe('AdminService departments', () => {
       query: async (sql: string) => {
         calls.push({ sql })
         if (sql.startsWith('SELECT id, code, name, is_active')) return { rows: [row({ code: 'dept-tech', name: '技术部' })] }
-        return { rows: [{ users: 2, requests: 1, jobs: 3, children: 1 }] }
+        return { rows: [{ users: 2, members: 1, invitations: 2, requests: 1, jobs: 3, children: 1 }] }
       },
     } as never
     await assert.rejects(
@@ -89,6 +107,8 @@ describe('AdminService departments', () => {
       (error: unknown) =>
         error instanceof AdminValidationError &&
         /2 个用户/.test((error as Error).message) &&
+        /1 个企业成员/.test((error as Error).message) &&
+        /2 个待接受邀请/.test((error as Error).message) &&
         /1 个招聘需求/.test((error as Error).message) &&
         /3 个岗位/.test((error as Error).message) &&
         /1 个子部门/.test((error as Error).message)
@@ -100,10 +120,67 @@ describe('AdminService departments', () => {
     const pool = { query: async () => ({ rows: [] }) } as never
     await assert.rejects(() => new AdminService(pool).deleteDepartment('missing', 'admin-1'), AdminNotFoundError)
   })
+
+  it('deletes an unreferenced enterprise department with tenant-scoped SQL', async () => {
+    const organizationId = '22222222-2222-4222-8222-222222222222'
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql, ...(values === undefined ? {} : { values }) })
+        if (sql.startsWith('SELECT id, code, name, is_active')) return { rows: [row()] }
+        if (sql.includes('FROM users u')) return { rows: [{ users: 0, members: 0, invitations: 0, requests: 0, jobs: 0, children: 0 }] }
+        if (sql.includes('FROM department_approval_policies')) return { rows: [{ count: 0 }] }
+        return { rows: [] }
+      },
+    } as never
+
+    await new AdminService(pool, undefined, organizationId).deleteDepartment('d1', 'member-1')
+
+    const blockers = calls.find((call) => call.sql.includes('FROM users u'))
+    assert.match(blockers?.sql ?? '', /organization_members/u)
+    assert.match(blockers?.sql ?? '', /organization_invitations/u)
+    assert.deepEqual(blockers?.values, ['d1', organizationId])
+    const deletion = calls.find((call) => call.sql.startsWith('DELETE FROM departments'))
+    assert.match(deletion?.sql ?? '', /organization_id = \$2::uuid/u)
+    assert.deepEqual(deletion?.values, ['d1', organizationId])
+  })
+
+  it('returns not found when updating or deleting a department from another enterprise', async () => {
+    const organizationId = '22222222-2222-4222-8222-222222222222'
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    const pool = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql, ...(values === undefined ? {} : { values }) })
+        return { rows: [] }
+      },
+    } as never
+    const service = new AdminService(pool, undefined, organizationId)
+
+    await assert.rejects(() => service.updateDepartment('other-department', { name: '越权改名' }, 'member-1'), AdminNotFoundError)
+    await assert.rejects(() => service.deleteDepartment('other-department', 'member-1'), AdminNotFoundError)
+
+    assert.equal(calls.length, 2)
+    for (const call of calls) {
+      assert.match(call.sql, /id = \$1 AND organization_id = \$2::uuid/u)
+      assert.deepEqual(call.values, ['other-department', organizationId])
+    }
+  })
+})
+
+describe('AdminService recruitment reports setting', () => {
+  it('defaults to disabled when no setting has been saved', async () => {
+    const pool = { query: async () => ({ rows: [] }) } as never
+    assert.equal(await new AdminService(pool).getRecruitmentReportsEnabled(), false)
+  })
+
+  it('reads only the persisted boolean true value as enabled', async () => {
+    const pool = { query: async () => ({ rows: [{ value: true }] }) } as never
+    assert.equal(await new AdminService(pool).getRecruitmentReportsEnabled(), true)
+  })
 })
 
 describe('AdminService interviewer options', () => {
-  it('lists only active HR admins, hiring managers and admins in the current workspace', async () => {
+  it('lists every active member in the current workspace', async () => {
     const calls: Array<{ sql: string; values?: unknown[] }> = []
     const pool = {
       query: async (sql: string, values?: unknown[]) => {
@@ -130,7 +207,7 @@ describe('AdminService interviewer options', () => {
     assert.match(calls[0]?.sql ?? '', /is_active = true/u)
     assert.doesNotMatch(calls[0]?.sql ?? '', /password_hash/u)
     assert.match(calls[0]?.sql ?? '', /m.organization_id = \$1::uuid/u)
-    assert.match(calls[0]?.sql ?? '', /ur.user_id = u.id AND r.code IN \('hr_admin', 'hiring_manager', 'admin'\)/u)
+    assert.doesNotMatch(calls[0]?.sql ?? '', /r\.code IN \('hr_admin', 'hiring_manager', 'admin'\)/u)
     assert.deepEqual(calls[0]?.values, ['22222222-2222-4222-8222-222222222222'])
     assert.deepEqual(await new AdminService(pool).listInterviewerOptions(), [])
     assert.equal(calls.length, 1)

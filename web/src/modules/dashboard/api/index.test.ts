@@ -24,7 +24,7 @@ const summary = {
     { stage: '已入职', count: 5, conversionRate: 100 },
   ],
   pendingApprovals: [{ id: 'real-request', code: 'REQ-7', title: '测试招聘', department: '技术', headcount: 1, status: 'pending_approval', updatedAt: '2026-09-10T00:00:00Z', approval: { approver: '审批人' } }],
-  pendingFeedback: [{ id: 'interview-1', code: 'IV-1', title: '初试', round: 1, scheduledStartAt: '2026-09-11T00:00:00Z', status: 'completed', feedbackStatus: 'pending', candidateName: '张三', jobTitle: '前端工程师' }],
+  pendingInterviews: [{ id: 'interview-1', code: 'IV-1', title: '初试', round: 1, scheduledStartAt: '2026-09-11T00:00:00Z', status: 'scheduled', candidateName: '张三', jobTitle: '前端工程师' }],
   failedTasks: [{ id: 'task-1', resumeId: 'resume-1', status: 'failed', attempts: 2, lastError: '解析失败', availableAt: '2026-09-10T00:00:00Z' }],
 }
 let app: App | undefined
@@ -116,7 +116,8 @@ describe('真实招聘首页', () => {
     expect(data.metrics[3]?.trend).toBe('38.46% 转化率')
     expect(data.pending[0]).toMatchObject({ entityId: 'real-request', status: 'pending' })
     expect(data.funnel[2]).toEqual({ label: '进入面试', value: 7, conversionRate: 87.5 })
-    expect(data.pendingFeedback[0]).toMatchObject({ candidateName: '张三', feedbackStatus: 'pending' })
+    expect(data.pendingInterviews[0]).toMatchObject({ candidateName: '张三', status: 'scheduled' })
+    expect(data.todos.find(row => row.category === 'interview')).toMatchObject({ id: 'complete-interview-1', title: '面试待完成', actionLabel: '去完成' })
     expect(data.failedTasks[0]).toMatchObject({ id: 'task-1', lastError: '解析失败' })
   })
   it('招聘阶段进度与漏斗使用相同阶段人数，并在同步后一起更新', async () => {

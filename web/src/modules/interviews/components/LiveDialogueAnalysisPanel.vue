@@ -17,6 +17,13 @@ const notice = ref('')
 const live = computed(() => buildLiveSummary(props.segments.filter(row => row.sessionId === props.sessionId), props.analyses))
 const report = computed(() => view.value?.report)
 const pairs = computed(() => report.value?.pairs ?? live.value.pairs)
+// 未被提问覆盖的发言（含说话人待确认）在面试结束后必须照样展示，否则复盘时看不到候选人回答；
+// 面试进行中只在已经产生分析结果时展示，避免把实时杂音塞进面板。
+const unpaired = computed(() => {
+  if (report.value) return []
+  const rows = live.value.unpaired
+  return props.completed || rows.some(row => row.analyses.length) ? rows : []
+})
 const pending = computed(() => view.value?.status === 'pending' || view.value?.status === 'generating')
 const kinds = { assessment: '正式考察', logistics: '流程与安排', unreviewed: '待核实' }
 const time = (ms: number) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`
@@ -84,6 +91,22 @@ onUnmounted(() => { version++; clearTimer() })
           <p class="candidate-answer">{{ pair.answer || (completed ? '未记录到可确认的候选人回答，不计分。' : '等待候选人回答，不计分。') }}</p>
           <p v-if="!report && pair.answer && !pairAnalyses(pair.answerSegmentIds).length" class="muted">回答已记录，暂无分析。</p>
           <div v-for="(analysis, analysisIndex) in pairAnalyses(pair.answerSegmentIds)" :key="analysisIndex" class="answer-analysis">
+            <p class="analysis-summary">{{ analysis.summary }}</p>
+            <div class="score-list"><div v-for="score in analysis.scores" :key="score.dimension"><strong>{{ score.dimension }} · {{ score.score }}/10</strong><p>{{ score.rationale }}</p><small v-if="score.questionQuote">实际提问：{{ score.questionQuote }}</small><blockquote v-for="quote in score.evidence" :key="quote">{{ quote }}</blockquote></div></div>
+            <p v-if="!analysis.scores.length" class="muted">暂不评分</p>
+            <blockquote v-for="quote in analysis.evidence" :key="quote">{{ quote }}</blockquote>
+            <p v-if="analysis.concerns.length">需要核实：{{ analysis.concerns.join('；') }}</p>
+          </div>
+        </article>
+      </section>
+
+      <section v-if="unpaired.length" class="dialogue-section unpaired-section">
+        <h3>未配对与待确认发言 <small>{{ unpaired.length }} 段</small></h3>
+        <article v-for="turn in unpaired" :key="turn.id" class="dialogue-pair">
+          <div class="dialogue-meta"><span>{{ time(turn.startMs) }}–{{ time(turn.endMs) }}</span><span>{{ turn.role === 'candidate' ? '候选人' : '待确认' }}</span></div>
+          <p class="candidate-answer">{{ turn.text }}</p>
+          <p v-if="turn.role === 'candidate' && !turn.analyses.length" class="muted">回答已记录，暂无分析。</p>
+          <div v-for="(analysis, analysisIndex) in turn.analyses" :key="analysisIndex" class="answer-analysis">
             <p class="analysis-summary">{{ analysis.summary }}</p>
             <div class="score-list"><div v-for="score in analysis.scores" :key="score.dimension"><strong>{{ score.dimension }} · {{ score.score }}/10</strong><p>{{ score.rationale }}</p><small v-if="score.questionQuote">实际提问：{{ score.questionQuote }}</small><blockquote v-for="quote in score.evidence" :key="quote">{{ quote }}</blockquote></div></div>
             <p v-if="!analysis.scores.length" class="muted">暂不评分</p>

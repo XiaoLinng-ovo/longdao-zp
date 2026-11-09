@@ -16,6 +16,7 @@ const interviewers = ref<InterviewerOption[]>([])
 const mode = ref<'online' | 'offline'>('online')
 const form = ref({ title: '初试', type: 'technical' as InterviewType, scheduledAt: '', meetingUrl: '', location: '', interviewerId: '' })
 let disposed = false
+let backdropPointerActive = false
 
 async function load() {
   loading.value = true
@@ -40,6 +41,30 @@ async function load() {
 }
 
 function close() { if (!saving.value) emit('close') }
+
+function handleBackdropPointerDown(event: PointerEvent) {
+  backdropPointerActive = event.target === event.currentTarget
+}
+
+function resetBackdropPointer() {
+  backdropPointerActive = false
+}
+
+function handleBackdropClick(event: MouseEvent) {
+  const closeFromBackdrop = backdropPointerActive && event.target === event.currentTarget
+  backdropPointerActive = false
+  if (closeFromBackdrop) close()
+}
+
+function handleEscape(event: KeyboardEvent) {
+  if (event.isComposing) return
+  const target = event.target
+  if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) {
+    target.blur()
+    return
+  }
+  close()
+}
 
 async function submit() {
   if (loading.value || saving.value || loadError.value) return
@@ -73,7 +98,7 @@ onUnmounted(() => { disposed = true })
 </script>
 
 <template>
-  <div class="overlay" role="presentation" @click.self="close" @keydown.esc="close">
+  <div class="overlay" role="presentation" @pointerdown="handleBackdropPointerDown" @pointercancel="resetBackdropPointer" @click="handleBackdropClick" @keydown.esc="handleEscape">
     <form class="dialog initial-interview-dialog" role="dialog" aria-modal="true" aria-labelledby="initial-interview-title" @submit.prevent="submit">
       <div class="dialog-heading">
         <h3 id="initial-interview-title">初试邀约</h3>

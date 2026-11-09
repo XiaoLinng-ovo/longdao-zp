@@ -206,65 +206,53 @@ async function submitEdit() {
   }
 }
 
-async function generateDocuments() {
+async function generateDocument(kind: 'spec' | 'jd') {
   if (acting.value || !job.value || editingSpec.value || editingJd.value) return
   const id = job.value.id
-  const inputs = {
-    spec: {
-      ...(specPrompt.value.trim() ? { prompt: specPrompt.value.trim() } : {}),
-      ...(selectedSpecSkillId.value ? { skillId: selectedSpecSkillId.value } : {}),
-    },
-    jd: {
-      ...(jdPrompt.value.trim() ? { prompt: jdPrompt.value.trim() } : {}),
-      ...(selectedJdSkillId.value ? { skillId: selectedJdSkillId.value } : {}),
-    },
-  }
+  const input = kind === 'spec'
+    ? {
+        ...(specPrompt.value.trim() ? { prompt: specPrompt.value.trim() } : {}),
+        ...(selectedSpecSkillId.value ? { skillId: selectedSpecSkillId.value } : {}),
+      }
+    : {
+        ...(jdPrompt.value.trim() ? { prompt: jdPrompt.value.trim() } : {}),
+        ...(selectedJdSkillId.value ? { skillId: selectedJdSkillId.value } : {}),
+      }
+  const label = kind === 'spec' ? '岗位说明书' : 'JD'
+  const generating = kind === 'spec' ? generatingSpec : generatingJd
+
   acting.value = true
-  generatingSpec.value = true
-  generatingJd.value = true
+  generating.value = true
   clearFlags()
 
-  async function generateDocument(kind: 'spec' | 'jd') {
-    const label = kind === 'spec' ? '岗位说明书' : 'JD'
-    const generating = kind === 'spec' ? generatingSpec : generatingJd
-    try {
-      const result = await (kind === 'spec' ? generateJobSpec : generateJobDescription)(id, inputs[kind])
-      if (!result[kind]) throw new Error('接口未返回生成内容')
-      if (!job.value || job.value.id !== id) throw new Error('当前岗位已切换，请刷新查看生成结果')
-      // 两个接口返回岗位快照；只合并本次生成的文档，避免覆盖另一侧的并发结果。
-      const current = job.value
-      job.value = {
-        ...(result.version >= current.version ? result : current),
-        spec: kind === 'spec' ? result.spec : current.spec,
-        jd: kind === 'jd' ? result.jd : current.jd,
-      }
-      specConfirmed.value = Boolean(job.value.spec?.confirmed)
-      jdConfirmed.value = Boolean(job.value.jd?.confirmed)
-      if (kind === 'spec') resetSpecForm()
-      else resetJdForm()
-      const source = result[kind]?.generatedBy === 'local_fallback' ? '本地模板' : 'AI'
-      let message = label + '已由' + source + '生成（未确认）'
-      try {
-        if (kind === 'spec') specVersions.value = await listJobSpecVersions(id)
-        else jdVersions.value = await listJobDescriptionVersions(id)
-      } catch {
-        message += '，版本历史加载失败，请刷新查看'
-      }
-      return { success: true, message }
-    } catch (cause) {
-      return { success: false, message: label + '生成失败：' + describeApiFailure(cause, '请稍后重试').message }
-    } finally {
-      generating.value = false
-    }
-  }
-
   try {
-    const results = await Promise.all([generateDocument('spec'), generateDocument('jd')])
-    const message = results.map(result => result.message).join('；')
-    // PageFeedback 优先显示成功提示，部分失败时必须把两侧结果放在错误提示中。
-    if (results.some(result => !result.success)) error.value = message
-    else feedback.value = message
+    const result = await (kind === 'spec' ? generateJobSpec : generateJobDescription)(id, input)
+    if (!result[kind]) throw new Error('接口未返回生成内容')
+    if (!job.value || job.value.id !== id) throw new Error('当前岗位已切换，请刷新查看生成结果')
+    // 接口返回岗位快照；只合并本次生成的文档，避免覆盖另一侧已有内容。
+    const current = job.value
+    job.value = {
+      ...(result.version >= current.version ? result : current),
+      spec: kind === 'spec' ? result.spec : current.spec,
+      jd: kind === 'jd' ? result.jd : current.jd,
+    }
+    specConfirmed.value = Boolean(job.value.spec?.confirmed)
+    jdConfirmed.value = Boolean(job.value.jd?.confirmed)
+    if (kind === 'spec') resetSpecForm()
+    else resetJdForm()
+    const source = result[kind]?.generatedBy === 'local_fallback' ? '本地模板' : 'AI'
+    let message = label + '已由' + source + '生成（未确认）'
+    try {
+      if (kind === 'spec') specVersions.value = await listJobSpecVersions(id)
+      else jdVersions.value = await listJobDescriptionVersions(id)
+    } catch {
+      message += '，版本历史加载失败，请刷新查看'
+    }
+    feedback.value = message
+  } catch (cause) {
+    error.value = label + '生成失败：' + describeApiFailure(cause, '请稍后重试').message
   } finally {
+    generating.value = false
     acting.value = false
   }
 }
@@ -419,7 +407,7 @@ onMounted(async () => {
               <button class="btn btn-ghost" type="button" :disabled="acting" @click="editingSpec = false">取消</button>
             </template>
             <template v-else>
-              <button class="btn btn-ghost" type="button" :disabled="acting || editingSpec || editingJd" title="同时生成岗位说明书和 JD" @click="generateDocuments">{{ generatingSpec ? '生成中...' : (job.spec ? 'AI 重新生成' : 'AI 生成') }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting || editingSpec || editingJd" title="生成岗位说明书" @click="generateDocument('spec')">{{ generatingSpec ? '生成中...' : (job.spec ? 'AI 重新生成' : 'AI 生成') }}</button>
               <button class="btn btn-ghost" type="button" :disabled="acting" @click="openSpecEditor">{{ job.spec ? '编辑' : '手动填写' }}</button>
               <button v-if="job.spec && !job.spec.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-spec')">确认</button>
             </template>
@@ -463,7 +451,7 @@ onMounted(async () => {
               <button class="btn btn-ghost" type="button" :disabled="acting" @click="editingJd = false">取消</button>
             </template>
             <template v-else>
-              <button class="btn btn-ghost" type="button" :disabled="acting || editingSpec || editingJd" title="同时生成岗位说明书和 JD" @click="generateDocuments">{{ generatingJd ? '生成中...' : (job.jd ? 'AI 重新生成' : 'AI 生成') }}</button>
+              <button class="btn btn-ghost" type="button" :disabled="acting || editingSpec || editingJd" title="生成 JD" @click="generateDocument('jd')">{{ generatingJd ? '生成中...' : (job.jd ? 'AI 重新生成' : 'AI 生成') }}</button>
               <button class="btn btn-ghost" type="button" :disabled="acting" @click="openJdEditor">{{ job.jd ? '编辑' : '手动填写' }}</button>
               <button v-if="job.jd && !job.jd.confirmed" class="btn btn-primary" type="button" :disabled="acting" @click="confirm('confirm-jd')">确认</button>
             </template>

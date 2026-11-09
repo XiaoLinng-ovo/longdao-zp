@@ -83,6 +83,10 @@ test('keeps candidate, application, resume and task IDs after upload', async () 
   assert.equal(item.applicationId, 'application-1')
   assert.equal(item.resumeId, 'resume-1')
   assert.equal(item.analysisTaskId, 'task-1')
+  const completedUploadBatch = await service.getBatch(batch.id)
+  assert.equal(completedUploadBatch.status, 'completed')
+  assert.equal(completedUploadBatch.phase, 'waiting_analysis')
+  assert.equal(completedUploadBatch.counts.queued, 1)
 })
 
 test('returns an already queued item without creating a duplicate candidate', async () => {
@@ -285,8 +289,28 @@ test('keeps genuine analysis states and pending uploads separate from removed wo
   assert.ok(batch)
   assert.deepEqual(batch.items.map(item => item.analysisStatus), ['processing', 'queued', 'completed', 'failed', 'cancelled', 'removed', undefined, undefined])
   assert.deepEqual(batch.counts, {
-    total: 8, pendingUpload: 1, uploading: 1, uploaded: 6, analyzing: 1, completed: 1, failed: 1, cancelled: 1, removed: 1,
+    total: 8, pendingUpload: 1, uploading: 1, uploaded: 6, queued: 1, analyzing: 1, completed: 1, failed: 1, cancelled: 1, removed: 1,
   })
+  assert.equal(batch.phase, 'analyzing')
+  const uploading = await postgresFixture([
+    { status: 'uploading' },
+    { analysis_task_id: 'task-1', analysis_status: 'processing' },
+  ]).store.getBatch('batch-1')
+  assert.equal(uploading?.phase, 'analyzing')
+})
+
+test('derives the import phase from live AI task states without redefining upload completion', async () => {
+  const queued = await postgresFixture([{ analysis_task_id: 'task-1', analysis_status: 'queued' }]).store.getBatch('batch-1')
+  const analyzing = await postgresFixture([{ analysis_task_id: 'task-1', analysis_status: 'processing' }]).store.getBatch('batch-1')
+  const completed = await postgresFixture([{ analysis_task_id: 'task-1', analysis_status: 'completed' }]).store.getBatch('batch-1')
+  const failed = await postgresFixture([{ analysis_task_id: 'task-1', analysis_status: 'failed' }]).store.getBatch('batch-1')
+
+  assert.equal(queued?.status, 'completed')
+  assert.equal(queued?.phase, 'waiting_analysis')
+  assert.equal(queued?.counts.queued, 1)
+  assert.equal(analyzing?.phase, 'analyzing')
+  assert.equal(completed?.phase, 'completed')
+  assert.equal(failed?.phase, 'completed_with_issues')
 })
 
 test('also reconciles deleted tasks when listing historical batches', async () => {

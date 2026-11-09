@@ -189,6 +189,24 @@ describe('CandidateListPage resume upload', () => {
     expect([...root.querySelectorAll('.name-link')].map((node) => node.textContent)).toEqual(['19号候选人', '18号候选人', '17号候选人'])
   })
 
+  it('does not let application status override the default update-time order', async () => {
+    mockedLoadCandidates.mockResolvedValue([
+      { id: 'CAN-21', entityId: 'candidate-21', name: '较旧待处理候选人', job: '后端工程师', score: 86, aiStatus: 'pending', applicationStatus: 'pending', rawApplicationStatus: 'pending', updatedAt: '2026-10-17T09:00:00Z' },
+      { id: 'CAN-22', entityId: 'candidate-22', name: '较新已处理候选人', job: '后端工程师', score: 72, aiStatus: 'completed', applicationStatus: 'active', rawApplicationStatus: 'completed', updatedAt: '2026-10-19T09:00:00Z' },
+    ])
+    mockedLoadJobs.mockResolvedValue([])
+    mockedLoadCandidateTags.mockResolvedValue([])
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(CandidateListPage)
+    app.use(createRouter({ history: createMemoryHistory('/'), routes: [{ path: '/', component: { template: '<div />' } }] }))
+    app.mount(root)
+    await flush()
+
+    expect([...root.querySelectorAll('.name-link')].map((node) => node.textContent)).toEqual(['较新已处理候选人', '较旧待处理候选人'])
+  })
+
   it('filters and sorts candidates by job', async () => {
     mockedLoadCandidates.mockResolvedValue([
       { id: 'CAN-1', entityId: 'candidate-1', name: '后端候选人', job: '后端工程师', score: 72, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-09-20T00:00:00Z' },
@@ -254,7 +272,7 @@ describe('CandidateListPage deletion', () => {
   const candidate = { id: 'CAN-1', entityId: 'candidate-1', name: '测试候选人', job: '后端工程师', score: 86, aiStatus: 'completed', applicationStatus: 'active', updatedAt: '2026-10-08' } as const
 
   async function mountPage(role: 'recruiter' | 'hiring_manager' = 'recruiter') {
-    authSession.user = { id: 'u1', name: '招聘专员', email: 'test@example.com', role, departmentId: 'd1' }
+    authSession.user = { id: 'u1', name: '企业用户', email: 'test@example.com', role, departmentId: 'd1', workspaceId: 'workspace-1' }
     mockedLoadCandidates.mockResolvedValue([{ ...candidate }])
     mockedLoadJobs.mockResolvedValue([])
     mockedLoadCandidateTags.mockResolvedValue([])
@@ -309,9 +327,9 @@ describe('CandidateListPage deletion', () => {
     expect((root!.querySelector('.delete-button') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('does not expose delete to a hiring manager', async () => {
+  it('exposes the same delete capability to historical business roles', async () => {
     await mountPage('hiring_manager')
-    expect(root!.querySelector('.delete-button')).toBeNull()
+    expect(root!.querySelector('.delete-button')).not.toBeNull()
   })
 })
 

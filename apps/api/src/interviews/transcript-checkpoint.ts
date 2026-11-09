@@ -45,7 +45,16 @@ export function reconcileTranscript(segments: SpeakerSegment[], checkpoint: Tran
   const streamed = content(checkpoint.text)
   if (!streamed) return segments
   const duration = Math.max(0, checkpoint.endMs - offsetMs)
-  const ordered = [...segments].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
+  const orderedAll = [...segments].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
+  // Overlapping capture turns repeat words instead of adding speech: drop a turn whose
+  // words are already contained in a longer turn of the same speaker before using bounds.
+  const ordered = orderedAll.filter((row, index) => {
+    const words = content(row.text)
+    if (!words) return true
+    return !orderedAll.some((other, otherIndex) => otherIndex !== index
+      && content(other.text).length > words.length && content(other.text).includes(words)
+      && (other.speakerId === row.speakerId || other.speakerVerified !== true || row.speakerVerified !== true))
+  })
   const offline = content(ordered.map(row => row.text).join(''))
   const offlineMatchesPreview = offline.length >= 4 && Math.abs(offline.length - streamed.length) <= 2
     && offline.replace(/[的啊呀嗯呃]/gu, '') === streamed.replace(/[的啊呀嗯呃]/gu, '')
@@ -56,44 +65,54 @@ export function reconcileTranscript(segments: SpeakerSegment[], checkpoint: Tran
   })
   const withComparison = (rows: SpeakerSegment[], selectedSource: 'streaming' | 'offline') => {
     if (!offline || offline === streamed || !rows.length) return rows
+    // Only a streaming selection needs a copy of the offline turns for review;
+    // an offline selection already stores exactly those turns.
+    const offlineSegments = selectedSource === 'offline' ? undefined : ordered.map(row => ({
+      id: row.id, speakerId: row.speakerId, text: row.text, startMs: row.startMs, endMs: row.endMs,
+      ...(row.speakerVerified !== undefined ? { speakerVerified: row.speakerVerified } : {}),
+      ...(row.speakerMixed !== undefined ? { speakerMixed: row.speakerMixed } : {}),
+    }))
     return [{ ...rows[0]!, transcriptComparison: {
       streamingText: checkpoint.text.trim(), offlineText: ordered.map(row => row.text).join('\n'),
+      ...(offlineSegments ? { offlineSegments } : {}),
       streamingComplete: checkpoint.complete, selectedSource, startMs: offsetMs, endMs: checkpoint.endMs,
     } }, ...rows.slice(1)]
   }
-  // Retain acoustic roles only for minor particle differences. Comparable length
-  // alone cannot resolve conflicting names, numbers, negations or missing clauses.
-  const whole = () => {
-    if (!checkpoint.complete && offline) {
-      const rows = chronological && ordered.length
-        ? ordered
-        : [recovery(ordered.map(row => row.text).join('\n'), 0, duration)]
-      return withComparison(rows, 'offline')
-    }
-    return checkpoint.complete && chronological && ordered.length && offlineMatchesPreview
-      ? withComparison(ordered, 'offline')
-      : withComparison([recovery(checkpoint.text.trim(), 0, duration)], 'streaming')
+  // FunASR offline recognition of the whole chunk is the accurate engine; the live
+  // streaming preview is a lower-quality draft used for live display only. When the two
+  // disagree, persistence keeps the offline words and stores the preview as an alternative.
+  // Acoustic roles survive only when the two agree, because comparable length cannot
+  // resolve conflicting names, numbers, negations or missing clauses.
+  const offlineCredible = offline.length >= 4 && offline.length * 3 >= streamed.length
+  const whole = (): SpeakerSegment[] => {
+    const preview = () => withComparison([recovery(checkpoint.text.trim(), 0, duration)], 'streaming')
+    // An almost empty offline result means that pass failed, not that nobody spoke.
+    if (!offline || !offlineCredible) return preview()
+    if (chronological && ordered.length) return withComparison(ordered, 'offline')
+    // Untrustworthy offline bounds: only a preview that already holds every offline
+    // word can be kept without repeating speech twice.
+    if (streamed.includes(offline)) return preview()
+    return withComparison([recovery(ordered.map(row => row.text).join('\n'), 0, duration)], 'offline')
   }
   const chronological = ordered.every((row, index) => row.startMs >= 0 && row.endMs <= duration
     && row.endMs >= row.startMs && (!index || row.startMs >= ordered[index - 1]!.endMs))
-  // A longer result is useful only if it actually contains the preview. Length alone
-  // cannot prove that an unfinished stream's words survived offline recognition.
+  // Offline already contains every preview word: keep the acoustic turns as-is.
   if (chronological && offline.includes(streamed)) {
     return ordered.every((row, index) => row === segments[index]) ? segments : ordered
   }
   if (chronological && coversWithParticles(offline, streamed)) return withComparison(ordered, 'offline')
   if (!chronological || !offline) return whole()
-  // A disconnected preview is not a complete account of this audio. Keep the
-  // full-file recognition and the conflicting preview as a reviewable alternative.
-  if (!checkpoint.complete) return withComparison(ordered, 'offline')
-
+  // A preview missing whole offline sentences cannot describe this audio.
+  if (!checkpoint.complete) return whole()
+  // Both recognizers are credible and the preview follows the offline turns:
+  // keep the acoustic turns and append only the words offline did not hear.
   const result: SpeakerSegment[] = []
   let cursor = 0, priorEnd = 0, gapIndex = 0
   for (const row of ordered) {
     const words = content(row.text)
     const position = words ? streamed.indexOf(words, cursor) : -1
-    // Divergent recognizers must not produce two overlapping versions of the same
-    // conversation. Preserve the observed stream intact and leave its speaker unknown.
+    // Diverging recognizers must not produce two overlapping versions of one
+    // conversation, so the offline transcript wins and the preview stays reviewable.
     if (position < 0) return whole()
     if (position > cursor) {
       if (row.startMs <= priorEnd) return whole()

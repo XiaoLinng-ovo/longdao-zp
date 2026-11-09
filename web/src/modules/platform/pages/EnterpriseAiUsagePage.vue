@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getAiUsage, getUsageReviews, addUsageReview, type AiUsageReport, type UsageFilters, type ReviewNote, type ReviewInput, type ReviewOutcome, type UsageState, type UsageItem } from '../api/ai-usage'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { authSession } from '../../auth/session'
+import { isPlatformAdminRole } from '../../auth/platform-roles'
 const report = ref<AiUsageReport | null>(null), error = ref(''), busy = ref(false), page = ref(1), notice = ref('')
 const operation = ref<'' | 'job_spec' | 'jd'>(''), state = ref<'' | UsageState>(''), reviewOnly = ref(false), from = ref(''), to = ref('')
 const selected = ref<UsageItem | null>(null), reviews = ref<ReviewNote[]>([]), detailBusy = ref(false), saving = ref(false), detailError = ref('')
@@ -15,7 +16,7 @@ const failureLabels = { upstream_rejected: '服务商拒绝请求', request_time
 const reviewLabels = { awaiting_provider: '等待服务商证据', awaiting_result: '等待生成结果核对', evidence_recorded: '已记录核对证据' }
 const date = (value: string) => new Date(value).toLocaleString('zh-CN')
 const noteLength = computed(() => [...note.value.trim()].length)
-const canViewModel = computed(() => authSession.user?.platformRole === 'admin')
+const canViewModel = computed(() => isPlatformAdminRole(authSession.user?.platformRole))
 function clearDetail() { detailVersion++; selected.value = null; reviews.value = []; detailError.value = ''; detailBusy.value = false; saving.value = false; pending.value = null; note.value = ''; outcome.value = 'awaiting_provider' }
 async function load(target = page.value) {
  if (busy.value) return

@@ -8,6 +8,61 @@ import { LocalRecruitingStore } from './store.js'
 
 const temporaryDirectories: string[] = []
 
+describe('面试结论更正', () => {
+  it('面试详情返回最近一次记录的结论', async () => {
+    process.env.NODE_ENV = 'test'
+    const service = new RecruitingService(new LocalRecruitingStore())
+    const interview = await service.createInterview({
+      applicationId: 'application-8814', round: 1, title: '初试', participants: [],
+    })
+    await service.completeInterview(interview.id, 'reject', 'user-demo')
+
+    assert.equal((await service.getInterview(interview.id)).outcome, 'reject')
+  })
+
+  it('保留更正审计，并允许更正初试结论时取消或恢复尚未开展的复试', async () => {
+    process.env.NODE_ENV = 'test'
+    const store = new LocalRecruitingStore()
+    const service = new RecruitingService(store)
+    const interview = await service.createInterview({
+      applicationId: 'application-8814', round: 1, title: '初试', participants: [],
+    })
+    await service.completeInterview(interview.id, 'continue', 'user-demo')
+    let state = await store.read()
+    const finalInterview = state.interviews.find(item => item.applicationId === interview.applicationId && item.round === 2)!
+    assert.equal(finalInterview.status, 'scheduled')
+
+    await service.correctInterviewConclusion(interview.id, 'reject', '复核后发现误选', 'user-demo')
+    state = await store.read()
+    assert.equal(state.interviews.find(item => item.id === finalInterview.id)?.status, 'cancelled')
+    assert.equal(state.workflowEvents.at(-1)?.action, 'correct_conclusion')
+    assert.equal(state.workflowEvents.at(-1)?.reason, '复核后发现误选')
+
+    await service.correctInterviewConclusion(interview.id, 'continue', '恢复晋级结论', 'user-demo')
+    state = await store.read()
+    assert.equal(state.interviews.find(item => item.id === finalInterview.id)?.status, 'scheduled')
+    assert.equal(state.workflowEvents.filter(event => event.action === 'correct_conclusion').length, 2)
+  })
+
+  it('更正初试结论时不取消手动安排的复试', async () => {
+    process.env.NODE_ENV = 'test'
+    const store = new LocalRecruitingStore()
+    const service = new RecruitingService(store)
+    const initialInterview = await service.createInterview({
+      applicationId: 'application-8814', round: 1, title: '初试', participants: [],
+    })
+    const manuallyScheduledFinalInterview = await service.createInterview({
+      applicationId: 'application-8814', round: 2, title: '人工安排的复试',
+      participants: [{ userId: 'user-demo', role: 'interviewer' }],
+    })
+    await service.completeInterview(initialInterview.id, 'continue', 'user-demo')
+    await service.correctInterviewConclusion(initialInterview.id, 'reject', '复核后发现误选', 'user-demo')
+
+    const state = await store.read()
+    assert.equal(state.interviews.find(item => item.id === manuallyScheduledFinalInterview.id)?.status, 'scheduled')
+  })
+})
+
 async function createLocalFixture(content = 'Java Spring Boot PostgreSQL, 8 years experience') {
   process.env.NODE_ENV = 'test'
   const directory = await mkdtemp(join(tmpdir(), 'recruiting-analysis-gate-'))
@@ -22,6 +77,101 @@ async function createLocalFixture(content = 'Java Spring Boot PostgreSQL, 8 year
     content,
   })
   return { service, store, created, directory }
+}
+
+async function createOnboardingFixture() {
+  process.env.NODE_ENV = 'test'
+  const store = new LocalRecruitingStore()
+  const service = new RecruitingService(store)
+  const interview = await service.createInterview({
+    applicationId: 'application-8814',
+    round: 2,
+    title: 'Final',
+    participants: [{ userId: 'user-demo', role: 'interviewer' }],
+  })
+  await service.submitFeedback(interview.id, { interviewerId: 'user-demo', overallScore: 90 })
+  await service.lockFeedback(interview.id, 'user-demo')
+  await service.concludeInterview(interview.id, 'offer')
+  const offer = await service.createOffer({
+    applicationId: 'application-8814',
+    positionTitle: '测试工程师',
+    departmentId: 'dept-tech',
+    employmentType: 'full_time',
+    baseSalary: { amount: 20000, currency: 'CNY' },
+    content: '欢迎加入',
+  })
+  await service.offerAction(offer.id, 'send')
+  await service.offerAction(offer.id, 'accept')
+  const onboarding = await service.offerAction(offer.id, 'archive_onboarding')
+  return { service, store, offer, onboarding }
+}
+
+describe('Offer invoice details', () => {
+  it('saves, preserves, revises and clears invoice details without changing earlier versions', async () => {
+    process.env.NODE_ENV = 'test'
+    const service = new RecruitingService(new LocalRecruitingStore())
+    const interview = await service.createInterview({
+      applicationId: 'application-8814', round: 2, title: 'Final',
+      participants: [{ userId: 'user-demo', role: 'interviewer' }],
+    })
+    await service.submitFeedback(interview.id, { interviewerId: 'user-demo', overallScore: 90 })
+    await service.lockFeedback(interview.id, 'user-demo')
+    await service.concludeInterview(interview.id, 'offer')
+    const input = {
+      applicationId: 'application-8814', positionTitle: '测试工程师', departmentId: 'dept-tech', employmentType: 'full_time',
+      baseSalary: { amount: 20000, currency: 'CNY' }, content: '<p>{{发票抬头}} {{企业税号}}</p>',
+      invoiceTitle: '  测试科技有限公司  ', taxNumber: '  TEST9133  ',
+      templateFields: { reportingTime: '09:30', supervisorName: ' 王经理 ', payday: '15' },
+    }
+    const offer = await service.createOffer(input)
+    let context = await service.getOfferEmailContext(offer.id)
+    assert.equal(context.invoiceTitle, '测试科技有限公司')
+    assert.equal(context.taxNumber, 'TEST9133')
+    assert.deepEqual(context.templateFields, { reportingTime: '09:30', supervisorName: '王经理', payday: '15' })
+    await service.updateOffer(offer.id, { positionTitle: '修订岗位' })
+    context = await service.getOfferEmailContext(offer.id)
+    assert.equal(context.templateFields?.reportingTime, '09:30')
+    assert.equal(context.invoiceTitle, '测试科技有限公司')
+    assert.equal(context.taxNumber, 'TEST9133')
+    await service.updateOffer(offer.id, { invoiceTitle: '新公司', taxNumber: 'NEW9133', templateFields: { supervisorName: '李经理' } })
+    context = await service.getOfferEmailContext(offer.id)
+    assert.equal(context.invoiceTitle, '新公司')
+    assert.equal(context.taxNumber, 'NEW9133')
+    assert.deepEqual(context.templateFields, { reportingTime: '09:30', supervisorName: '李经理', payday: '15' })
+    await service.updateOffer(offer.id, { invoiceTitle: '', taxNumber: '   ' })
+    context = await service.getOfferEmailContext(offer.id)
+    assert.equal(context.invoiceTitle, undefined)
+    assert.equal(context.taxNumber, undefined)
+    const detail = await service.getOffer(offer.id)
+    assert.equal(detail.versions[0]?.invoiceTitle, '测试科技有限公司')
+    assert.equal(detail.versions[0]?.taxNumber, 'TEST9133')
+    assert.equal(detail.versions[0]?.templateFields?.supervisorName, '王经理')
+    for (const patch of [{ invoiceTitle: 123 }, { taxNumber: null }, { invoiceTitle: 'x'.repeat(201) }, { taxNumber: 'x'.repeat(101) }]) {
+      await assert.rejects(service.updateOffer(offer.id, patch as never), (error: any) => error.code === 'VALIDATION_ERROR')
+      await assert.rejects(service.createOffer({ ...input, ...patch } as never), (error: any) => error.code === 'VALIDATION_ERROR')
+    }
+    assert.equal((await service.getOffer(offer.id)).versions.length, 4)
+    await service.offerAction(offer.id, 'send')
+    const sentOffer = await service.updateOffer(offer.id, { positionTitle: '已发送后修订岗位' })
+    const revised = await service.getOffer(offer.id)
+    assert.equal(sentOffer.status, 'sent')
+    assert.equal(revised.versions.find((version) => version.version === 5)?.positionTitle, '已发送后修订岗位')
+    assert.equal(revised.versions.length, 5)
+    assert.equal(revised.versions.find((version) => version.version === 4)?.positionTitle, '修订岗位')
+  })
+})
+
+async function prepareAndScheduleOnboarding(service: RecruitingService, onboardingId: string) {
+  await service.updateOnboarding(onboardingId, {
+    plannedStartDate: '2026-11-10',
+    plannedStartTime: '09:30',
+    reportingMode: 'onsite',
+    reportingLocation: 'A 座 12 层',
+    reportingContactName: '刘敏',
+    reportingContactPhone: '13800000000',
+  })
+  await service.onboardingAction(onboardingId, 'prepare')
+  return service.onboardingAction(onboardingId, 'schedule')
 }
 
 afterEach(async () => {
@@ -352,8 +502,6 @@ describe('offer onboarding archive', () => {
       content: '欢迎加入',
     })
 
-    await service.offerAction(offer.id, 'submit_approval')
-    await service.offerAction(offer.id, 'approve')
     await service.offerAction(offer.id, 'send')
     await service.offerAction(offer.id, 'accept')
     const first = await service.offerAction(offer.id, 'archive_onboarding')
@@ -362,6 +510,218 @@ describe('offer onboarding archive', () => {
     assert.equal(second.id, first.id)
     const state = await store.read()
     assert.equal(state.onboarding.filter((item) => item.offerId === offer.id).length, 1)
+    const archivedTasks = await service.listOnboardingTasks(first.id)
+    assert.equal(archivedTasks.length, 12)
+    assert.deepEqual([...new Set(archivedTasks.map((task) => task.category))].sort(), ['admin', 'candidate', 'hr', 'it', 'manager', 'training'])
+    assert.equal((await service.listOnboardingMaterials(first.id)).length, 4)
+    assert.equal((await service.listOnboardingIntegrations(first.id)).length, 5)
+
+    await store.transaction((draft) => {
+      draft.onboarding.push({ id: 'legacy-onboarding', applicationId: 'application-8814', offerId: 'legacy-offer', status: 'pending', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' })
+    })
+    assert.deepEqual([...new Set((await service.listOnboardingTasks('legacy-onboarding')).map((task) => task.category))].sort(), ['admin', 'candidate', 'hr', 'it', 'manager', 'training'])
+
+    const arranged = await service.updateOnboarding(first.id, {
+      plannedStartDate: '2026-11-03',
+      plannedStartTime: '09:30',
+      reportingMode: 'onsite',
+      reportingLocation: 'A 座 12 层',
+      reportingContactName: '刘敏',
+    })
+    assert.equal(arranged.reportingLocation, 'A 座 12 层')
+    assert.equal(arranged.reportingMode, 'onsite')
+    assert.equal((await service.updateOnboarding(first.id, { plannedStartDate: null, plannedStartTime: null, reportingMode: null })).plannedStartDate, undefined)
+
+    const extraTask = await service.createOnboardingTask(first.id, { title: '开通 VPN 权限', category: 'it', ownerName: 'IT 服务台' })
+    await assert.rejects(() => service.updateOnboardingTask(first.id, extraTask.id, { status: 'blocked' }), /阻塞原因/)
+    const blocked = await service.updateOnboardingTask(first.id, extraTask.id, { status: 'blocked', blockedReason: '等待网络审批' })
+    assert.equal(blocked.blockedReason, '等待网络审批')
+    assert.equal((await service.updateOnboardingTask(first.id, extraTask.id, { status: 'completed' })).completedAt !== undefined, true)
+  })
+
+  it('requires complete reporting details and creates fifteen reminders after scheduling', async () => {
+    const { service, onboarding } = await createOnboardingFixture()
+    await service.updateOnboarding(onboarding.id, {
+      plannedStartDate: '2026-11-10',
+      plannedStartTime: '09:30',
+      reportingMode: 'hybrid',
+      reportingLocation: 'A 座 12 层 / https://meeting.example.com/onboarding',
+      reportingContactName: '刘敏',
+    })
+    await service.onboardingAction(onboarding.id, 'prepare')
+
+    await assert.rejects(
+      () => service.onboardingAction(onboarding.id, 'schedule'),
+      (error: any) => error.code === 'ONBOARDING_SCHEDULE_INCOMPLETE' && /联系人电话/u.test(error.message),
+    )
+
+    await service.updateOnboarding(onboarding.id, { reportingContactPhone: '13800000000' })
+    const scheduled = await service.onboardingAction(onboarding.id, 'schedule')
+    assert.equal(scheduled.status, 'scheduled')
+
+    const reminders = await service.listOnboardingReminders(onboarding.id)
+    assert.equal(reminders.length, 15)
+    assert.equal(new Set(reminders.map((item) => `${item.milestone}:${item.audience}`)).size, 15)
+    assert.ok(reminders.every((item) => item.channel === 'in_app' && item.status === 'scheduled'))
+    assert.ok(reminders.some((item) => item.milestone === '7_days' && item.scheduledAt === '2026-11-03T09:00:00+08:00'))
+    assert.ok(reminders.some((item) => item.milestone === 'day_of' && item.scheduledAt === '2026-11-10T09:00:00+08:00'))
+  })
+
+  it('blocks completion until requirements are resolved and allows post-arrival backfills', async () => {
+    const { service, store, onboarding } = await createOnboardingFixture()
+    await prepareAndScheduleOnboarding(service, onboarding.id)
+
+    await assert.rejects(
+      () => service.onboardingAction(onboarding.id, 'complete'),
+      (error: any) => error.code === 'ONBOARDING_COMPLETION_BLOCKED' && /12 项必选任务、4 项必选材料/u.test(error.message),
+    )
+
+    const tasks = await service.listOnboardingTasks(onboarding.id)
+    for (const task of tasks) await service.updateOnboardingTask(onboarding.id, task.id, { status: 'completed' })
+    await assert.rejects(
+      () => service.onboardingAction(onboarding.id, 'complete'),
+      (error: any) => error.code === 'ONBOARDING_COMPLETION_BLOCKED' && /0 项必选任务、4 项必选材料/u.test(error.message),
+    )
+
+    const materials = await service.listOnboardingMaterials(onboarding.id)
+    for (const material of materials) await service.updateOnboardingMaterial(onboarding.id, material.id, { status: 'verified' })
+    const completed = await service.onboardingAction(onboarding.id, 'complete')
+    assert.equal(completed.status, 'completed')
+    assert.ok(completed.actualArrivalAt)
+    assert.ok(completed.archivedAt)
+
+    const state = await store.read()
+    assert.equal(state.applications.find((item) => item.id === onboarding.applicationId)?.status, 'onboarding_archived')
+
+    const task = tasks[0]!
+    const material = materials[0]!
+    const integration = (await service.listOnboardingIntegrations(onboarding.id))[0]!
+    const archivedTask = await service.createOnboardingTask(onboarding.id, { title: '报到后补录任务', category: 'hr' })
+    await service.updateOnboardingTask(onboarding.id, task.id, { notes: '报到后补录任务备注' })
+    const archivedMaterial = await service.createOnboardingMaterial(onboarding.id, { code: 'post_arrival_material', label: '报到后补录材料' })
+    await service.updateOnboardingMaterial(onboarding.id, material.id, { notes: '报到后补录材料备注' })
+    await service.updateOnboardingIntegration(onboarding.id, integration.id, { status: 'ready', externalReference: 'OA-POST-ARRIVAL' })
+    const updated = await service.updateOnboarding(onboarding.id, { reportingContactPhone: '13800000000', notes: '报到后补录交接备注' })
+    const refreshedReminders = await service.refreshOnboardingReminders(onboarding.id)
+
+    assert.equal(archivedTask.onboardingId, onboarding.id)
+    assert.equal(archivedMaterial.onboardingId, onboarding.id)
+    assert.equal(updated.status, 'completed')
+    assert.equal(updated.reportingContactPhone, '13800000000')
+    assert.equal((await service.getOnboarding(onboarding.id)).notes, '报到后补录交接备注')
+    assert.ok(refreshedReminders.length > 0)
+  })
+
+  it('requires structured cancellation and no-show reasons with notes for other', async () => {
+    const cancelledFixture = await createOnboardingFixture()
+    await assert.rejects(
+      () => cancelledFixture.service.onboardingAction(cancelledFixture.onboarding.id, 'cancel', { reasonCode: 'other' }),
+      (error: any) => error.code === 'ONBOARDING_REASON_NOTES_REQUIRED',
+    )
+    const cancelled = await cancelledFixture.service.onboardingAction(cancelledFixture.onboarding.id, 'cancel', { reasonCode: 'other', notes: '岗位预算冻结' })
+    assert.equal(cancelled.status, 'cancelled')
+    assert.equal(cancelled.cancellationReasonCode, 'other')
+    assert.equal(cancelled.cancellationNotes, '岗位预算冻结')
+    await assert.rejects(
+      () => cancelledFixture.service.updateOnboarding(cancelledFixture.onboarding.id, { notes: '取消后修改' }),
+      (error: any) => error.code === 'ONBOARDING_NOT_EDITABLE',
+    )
+
+    const noShowFixture = await createOnboardingFixture()
+    await prepareAndScheduleOnboarding(noShowFixture.service, noShowFixture.onboarding.id)
+    await assert.rejects(
+      () => noShowFixture.service.onboardingAction(noShowFixture.onboarding.id, 'no_show', { reasonCode: 'other' }),
+      (error: any) => error.code === 'ONBOARDING_REASON_NOTES_REQUIRED',
+    )
+    const noShow = await noShowFixture.service.onboardingAction(noShowFixture.onboarding.id, 'no_show', { reasonCode: 'other', notes: '候选人突发疾病' })
+    assert.equal(noShow.status, 'no_show')
+    assert.equal(noShow.noShowReasonCode, 'other')
+    assert.equal(noShow.noShowNotes, '候选人突发疾病')
+    await assert.rejects(
+      () => noShowFixture.service.createOnboardingTask(noShowFixture.onboarding.id, { title: '未报到后新增任务', category: 'hr' }),
+      (error: any) => error.code === 'ONBOARDING_NOT_EDITABLE',
+    )
+  })
+
+  it('aggregates readiness, overdue risks and cancellation reasons for the workbench report', async () => {
+    const { service, store, onboarding } = await createOnboardingFixture()
+    await service.updateOnboarding(onboarding.id, {
+      plannedStartDate: '2026-11-10',
+      plannedStartTime: '09:30',
+      reportingMode: 'onsite',
+      reportingLocation: 'A 座 12 层',
+      reportingContactName: '刘敏',
+      reportingContactPhone: '13800000000',
+      riskNotes: '首日需要生产环境只读权限',
+    })
+    const [task] = await service.listOnboardingTasks(onboarding.id)
+    await service.updateOnboardingTask(onboarding.id, task!.id, { status: 'blocked', blockedReason: '等待审批', dueDate: '2026-10-01' })
+    const [integration] = await service.listOnboardingIntegrations(onboarding.id)
+    await service.updateOnboardingIntegration(onboarding.id, integration!.id, { status: 'failed', lastError: '账号服务超时' })
+
+    const [workbench] = await service.listOnboardingWorkbench()
+    assert.equal(workbench?.readiness, 0)
+    assert.equal(workbench?.requiredTasksRemaining, 12)
+    assert.equal(workbench?.overdueTasks, 1)
+    assert.equal(workbench?.nextDueDate, '2026-10-01')
+    assert.ok(workbench?.highRiskReasons.some((reason) => reason.includes('任务已逾期')))
+    assert.ok(workbench?.highRiskReasons.some((reason) => reason.includes('任务被阻塞')))
+    assert.ok(workbench?.highRiskReasons.some((reason) => reason.includes('系统集成失败')))
+
+    await store.transaction((state) => {
+      state.onboarding.push({
+        id: 'cancelled-report-onboarding',
+        applicationId: 'application-8821',
+        offerId: 'cancelled-report-offer',
+        status: 'cancelled',
+        cancellationReasonCode: 'position_closed',
+        cancelledAt: '2026-11-04T00:00:00.000Z',
+        createdAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-04T00:00:00.000Z',
+      })
+    })
+
+    const report = await service.listOnboardingReport()
+    assert.equal(report.totals.all, 2)
+    assert.equal(report.totals.pending, 1)
+    assert.equal(report.totals.cancelled, 1)
+    assert.equal(report.overdueTasks, 1)
+    assert.equal(report.blockedTasks, 1)
+    assert.equal(report.reasonDistribution[0]?.code, 'position_closed')
+    assert.equal(report.reasonDistribution[0]?.label, '岗位关闭')
+    assert.equal(report.integrationStatus.failed, 1)
+    assert.ok(report.highRiskItems.some((item) => item.onboardingId === onboarding.id))
+  })
+
+  it('writes onboarding workflow events for preparation, collaboration and cancellation', async () => {
+    const { service, onboarding } = await createOnboardingFixture()
+    await service.onboardingAction(onboarding.id, 'prepare')
+    await service.updateOnboarding(onboarding.id, {
+      plannedStartDate: '2026-11-10',
+      plannedStartTime: '09:30',
+      reportingMode: 'onsite',
+      reportingLocation: 'A 座 12 层',
+      reportingContactName: '刘敏',
+      reportingContactPhone: '13800000000',
+    })
+    const [task] = await service.listOnboardingTasks(onboarding.id)
+    await service.updateOnboardingTask(onboarding.id, task!.id, { status: 'in_progress' })
+    const [material] = await service.listOnboardingMaterials(onboarding.id)
+    await service.updateOnboardingMaterial(onboarding.id, material!.id, { status: 'verified' })
+    const [integration] = await service.listOnboardingIntegrations(onboarding.id)
+    await service.updateOnboardingIntegration(onboarding.id, integration!.id, { status: 'ready', externalReference: 'OA-2026-001' })
+    await service.onboardingAction(onboarding.id, 'schedule')
+    await service.onboardingAction(onboarding.id, 'cancel', { reasonCode: 'schedule_changed' })
+
+    const events = await service.listWorkflowEvents({ subjectType: 'onboarding', limit: 100 })
+    const actions = new Set(events.map((event) => event.action))
+    for (const action of ['archive_onboarding', 'prepare', 'update', 'task_update', 'material_verify', 'integration_update', 'schedule', 'reminders_refresh', 'cancel']) {
+      assert.ok(actions.has(action), `missing onboarding workflow event ${action}`)
+    }
+    const cancellation = events.find((event) => event.action === 'cancel')
+    assert.equal(cancellation?.fromStatus, 'scheduled')
+    assert.equal(cancellation?.toStatus, 'cancelled')
+    assert.equal(cancellation?.reason, '报到时间调整')
   })
 })
 
@@ -443,8 +803,28 @@ describe('dashboard resume count', () => {
     })
     assert.ok(dashboard.todos.some(row => row.id === 'sheets-application-8821-initial'))
     assert.ok(!dashboard.todos.some(row => row.id === 'feedback-tech'))
-    assert.equal(dashboard.pendingFeedback.length, 0)
+    assert.equal(dashboard.pendingInterviews.length, 0)
     assert.ok(!dashboard.todos.some(row => row.description.includes('赵雨欣')))
+  })
+  it('returns scheduled interviews and their single completion todo', async () => {
+    process.env.NODE_ENV = 'test'
+    const store = new LocalRecruitingStore()
+    const service = new RecruitingService(store)
+    await store.transaction(state => {
+      state.interviews.push({
+        id: 'scheduled', code: 'IV-SCHEDULED', applicationId: 'application-8821', round: 1,
+        stage: 'initial', type: 'technical', title: '初试', status: 'scheduled', participants: [],
+        scheduledStartAt: '2026-10-02T01:00:00Z', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z',
+      })
+    })
+    const dashboard = await service.getDashboardSummary('dept-tech')
+    assert.equal(dashboard.pendingInterviews.length, 1)
+    assert.equal(dashboard.pendingInterviews[0]!.id, 'scheduled')
+    assert.equal(dashboard.pendingInterviews[0]!.candidateName, '王思远')
+    assert.equal(dashboard.pendingInterviews[0]!.jobTitle, '高级后端工程师')
+    assert.equal(dashboard.pendingInterviews[0]!.application.id, 'application-8821')
+    assert.ok(dashboard.todos.some(row => row.id === 'complete-scheduled' && row.path === '/interviews/scheduled'))
+    assert.ok(!dashboard.todos.some(row => row.id.startsWith('feedback-') || row.id.startsWith('conclude-')))
   })
   it('counts uploaded resumes rather than applications, including multiple resumes and resumes without an application', async () => {
     const { service, store, created } = await createLocalFixture()

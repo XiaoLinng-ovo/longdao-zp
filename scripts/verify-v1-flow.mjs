@@ -26,6 +26,9 @@ process.env.WORKER_DB_POLL = 'true'
 process.env.WORKER_HEALTH_HOST = '127.0.0.1'
 process.env.WORKER_HEALTH_PORT = '0'
 
+// 载入 .env（AI/OCR/SMTP 等平台配置），已存在的环境变量优先，便于用 DATABASE_URL 指向隔离 schema。
+await import('../apps/api/dist/src/env.js')
+
 const { loadConfig } = await import('../apps/api/dist/src/config.js')
 const { createHttpServer } = await import('../apps/api/dist/src/server.js')
 const { loadDatabaseConfig } = await import('../apps/api/dist/src/db/index.js')
@@ -95,7 +98,13 @@ async function login(email) {
     csrfToken = decodeURIComponent(csrf.slice(csrf.indexOf('smartrecruit_csrf=') + 'smartrecruit_csrf='.length))
     csrfCookie = csrf
   }
-  return { token, user: response.body.data.user }
+  // 多租户：登录后会话还没有企业上下文，需要像前端一样显式选择企业。
+  const workspaces = await api('GET', '/api/v1/workspaces', { token })
+  const workspace = (workspaces.body?.data ?? [])[0]
+  if (!workspace) throw new Error(`账号 ${email} 没有可用企业：${JSON.stringify(workspaces.body).slice(0, 200)}`)
+  const selected = await api('POST', `/api/v1/workspaces/${workspace.id}/select`, { token, body: {} })
+  if (selected.status !== 200) throw new Error(`选择企业失败 ${email}: ${selected.status} ${JSON.stringify(selected.body).slice(0, 200)}`)
+  return { token, user: selected.body.data.user }
 }
 
 try {
@@ -156,7 +165,22 @@ try {
   const application = await api('POST', '/api/v1/applications', { token: recruiter.token, body: { candidateId, jobId, source: '内部推荐' } })
   check('创建职位申请 201（初始 pending_analysis）', application.status === 201 && application.body.data?.status === 'pending_analysis', JSON.stringify(application.body).slice(0, 160))
   const applicationId = application.body.data?.id
-  const resume = await api('POST', '/api/v1/resumes', { token: recruiter.token, body: { candidateId, applicationId, originalFilename: 'pg-resume.txt', mimeType: 'text/plain', content: 'PG 验证候选人\nPostgreSQL 8 years' } })
+  const resume = await api('POST', '/api/v1/resumes', { token: recruiter.token, body: { candidateId, applicationId, originalFilename: 'pg-resume.txt', mimeType: 'text/plain', content: [
+      'PG 验证候选人',
+      '求职意向：高级后端工程师 / 数据库方向',
+      '工作经历：',
+      '2020.07-至今 某金融科技公司 高级后端工程师',
+      '- 负责核心交易系统的后端架构设计，使用 Java 与 Spring Boot 支撑日均 2000 万笔交易。',
+      '- 主导 PostgreSQL 分库分表与读写分离改造，将核心查询 P95 响应时间从 800ms 降到 120ms。',
+      '- 建设基于 PostgreSQL 逻辑复制的数据同步链路，保障主备切换 RPO 小于 5 秒。',
+      '- 编写 SQL 性能优化规范并推动落地，慢查询数量下降 70%。',
+      '2017.07-2020.06 某电商平台 后端工程师',
+      '- 参与订单中心重构，负责 PostgreSQL 数据库设计与索引优化。',
+      '- 使用 Redis 缓存与消息队列削峰，支撑大促峰值流量。',
+      '教育背景：2013.09-2017.06 某大学 计算机科学与技术 本科',
+      '技能：Java、Spring Boot、PostgreSQL、SQL 调优、Redis、Kafka、Docker、Linux',
+      '证书：PostgreSQL 认证专家（2019）',
+    ].join('\n') } })
   check('简历可直接进入分析队列', resume.status === 201 && resume.body.data?.resume?.scanStatus === 'clean' && resume.body.data?.task?.status === 'queued', JSON.stringify(resume.body).slice(0, 200))
   const taskId = resume.body.data?.task?.id
   const processed = await waitFor('简历分析',
@@ -185,8 +209,17 @@ try {
   check('锁定反馈', lock.status === 200 && lock.body.data?.status === 'locked', JSON.stringify(lock.body).slice(0, 160))
   const lockedAgain = await api('POST', `/api/v1/interviews/${interviewId}/feedback`, { token: interviewer.token, body: { interviewerId: interviewer.user.id, overallScore: 60 } })
   check('锁定后不可再改（409 FEEDBACK_LOCKED）', lockedAgain.status === 409, String(lockedAgain.status))
-  const concluded = await api('POST', `/api/v1/interviews/${interviewId}/conclude`, { token: interviewer.token, body: { outcome: 'offer' } })
-  check('面试结论 completed', concluded.status === 200 && concluded.body.data?.status === 'completed', JSON.stringify(concluded.body).slice(0, 160))
+  const concluded = await api('POST', `/api/v1/interviews/${interviewId}/conclude`, { token: interviewer.token, body: { outcome: 'continue' } })
+  check('初试结论 completed 并进入复试', concluded.status === 200 && concluded.body.data?.status === 'completed', JSON.stringify(concluded.body).slice(0, 160))
+  const afterInitial = await api('GET', `/api/v1/interviews?applicationId=${applicationId}`, { token: interviewer.token })
+  const finalInterview = afterInitial.body.data?.find((item) => item.round >= 2 || item.stage === 'final')
+  check('初试通过后自动生成第二轮复试', afterInitial.status === 200 && Boolean(finalInterview?.id), JSON.stringify(afterInitial.body).slice(0, 220))
+  const finalFeedback = await api('POST', `/api/v1/interviews/${finalInterview?.id}/feedback`, { token: interviewer.token, body: { interviewerId: interviewer.user.id, overallScore: 92, recommendation: 'yes', ratings: { 技术: 5 }, strengths: ['PostgreSQL 熟练'], concerns: [] } })
+  check('提交复试反馈', finalFeedback.status === 200 && finalFeedback.body.data?.status === 'submitted', JSON.stringify(finalFeedback.body).slice(0, 180))
+  const finalLock = await api('POST', `/api/v1/interviews/${finalInterview?.id}/lock-feedback`, { token: interviewer.token, body: { interviewerId: interviewer.user.id } })
+  check('锁定复试反馈', finalLock.status === 200 && finalLock.body.data?.status === 'locked', JSON.stringify(finalLock.body).slice(0, 160))
+  const finalConcluded = await api('POST', `/api/v1/interviews/${finalInterview?.id}/conclude`, { token: interviewer.token, body: { outcome: 'offer' } })
+  check('复试结论 completed 并进入 Offer', finalConcluded.status === 200 && finalConcluded.body.data?.status === 'completed', JSON.stringify(finalConcluded.body).slice(0, 160))
 
   step('Offer → 审批 → 发送 → 接受 → 入职归档')
   const afterConclude = await api('GET', '/api/v1/applications', { token: recruiter.token })
@@ -194,12 +227,12 @@ try {
   const offer = await api('POST', '/api/v1/offers', { token: recruiter.token, body: { applicationId, positionTitle: 'PG 验证工程师', departmentId: DEFAULT_BASE_DEPARTMENT, employmentType: 'full_time', startDate: '2026-10-01', baseSalary: { amount: 30000, currency: 'CNY' }, benefits: ['五险一金'], content: '欢迎加入' } })
   check('创建 Offer 201（含首个版本）', offer.status === 201 && Boolean(offer.body.data?.currentVersionId), `${offer.status} ${JSON.stringify(offer.body).slice(0, 200)}`)
   const offerId = offer.body.data?.id
-  const submittedOffer = await api('POST', `/api/v1/offers/${offerId}/submit-approval`, { token: recruiter.token, body: {} })
-  check('Offer 提交审批 pending_approval', submittedOffer.body.data?.status === 'pending_approval', JSON.stringify(submittedOffer.body).slice(0, 160))
-  const approvedOffer = await api('POST', `/api/v1/offers/${offerId}/approve`, { token: recruiter.token, body: {} })
-  check('Offer 审批通过 approved', approvedOffer.body.data?.status === 'approved', JSON.stringify(approvedOffer.body).slice(0, 160))
-  const sentOffer = await api('POST', `/api/v1/offers/${offerId}/send`, { token: recruiter.token, body: {} })
-  check('Offer 发送 sent（记录 sent_at）', sentOffer.body.data?.status === 'sent' && Boolean(sentOffer.body.data?.sentAt), JSON.stringify(sentOffer.body).slice(0, 160))
+  const sentOffer = await api('POST', `/api/v1/offers/${offerId}/send-email`, { token: recruiter.token, body: {
+    to: 'qa.offer.delivery@example.com',
+    subject: 'PG 验证工程师 Offer',
+    markdown: '您好 {{candidateName}}，诚邀您加入，岗位：{{positionTitle}}。',
+  } })
+  check('通过 SMTP 邮件编辑接口发送 Offer（记录 sent_at）', sentOffer.status === 200 && sentOffer.body.data?.status === 'sent' && Boolean(sentOffer.body.data?.sentAt), JSON.stringify(sentOffer.body).slice(0, 200))
   const acceptedOffer = await api('POST', `/api/v1/offers/${offerId}/accept`, { token: recruiter.token, body: {} })
   check('Offer 接受 accepted（记录 responded_at）', acceptedOffer.body.data?.status === 'accepted' && Boolean(acceptedOffer.body.data?.respondedAt), JSON.stringify(acceptedOffer.body).slice(0, 160))
   const offerDetail = await api('GET', `/api/v1/offers/${offerId}`, { token: recruiter.token })
@@ -207,10 +240,30 @@ try {
   const archived = await api('POST', `/api/v1/offers/${offerId}/archive-onboarding`, { token: recruiter.token, body: { reason: '入职资料已归档' } })
   check('归档入职记录 201/200（写入 onboarding_records）', (archived.status === 200 || archived.status === 201) && archived.body.data?.status === 'pending', `${archived.status} ${JSON.stringify(archived.body).slice(0, 200)}`)
   const onboardingId = archived.body.data?.id
-  const patched = await api('PATCH', `/api/v1/onboarding/${onboardingId}`, { token: recruiter.token, body: { plannedStartDate: '2026-10-08', notes: '待入职' } })
-  check('更新入职计划（planned_start_date）', patched.status === 200 && patched.body.data?.plannedStartDate?.startsWith('2026-10-08'), JSON.stringify(patched.body).slice(0, 200))
+  const patched = await api('PATCH', `/api/v1/onboarding/${onboardingId}`, { token: recruiter.token, body: {
+    plannedStartDate: '2026-10-08', plannedStartTime: '09:00', reportingMode: 'onsite',
+    reportingLocation: '上海市测试路 1 号', reportingContactName: '招聘专员', reportingContactPhone: '13800138000', notes: '待入职',
+  } })
+  check('更新入职计划（补齐安排必填项）', patched.status === 200 && patched.body.data?.plannedStartDate?.startsWith('2026-10-08'), JSON.stringify(patched.body).slice(0, 220))
+  const preparing = await api('POST', `/api/v1/onboarding/${onboardingId}/prepare`, { token: recruiter.token, body: {} })
+  check('入职准备 preparing', preparing.body.data?.status === 'preparing', JSON.stringify(preparing.body).slice(0, 160))
   const scheduled = await api('POST', `/api/v1/onboarding/${onboardingId}/schedule`, { token: recruiter.token, body: {} })
   check('入职安排 scheduled', scheduled.body.data?.status === 'scheduled', JSON.stringify(scheduled.body).slice(0, 160))
+  const onboardingTasks = await api('GET', `/api/v1/onboarding/${onboardingId}/tasks`, { token: recruiter.token })
+  const onboardingMaterials = await api('GET', `/api/v1/onboarding/${onboardingId}/materials`, { token: recruiter.token })
+  const onboardingTaskWrites = []
+  for (const task of onboardingTasks.body.data ?? []) {
+    if (task.isRequired) onboardingTaskWrites.push(await api('PATCH', `/api/v1/onboarding/${onboardingId}/tasks/${task.id}`, { token: recruiter.token, body: { status: 'completed' } }))
+  }
+  check('必选入职任务均更新成功', onboardingTasks.status === 200 && onboardingTaskWrites.length > 0 && onboardingTaskWrites.every((item) => item.status === 200), JSON.stringify(onboardingTaskWrites.map((item) => ({ status: item.status, body: item.body }))).slice(0, 240))
+  const onboardingMaterialWrites = []
+  for (const material of onboardingMaterials.body.data ?? []) {
+    if (material.isRequired) onboardingMaterialWrites.push(await api('PATCH', `/api/v1/onboarding/${onboardingId}/materials/${material.id}`, { token: recruiter.token, body: { status: 'verified' } }))
+  }
+  check('必选入职材料均更新成功', onboardingMaterials.status === 200 && onboardingMaterialWrites.length > 0 && onboardingMaterialWrites.every((item) => item.status === 200), JSON.stringify(onboardingMaterialWrites.map((item) => ({ status: item.status, body: item.body }))).slice(0, 240))
+  const refreshedMaterials = await api('GET', `/api/v1/onboarding/${onboardingId}/materials`, { token: recruiter.token })
+  const unfinishedMaterials = (refreshedMaterials.body.data ?? []).filter((item) => item.isRequired && !['verified', 'waived'].includes(item.status))
+  check('必选入职材料最终已验证或豁免', refreshedMaterials.status === 200 && unfinishedMaterials.length === 0, JSON.stringify(unfinishedMaterials).slice(0, 240))
   const completed = await api('POST', `/api/v1/onboarding/${onboardingId}/complete`, { token: recruiter.token, body: {} })
   check('入职完成 completed 并回写申请状态', completed.body.data?.status === 'completed' && Boolean(completed.body.data?.archivedAt), JSON.stringify(completed.body).slice(0, 160))
   const finalApplications = await api('GET', '/api/v1/applications', { token: recruiter.token })

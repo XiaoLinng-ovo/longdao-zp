@@ -1,15 +1,15 @@
 import { apiClient } from '../../../shared/api'
-export type MemberBusinessRole = 'recruiter' | 'hiring_manager' | 'approver' | 'interviewer'
+export type MemberBusinessRole = 'recruiter'
 export interface InvitationInput {
   email?: string
-  membershipRole: 'member' | 'admin'
+  membershipRole: 'member'
   businessRole: MemberBusinessRole
   departmentId?: string | null
   expiresInDays?: number
 }
 export interface Invitation {
   id: string; workspaceId: string; workspaceName: string; workspaceKind: 'test' | 'production'
-  email: string | null; membershipRole: 'member' | 'admin'; businessRole: MemberBusinessRole
+  email: string | null; membershipRole: 'member'; businessRole: MemberBusinessRole
   departmentId: string | null; departmentName: string | null; createdAt: string; expiresAt: string
   acceptedAt: string | null; status: 'pending' | 'accepted' | 'expired' | 'revoked'; code?: string
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { RequisitionAction, RequisitionView } from '../api'
-import { REQ_ACTION_LABEL, REQ_REASON_REQUIRED, REQ_STATUS_LABEL, requisitionActionsForApproval } from '../workflow'
+import { REQ_ACTION_LABEL, REQ_REASON_REQUIRED, REQ_STATUS_LABEL, requisitionActionsFor } from '../workflow'
 
 defineProps<{
   rows: RequisitionView[]
@@ -18,11 +18,7 @@ const reason = ref('')
 
 function label(status: string): string { return REQ_STATUS_LABEL[status] ?? status }
 function buttons(row: RequisitionView): RequisitionAction[] {
-  return requisitionActionsForApproval(row.status, {
-    provider: row.approvalProvider,
-    status: row.approvalStatus,
-    externalInstanceId: row.approvalExternalInstanceId,
-  })
+  return requisitionActionsFor(row.status)
 }
 
 function isDingTalkActive(row: RequisitionView): boolean {
@@ -51,8 +47,8 @@ function submitPending() {
 }
 
 function tone(action: RequisitionAction): string {
-  if (action === 'reject' || action === 'cancel' || action === 'close') return 'btn-danger'
-  if (action === 'approve' || action === 'submit' || action === 'resubmit') return 'btn-primary'
+  if (action === 'cancel' || action === 'close') return 'btn-danger'
+  if (action === 'submit' || action === 'resubmit') return 'btn-primary'
   return 'btn-ghost'
 }
 </script>
@@ -65,7 +61,7 @@ function tone(action: RequisitionAction): string {
           <th>需求名称</th>
           <th>部门</th>
           <th>人数</th>
-          <th>审批人</th>
+          <th>负责人</th>
           <th>状态</th>
           <th>更新时间</th>
           <th>操作</th>
@@ -101,7 +97,7 @@ function tone(action: RequisitionAction): string {
               >
                 转换为岗位
               </button>
-              <span v-if="isDingTalkActive(row)" class="list-muted">请在钉钉中完成审批</span>
+              <span v-if="isDingTalkActive(row)" class="list-muted">历史审批记录</span>
               <span v-else-if="!buttons(row).length" class="list-muted">无可执行动作</span>
             </div>
           </td>

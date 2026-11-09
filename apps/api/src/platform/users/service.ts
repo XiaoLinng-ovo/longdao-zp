@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import { hashPassword } from '../../auth/password.js'
 import { HttpError } from '../../http.js'
+
 import { PlatformService } from '../service.js'
 import type { PlatformUserDetail, PlatformUserListQuery, PlatformUserProfileInput, PlatformUserStatusInput } from './types.js'
 import { validateProfileInput, validateReasonInput, validateStatusInput, validateUserId, validateUserListQuery, validateWorkspaceAiAccessInput } from './validation.js'
@@ -54,7 +55,7 @@ function workspaceFromRow(row: Record<string, any>) {
     platformAiAccessReady: row.platform_ai_access_ready === true,
     platformAiSourceOrganizationName: row.platform_ai_source_name ?? null,
     membershipRole: row.membership_role,
-    businessRole: String(row.business_role),
+    businessRole: 'recruiter',
     departmentId: row.department_id ?? null,
     departmentName: row.department_name ?? null,
     joinedAt: date(row.joined_at),
@@ -86,7 +87,8 @@ export class PlatformUsersService {
                    WHERE sm.user_id=u.id AND position(lower($1) in lower(so.name)) > 0))
       AND ($2::boolean IS NULL OR u.is_active=$2::boolean)
       AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM organization_members wm WHERE wm.user_id=u.id AND wm.organization_id=$3::uuid))
-      AND ($5::text IS NULL OR ($5='none' AND p.role IS NULL) OR p.role=$4::text)`
+      AND ($5::text IS NULL OR ($5='none' AND p.role IS NULL) OR p.role=$4::text)
+`
     const count = await this.pool.query<{ total: number }>(
       `SELECT count(*)::integer AS total FROM users u
        LEFT JOIN platform_operators p ON p.user_id=u.id AND p.is_active=true
@@ -131,7 +133,7 @@ export class PlatformUsersService {
           serviceStatus: row.workspace_service_status,
           usePlatformAi: row.workspace_use_platform_ai === true,
           membershipRole: row.membership_role,
-          businessRole: String(row.business_role),
+          businessRole: 'recruiter',
         } : null,
       })),
       total: Number(count.rows[0]?.total ?? 0),
@@ -152,7 +154,9 @@ export class PlatformUsersService {
       [userId],
     )
     const row = userResult.rows[0]
-    if (!row) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
+    if (!row) {
+      throw new HttpError(404, 'NOT_FOUND', '用户不存在')
+    }
     const [workspaces, sessions, platformAudit, workspaceAudit] = await Promise.all([
       db.query<any>(
         `SELECT o.id,o.name,o.kind,o.status,o.service_status,COALESCE((to_jsonb(o)->>'use_platform_ai')::boolean,false) AS use_platform_ai,m.role AS membership_role,m.business_role,
@@ -247,19 +251,11 @@ export class PlatformUsersService {
     await this.transaction(async (db) => {
       await this.access.requireAccess(actorId, true, db, true)
       const target = await db.query<any>(
-        `SELECT u.id,u.is_active,p.role AS platform_role FROM users u
-         LEFT JOIN platform_operators p ON p.user_id=u.id AND p.is_active=true
+       `SELECT u.id,u.is_active FROM users u
          WHERE u.id=$1::uuid FOR UPDATE OF u`,
         [userId],
       )
       if (!target.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
-      if (!data.isActive && target.rows[0].platform_role === 'admin') {
-        const activeAdmins = await db.query<{ count: number }>(
-          `SELECT count(*)::integer AS count FROM platform_operators p JOIN users u ON u.id=p.user_id
-           WHERE p.role='admin' AND p.is_active=true AND u.is_active=true`,
-        )
-        if (Number(activeAdmins.rows[0]?.count ?? 0) <= 1) throw new HttpError(409, 'LAST_PLATFORM_ADMIN', '不能停用最后一位有效平台管理员')
-      }
       await db.query('UPDATE users SET is_active=$2,updated_at=now() WHERE id=$1::uuid', [userId, data.isActive])
       let revokedSessions = 0
       if (!data.isActive) {
@@ -276,6 +272,12 @@ export class PlatformUsersService {
     const data: PlatformUserProfileInput = validateProfileInput(input)
     await this.transaction(async (db) => {
       await this.access.requireAccess(actorId, true, db, true)
+      const target = await db.query<any>(
+       `SELECT u.id FROM users u
+         WHERE u.id=$1::uuid FOR UPDATE OF u`,
+        [userId],
+      )
+      if (!target.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
       const sets: string[] = []
       const values: unknown[] = []
       if (data.displayName !== undefined) { values.push(data.displayName); sets.push(`display_name=$${values.length}`) }
@@ -338,8 +340,12 @@ export class PlatformUsersService {
     let revokedSessions = 0
     await this.transaction(async (db) => {
       await this.access.requireAccess(actorId, true, db, true)
-      const exists = await db.query('SELECT id FROM users WHERE id=$1::uuid FOR UPDATE', [userId])
-      if (!exists.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
+      const target = await db.query<any>(
+         `SELECT u.id FROM users u
+         WHERE u.id=$1::uuid FOR UPDATE OF u`,
+        [userId],
+      )
+      if (!target.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
       const revoked = await db.query(`UPDATE sessions SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL AND expires_at>now() RETURNING id`, [userId])
       revokedSessions = revoked.rowCount ?? revoked.rows.length
       await this.audit(db, actorId, userId, 'platform.user.sessions_revoked', requestId, { reason: data.reason, revokedSessions })
@@ -355,13 +361,68 @@ export class PlatformUsersService {
     let revokedSessions = 0
     await this.transaction(async (db) => {
       await this.access.requireAccess(actorId, true, db, true)
-      const exists = await db.query('SELECT id FROM users WHERE id=$1::uuid FOR UPDATE', [userId])
-      if (!exists.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
+      const target = await db.query<any>(
+         `SELECT u.id FROM users u
+         WHERE u.id=$1::uuid FOR UPDATE OF u`,
+        [userId],
+      )
+      if (!target.rows[0]) throw new HttpError(404, 'NOT_FOUND', '用户不存在')
       await db.query('UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1::uuid', [userId, passwordHash])
       const revoked = await db.query(`UPDATE sessions SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL AND expires_at>now() RETURNING id`, [userId])
       revokedSessions = revoked.rowCount ?? revoked.rows.length
       await this.audit(db, actorId, userId, 'platform.user.password_reset', requestId, { reason: data.reason, revokedSessions })
     })
     return { temporaryPassword, revokedSessions }
+  }
+
+  async resetAiGenerationQuota(actorId: string, userId: string, organizationId: string, input: Record<string, unknown>, requestId?: string) {
+    validateUserId(userId)
+    validateUserId(organizationId)
+    const data = validateReasonInput(input)
+    let result: { organizationId: string; organizationName: string; previousGenerations: number; generations: number } | undefined
+    await this.transaction(async (db) => {
+      await this.access.requireAccess(actorId, true, db, true)
+      const target = await db.query<any>(
+        `SELECT u.id AS user_id,o.id AS organization_id,o.name AS organization_name,o.service_status,
+                COALESCE(ai.generations,0) AS generations
+           FROM users u
+           JOIN organization_members m ON m.user_id=u.id
+           JOIN organizations o ON o.id=m.organization_id
+           LEFT JOIN organization_trial_ai_usage ai ON ai.organization_id=o.id
+          WHERE u.id=$1::uuid AND o.id=$2::uuid
+          FOR UPDATE OF u,m,o`,
+        [userId, organizationId],
+      )
+      const row = target.rows[0]
+      if (!row) throw new HttpError(404, 'NOT_FOUND', '该用户不属于此企业')
+      if (row.service_status !== 'trial') throw new HttpError(409, 'AI_QUOTA_RESET_NOT_APPLICABLE', '只有试用企业可以重置 AI 生成次数')
+      const previousGenerations = Number(row.generations ?? 0)
+      await db.query(
+        'INSERT INTO organization_trial_ai_usage(organization_id) VALUES($1::uuid) ON CONFLICT(organization_id) DO NOTHING',
+        [organizationId],
+      )
+      const reset = await db.query<{ generations: number }>(
+        `UPDATE organization_trial_ai_usage
+            SET generations=0,updated_at=now()
+          WHERE organization_id=$1::uuid
+          RETURNING generations`,
+        [organizationId],
+      )
+      const generations = Number(reset.rows[0]?.generations ?? 0)
+      await db.query(
+        `INSERT INTO platform_audit_logs (actor_user_id,organization_id,action,request_id,metadata)
+         VALUES ($1::uuid,$2::uuid,'platform.user.ai_generation_quota_reset',$3,$4::jsonb)`,
+        [actorId, organizationId, requestId ?? null, JSON.stringify({
+          targetUserId: userId,
+          organizationId,
+          organizationName: String(row.organization_name),
+          reason: data.reason,
+          before: { generations: previousGenerations },
+          after: { generations },
+        })],
+      )
+      result = { organizationId, organizationName: String(row.organization_name), previousGenerations, generations }
+    })
+    return result!
   }
 }

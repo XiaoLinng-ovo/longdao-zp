@@ -120,7 +120,7 @@ test('G: development launcher refuses production before any build or migration',
 })
 
 function fakeDatabase(initial = {}) {
-  let state = { departments: [], roles: [], users: [], bindings: [], workspaceRoles: [], ...structuredClone(initial) }
+  let state = { departments: [], roles: [], users: [], bindings: [], workspaceRoles: [], platformOperators: [], workspaceMemberships: [], ...structuredClone(initial) }
   let snapshot
   let releases = 0
   const sql = []
@@ -150,11 +150,40 @@ function fakeDatabase(initial = {}) {
       state.users.push(row)
       return { rows: [{ id: row.id }] }
     }
+    if (/^SELECT id FROM users WHERE email = \$1$/.test(text)) {
+      const user = state.users.find((row) => row.email === values[0])
+      return { rows: user ? [{ id: user.id }] : [] }
+    }
     if (/INSERT INTO user_roles /.test(text)) {
       const role = state.roles.find((row) => row.code === values[1])
       if (!role) return { rows: [] }
       state.bindings.push({ user_id: values[0], role_id: role.id })
       return { rows: [{ user_id: values[0] }] }
+    }
+    if (/INSERT INTO platform_operators /.test(text)) {
+      assert.match(text, /ON CONFLICT \(user_id\) DO NOTHING\s+RETURNING user_id/)
+      if (state.platformOperators.some((row) => row.user_id === values[0])) return { rows: [] }
+      state.platformOperators.push({ user_id: values[0], role: values[1] })
+      return { rows: [{ user_id: values[0] }] }
+    }
+    if (/INSERT INTO organization_members /.test(text)) {
+      assert.match(text, /ON CONFLICT \(organization_id, user_id\) DO NOTHING/)
+      const sourceUser = state.users.find((row) => row.email === values[1])
+      if (!sourceUser) return { rows: [] }
+      const inserted = []
+      for (const source of state.workspaceMemberships.filter((row) => row.user_id === sourceUser.id)) {
+        if (state.workspaceMemberships.some((row) => row.organization_id === source.organization_id && row.user_id === values[0])) continue
+        const membership = {
+          organization_id: source.organization_id,
+          user_id: values[0],
+          role: source.role,
+          business_role: source.business_role,
+          department_id: source.department_id,
+        }
+        state.workspaceMemberships.push(membership)
+        inserted.push({ organization_id: membership.organization_id })
+      }
+      return { rows: inserted }
     }
     throw new Error('Unexpected seed query')
   }
@@ -197,7 +226,7 @@ test('E: new fictional development account is initialized once and subsequent ru
   const db = fakeDatabase()
   assertDevelopmentSeedAllowed(authorized)
   const summary = await seedDevelopmentData(db, fixtures)
-  assert.deepEqual(summary, { departments: 1, roles: 1, users: 1, usersSkipped: 0, roleBindings: 1 })
+  assert.deepEqual(summary, { departments: 1, roles: 1, users: 1, usersSkipped: 0, roleBindings: 1, platformOperators: 0, workspaceMemberships: 0 })
   const state = db.state
   assert.equal(state.users[0].password_hash, 'fictional-hash-only')
   assert.equal(state.users[0].is_active, true)
@@ -206,6 +235,54 @@ test('E: new fictional development account is initialized once and subsequent ru
   const repeated = await seedDevelopmentData(db, fixtures)
   assert.equal(repeated.usersSkipped, 1)
   assert.deepEqual(db.state, state)
+})
+
+test('E2: seed creates the requested platform administrator grant once', async () => {
+  const db = fakeDatabase()
+  const seed = {
+    ...fixtures,
+    roles: [{ code: 'admin', name: 'Fictional platform administrator role' }],
+    users: [{
+      email: 'platform-admin@example.invalid',
+      name: 'Fictional platform administrator',
+      department: 'fictional-department',
+      role: 'admin',
+      platformRole: 'admin',
+      password: 'fictional-test-only',
+    }],
+  }
+  const first = await seedDevelopmentData(db, seed)
+  assert.equal(first.platformOperators, 1)
+  assert.deepEqual(db.state.platformOperators, [{ user_id: db.state.users[0].id, role: 'admin' }])
+
+  const repeated = await seedDevelopmentData(db, seed)
+  assert.equal(repeated.platformOperators, 0)
+  assert.deepEqual(db.state.platformOperators, [{ user_id: db.state.users[0].id, role: 'admin' }])
+})
+
+test('E3: repeated seed never overwrites an existing platform operator role', async () => {
+  const userId = '00000000-0000-4000-8000-000000000001'
+  const db = fakeDatabase({
+    departments: [{ id: 'fictional-department', code: 'fictional-department', name: 'Fictional department', is_active: true }],
+    roles: [{ id: 'fictional-admin-role', code: 'admin', name: 'Fictional platform administrator role' }],
+    users: [{ id: userId, email: 'superadmin@example.invalid', display_name: 'Existing operator', password_hash: 'unchanged-hash', department_id: 'fictional-department', is_active: true }],
+    bindings: [{ user_id: userId, role_id: 'fictional-admin-role' }],
+    platformOperators: [{ user_id: userId, role: 'viewer' }],
+  })
+  const result = await seedDevelopmentData(db, {
+    ...fixtures,
+    roles: [{ code: 'admin', name: 'Fictional platform administrator role' }],
+    users: [{
+      email: 'superadmin@example.invalid',
+      name: 'Fictional platform administrator',
+      department: 'fictional-department',
+      role: 'admin',
+      platformRole: 'admin',
+      password: 'fictional-test-only',
+    }],
+  })
+  assert.equal(result.platformOperators, 0)
+  assert.deepEqual(db.state.platformOperators, [{ user_id: userId, role: 'viewer' }])
 })
 
 test('seed helper refuses unauthorized callers before acquiring a connection', async () => {
@@ -218,7 +295,7 @@ test('seed helper refuses unauthorized callers before acquiring a connection', a
 test('seed rolls back all new data and releases its client if role binding fails', async () => {
   const db = fakeDatabase()
   await assert.rejects(seedDevelopmentData(db, { ...fixtures, users: [{ ...fixtures.users[0], role: 'nonexistent-role' }] }), /role binding failed/)
-  assert.deepEqual(db.state, { departments: [], roles: [], users: [], bindings: [], workspaceRoles: [] })
+  assert.deepEqual(db.state, { departments: [], roles: [], users: [], bindings: [], workspaceRoles: [], platformOperators: [], workspaceMemberships: [] })
   assert.equal(db.sql.at(-1), 'ROLLBACK')
   assert.equal(db.releases, 1)
 })

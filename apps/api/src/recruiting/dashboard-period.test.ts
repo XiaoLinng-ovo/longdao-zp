@@ -54,18 +54,23 @@ test('returns zero buckets for an empty period and monthly buckets for long rang
   assert.equal(result.series.length, 10)
 })
 
-test('dashboard period filters current todos and respects department scope without changing all-time totals', async () => {
+test('dashboard period keeps every outstanding todo while reporting activity within the selected period', async () => {
   process.env.NODE_ENV = 'test'
   const store = new LocalRecruitingStore(), service = new RecruitingService(store)
   await store.transaction(state => {
     state.workflowEvents.push(event('pass', period.from))
     state.jobs.find(job => job.departmentId === 'dept-tech')!.updatedAt = period.from
+    state.applications.find(application => application.id === 'application-8821')!.updatedAt = '2025-01-01T00:00:00.000Z'
+    state.recruitmentRequests.find(request => request.status === 'pending_approval')!.updatedAt = '2025-01-01T00:00:00.000Z'
   })
   const all = await service.getDashboardSummary()
   const filtered = await service.getDashboardSummary('dept-tech', undefined, period)
+  const unscoped = await service.getDashboardSummary(undefined, undefined, period)
   assert.ok(!all.activity)
   assert.equal(filtered.activity?.counts.screened, 1)
-  assert.ok(filtered.todos.every(todo => withinPeriod(todo.updatedAt, period)))
+  assert.ok(filtered.todos.some(todo => todo.id === 'review-application-8821' && !withinPeriod(todo.updatedAt, period)))
+  assert.ok(unscoped.todos.some(todo => todo.id === 'request-rr-24017' && !withinPeriod(todo.updatedAt, period)))
+  assert.ok(unscoped.pendingApprovals.some(request => request.id === 'rr-24017'))
   assert.equal(filtered.funnel[0]?.conversionRate, null)
   assert.equal((await service.getDashboardSummary()).metrics[0]?.value, all.metrics[0]?.value)
 })

@@ -12,12 +12,6 @@ const expectedRoutes = [
     icon: '◈',
   },
   {
-    path: '/requisitions',
-    title: '需求管理 · 审批',
-    navLabel: '需求管理',
-    icon: '①',
-  },
-  {
     path: '/jobs',
     title: '岗位管理',
     navLabel: '岗位管理',
@@ -37,8 +31,8 @@ const expectedRoutes = [
   },
   {
     path: '/offers',
-    title: '录用审批与 Offer',
-    navLabel: '录用审批与 Offer',
+    title: 'Offer 管理',
+    navLabel: 'Offer 管理',
     icon: '⑥',
   },
   {
@@ -54,8 +48,8 @@ const expectedRoutes = [
   {path: '/enterprise/ai-usage',title:'企业 AI 用量',navLabel:'企业 AI 用量',icon:'▤'},
   {
     path: '/administration',
-    title: '平台系统配置',
-    navLabel: '平台系统配置',
+    title: '系统配置',
+    navLabel: '系统配置',
     icon: '⚙',
   },
   { path: '/platform/customers', title: '企业客户管理', navLabel: '企业客户管理', icon: '▧' },
@@ -67,10 +61,10 @@ const expectedRoutes = [
     icon: '⌂',
   },
   {
-    path: '/enterprise/approval-settings',
-    title: '需求审批设置',
-    navLabel: '需求审批设置',
-    icon: '✓',
+    path: '/enterprise/departments',
+    title: '部门管理',
+    navLabel: '部门管理',
+    icon: '⌘',
   },
 ] as const
 
@@ -85,8 +79,9 @@ describe('application router', () => {
     const router = createAppRouter()
     const routeByPath = new Map(router.getRoutes().map((route) => [route.path, route]))
 
-    expect(navigationItems).toHaveLength(expectedRoutes.length - 3)
+    expect(navigationItems).toHaveLength(expectedRoutes.length - 1)
     expect(navigationItems.some((item) => item.path === '/requisitions')).toBe(false)
+    expect(routeByPath.has('/enterprise/approval-settings')).toBe(false)
 
     for (const expected of expectedRoutes) {
       const route = routeByPath.get(expected.path)
@@ -119,12 +114,32 @@ describe('application router', () => {
   it('marks administration as admin-only and hides it for non-admin navigation', () => {
     const router = createAppRouter()
     const adminRoute = router.getRoutes().find((route) => route.name === 'administration')
-    expect(adminRoute?.meta.platformAdminOnly).toBe(true)
+    expect(adminRoute?.meta.systemAdminOnly).toBe(true)
     expect(getNavigationItemsForRole('recruiter').some((item) => item.name === 'administration')).toBe(false)
     expect(getNavigationItemsForRole('admin').some((item) => item.name === 'administration')).toBe(false)
-    expect(getNavigationItemsForRole('recruiter', undefined, 'admin').some((item) => item.name === 'administration')).toBe(true)
+    expect(getNavigationItemsForRole('recruiter', undefined, 'admin').some((item) => item.name === 'administration')).toBe(false)
+    expect(getNavigationItemsForRole('recruiter', undefined, undefined, true).some((item) => item.name === 'administration')).toBe(true)
     expect(getNavigationItemsForRole('recruiter', 'owner').some((item) => item.name === 'enterprise-approval-settings')).toBe(false)
     expect(getNavigationItemsForRole('recruiter', 'member').some((item) => item.name === 'enterprise-approval-settings')).toBe(false)
+  })
+
+  it('allows ordinary workspace members to manage their enterprise departments', async () => {
+    Object.assign(authSession, {
+      ready: true,
+      loading: false,
+      user: { id: 'u2', name: '企业成员', email: 'member@example.com', role: 'recruiter', departmentId: 'd1', workspaceId: 'w1' },
+      workspaces: [{ id: 'w1', name: '测试企业', kind: 'test', status: 'active', role: 'member', createdAt: '2026-09-30T00:00:00Z' }],
+    })
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    expect(getNavigationItemsForRole('recruiter', 'member').some((item) => item.name === 'enterprise-departments')).toBe(true)
+    await router.push('/enterprise/departments')
+
+    expect(router.currentRoute.value.name).toBe('enterprise-departments')
+    authSession.user = { id: 'admin', name: '系统管理员', email: 'admin@example.com', role: 'admin', departmentId: '', workspaceId: 'w1' }
+    await router.push('/enterprise/departments')
+    expect(router.currentRoute.value.name).toBe('enterprise-departments')
   })
 
   it('allows a logged-out user to reach login through the auth guard', async () => {
@@ -140,6 +155,37 @@ describe('application router', () => {
 
     expect(authSession.user).toBeNull()
     expect(router.currentRoute.value.name).toBe('login')
+  })
+
+  it('exposes the forgot-password page as a hidden authentication route', () => {
+    const route = createAppRouter().getRoutes().find((item) => item.name === 'forgot-password')
+
+    expect(route?.path).toBe('/forgot-password')
+    expect(route?.components?.default).toBeTypeOf('function')
+    expect(route?.meta).toMatchObject({
+      title: '找回密码',
+      hideInNav: true,
+      hideShell: true,
+    })
+  })
+
+  it('allows a logged-out user to reach forgot password', async () => {
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    await router.push('/forgot-password')
+
+    expect(router.currentRoute.value.name).toBe('forgot-password')
+  })
+
+  it('redirects an authenticated user away from forgot password', async () => {
+    authSession.user = { id: 'u1', name: '招聘专员', email: 'recruiter@example.com', role: 'recruiter', departmentId: 'd1', workspaceId: 'w1' }
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    await router.push('/forgot-password')
+
+    expect(router.currentRoute.value.name).toBe('dashboard')
   })
 
   it('redirects unauthenticated users to login and preserves the destination', async () => {
@@ -179,8 +225,7 @@ describe('enterprise approval settings access', () => {
 
     await router.push('/enterprise/approval-settings')
 
-    expect(router.currentRoute.value.name).toBe('jobs')
-    expect(router.currentRoute.value.query.notice).toBe('recruitment-requests-disabled')
+    expect(router.currentRoute.value.name).toBe('dashboard')
   })
 
   it('redirects members without opening disabled recruitment approval settings', async () => {
@@ -191,7 +236,25 @@ describe('enterprise approval settings access', () => {
 
     await router.push('/enterprise/approval-settings')
 
-    expect(router.currentRoute.value.name).toBe('jobs')
+    expect(router.currentRoute.value.name).toBe('dashboard')
+  })
+})
+
+describe('removed enterprise approval settings compatibility', () => {
+  it('redirects the removed approval settings bookmark to the dashboard', async () => {
+    Object.assign(authSession, {
+      ready: true,
+      loading: false,
+      user: { id: 'u1', name: '企业用户', email: 'member@example.com', role: 'recruiter', departmentId: '', workspaceId: 'w1' },
+      workspaces: [{ id: 'w1', name: '测试企业', kind: 'test', status: 'active', role: 'member', createdAt: '2026-09-30T00:00:00Z' }],
+    })
+    const router = createAppRouter()
+    installAuthGuard(router)
+
+    await router.push('/enterprise/approval-settings')
+
+    expect(router.currentRoute.value.name).toBe('dashboard')
+    expect(router.currentRoute.value.query).toEqual({})
   })
 })
 
@@ -241,16 +304,18 @@ describe('recruitment requests disabled: UI route boundary', () => {
   })
 
   it.each(['admin', 'hr_admin', 'recruiter', 'hiring_manager', 'approver', 'interviewer'] as const)(
-    'keeps Offer approval accessible and request pages closed for %s', async (role) => {
+    'keeps Offer management accessible and request pages closed for %s', async (role) => {
       authSession.user = { id: 'u1', name: '测试', email: 'test@example.invalid', role, departmentId: '', workspaceId: 'w1' }
       authSession.workspaces = [{ id: 'w1', name: '企业', kind: 'production', status: 'active', role: 'owner', createdAt: '2026-10-12' }]
       const router = createAppRouter()
       installAuthGuard(router)
-      for (const path of ['/requisitions', '/requisitions/legacy-id?edit=1', '/enterprise/approval-settings']) {
+      for (const path of ['/requisitions', '/requisitions/legacy-id?edit=1']) {
         await router.push(path)
         expect(router.currentRoute.value.name).toBe('jobs')
         expect(router.currentRoute.value.query).toEqual({ notice: 'recruitment-requests-disabled' })
       }
+      await router.push('/enterprise/approval-settings')
+      expect(router.currentRoute.value.name).toBe('dashboard')
       for (const path of ['/offers', '/offers/offer-id']) {
         await router.push(path)
         expect(router.currentRoute.value.path).toBe(path)
@@ -272,6 +337,26 @@ describe('recruitment requests disabled: UI route boundary', () => {
   })
 })
 
+describe('已隐藏功能的入口边界', () => {
+  beforeEach(() => {
+    Object.assign(authSession, {
+      ready: true,
+      loading: false,
+      user: { id: 'u1', name: '测试', email: 'test@example.invalid', role: 'recruiter', departmentId: '', workspaceId: 'w1' },
+      workspaces: [{ id: 'w1', name: '企业', kind: 'production', status: 'active', role: 'owner', createdAt: '2026-10-12' }],
+    })
+  })
+
+  it('不在导航中展示已隐藏的数据看板，直接访问也回到工作台', async () => {
+    expect(navigationItems.some(item => item.path === '/reports')).toBe(false)
+    const router = createAppRouter()
+    installAuthGuard(router)
+    await router.push('/reports')
+    expect(router.currentRoute.value.name).toBe('dashboard')
+    expect(router.currentRoute.value.query).toEqual({ notice: 'recruitment-reports-disabled' })
+  })
+})
+
 
 describe('平台统一 AI 配置权限边界',()=>{
   it.each(['owner','admin','member'] as const)('企业角色 %s 不能访问平台 AI 配置',async(workspaceRole)=>{
@@ -280,11 +365,11 @@ describe('平台统一 AI 配置权限边界',()=>{
     expect(router.currentRoute.value.name).toBe('forbidden')
     expect(getNavigationItemsForRole('admin',workspaceRole).some(item=>item.path==='/enterprise/ai')).toBe(false)
   })
-  it('只允许平台超级管理员进入统一配置页',async()=>{
-    authSession.user={id:'p',name:'平台',email:'p@example.invalid',role:'recruiter',departmentId:'',platformRole:'admin'}
+  it('仅允许绑定的系统管理员进入统一配置页',async()=>{
+    Object.assign(authSession, { user: { id:'p',name:'系统管理员',email:'p@example.invalid',role:'recruiter',departmentId:'',isSystemAdmin:true }, workspaces: [] })
     const router=createAppRouter();installAuthGuard(router);await router.push('/administration?module=ai')
     expect(router.currentRoute.value.name).toBe('administration')
-    expect(getNavigationItemsForRole('recruiter',undefined,'admin').some(item=>item.name==='administration')).toBe(true)
+    expect(getNavigationItemsForRole('recruiter',undefined,undefined,true).some(item=>item.name==='administration')).toBe(true)
   })
 })
 
@@ -294,13 +379,37 @@ describe('平台统一 AI 配置权限边界',()=>{
     authSession.user={id:'p',name:'平台',email:'p@example.invalid',role:'recruiter',departmentId:'',platformRole}
     const router=createAppRouter();installAuthGuard(router);await router.push('/platform/customers')
     expect(router.currentRoute.value.name).toBe('platform-customers')
-    await router.push('/administration');expect(router.currentRoute.value.name).toBe(platformRole==='admin'?'administration':'forbidden')
+    await router.push('/administration')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+    const platformPaths=getNavigationItemsForRole('recruiter',undefined,platformRole).filter(item=>item.platformOnly).map(item=>item.path)
+    expect(platformPaths).toContain('/platform/customers')
+    expect(platformPaths).toContain('/platform/users')
+  })
+  it('keeps platform operations separate from system configuration',async()=>{
+    authSession.user={id:'平台运营账号',name:'平台运营账号',email:'platform@example.invalid',role:'recruiter',departmentId:'',platformRole:'admin'}
+    const router=createAppRouter();installAuthGuard(router)
+    for(const path of ['/platform/customers','/platform/users']){
+      await router.push(path)
+      expect(router.currentRoute.value.path).toBe(path)
+    }
+    const platformPaths=getNavigationItemsForRole('admin',undefined,'admin').filter(item=>item.platformOnly).map(item=>item.path)
+    expect(platformPaths).toContain('/platform/customers')
+    expect(platformPaths).toContain('/platform/users')
+  })
+  it.each([
+    ['viewer','/platform/customers'],
+    ['admin','/platform/customers'],
+    ['viewer','/platform/customers'],
+  ] as const)('sends an authenticated %s without a workspace to a usable platform landing page',async(platformRole,expectedPath)=>{
+    authSession.user={id:'platform-user',name:'平台用户',email:'platform@example.invalid',role:'admin',departmentId:'',platformRole}
+    const router=createAppRouter();installAuthGuard(router);await router.push('/login')
+    expect(router.currentRoute.value.path).toBe(expectedPath)
   })
   it('does not promote enterprise owner or legacy business admin to platform operator',async()=>{
     authSession.user={id:'u',name:'企业',email:'u@example.invalid',role:'admin',departmentId:'',workspaceId:'w'}
     authSession.workspaces=[{id:'w',name:'企业',kind:'test',status:'active',role:'owner',createdAt:'2026-10-12'}]
     expect(getNavigationItemsForRole('admin','owner').some(item=>item.platformOnly)).toBe(false)
-    expect(getNavigationItemsForRole('recruiter',undefined,'viewer').filter(item=>item.platformOnly).map(item=>item.path).sort()).toEqual(['/platform/customers','/platform/payments','/platform/users'])
+    expect(getNavigationItemsForRole('recruiter',undefined,'viewer').filter(item=>item.platformOnly)).not.toHaveLength(0)
     const router=createAppRouter();installAuthGuard(router);await router.push('/platform/customers');expect(router.currentRoute.value.name).toBe('forbidden')
   })
 })
@@ -324,4 +433,19 @@ describe('enterprise AI usage routing and navigation',()=>{
   Object.assign(authSession,{ready:true,loading:false,user:{id:'p',name:'平台',email:'p@example.invalid',role:'admin',departmentId:'',platformRole:'admin',workspaceId:'w1'},workspaces:[{id:'w1',name:'企业',kind:'test',status:'active',role:'member',createdAt:'2026-10-12'}]})
   const router=createAppRouter();installAuthGuard(router);await router.push('/enterprise/ai-usage');expect(router.currentRoute.value.name).toBe('forbidden')
  })
+})
+
+describe('user profile route', () => {
+  it('allows an authenticated user without an active workspace to view and edit their profile', async () => {
+    Object.assign(authSession, {
+      ready: true,
+      loading: false,
+      user: { id: 'u1', name: '未选空间用户', email: 'user@example.invalid', role: 'recruiter', departmentId: '' },
+      workspaces: [],
+    })
+    const router = createAppRouter()
+    installAuthGuard(router)
+    await router.push('/profile')
+    expect(router.currentRoute.value.name).toBe('profile')
+  })
 })

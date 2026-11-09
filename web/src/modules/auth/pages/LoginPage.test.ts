@@ -2,14 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import LoginPage from './LoginPage.vue'
-import { authSession, loginWithEmail } from '../session'
+import { authSession, loginWithEmail, switchWorkspace } from '../session'
 
-const { route, push, session } = vi.hoisted(() => ({
+const { route, push, replace, session } = vi.hoisted(() => ({
   route: { query: {} as Record<string, string> },
   push: vi.fn(),
-  session: { ready: true, user: null as null | { workspaceId: string }, loading: false },
+  replace: vi.fn(),
+  session: { ready: true, user: null as null | { workspaceId?: string; platformRole?: 'admin' | 'viewer' }, loading: false },
 }))
-vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => ({ push }) }))
+vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => ({ push, replace }) }))
 vi.mock('../session', () => ({
   authSession: session,
   loginWithEmail: vi.fn(),
@@ -45,7 +46,14 @@ beforeEach(() => {
   layoutListener = undefined
   route.query = {}
   session.user = null
-  vi.mocked(loginWithEmail).mockResolvedValue([])
+  vi.mocked(loginWithEmail).mockResolvedValue({
+    kind: 'authenticated',
+    user: { id: 'user-1', name: '招聘专员', email: 'recruiter@example.com', role: 'recruiter', departmentId: 'dept-tech' },
+    sessionId: 'session-1',
+    expiresAt: '2026-11-04T00:00:00Z',
+    workspaces: [],
+  })
+  vi.mocked(switchWorkspace).mockResolvedValue()
   vi.stubGlobal('matchMedia', vi.fn(() => ({
     get matches() { return compact },
     addEventListener: (_event: string, listener: () => void) => { layoutListener = listener },
@@ -69,12 +77,17 @@ describe('登录页教程布局', () => {
     expect(element.querySelector<HTMLButtonElement>('.login-actions button')?.type).toBe('submit')
   })
 
-  it('不展示开发测试账号说明或快捷填入按钮', async () => {
+  it('只提示输入邮箱和密码，不展示具体测试账号', async () => {
     const element = await mount()
     expect(element.querySelector('.dev-account')).toBeNull()
     expect(element.textContent).not.toContain('开发环境测试账号')
     expect(element.textContent).not.toContain('填入测试账号')
-    expect(element.textContent).not.toContain('recruiter@smartrecruit.local / recruiter123')
+    const email = element.querySelector<HTMLInputElement>('#login-email')!
+    const password = element.querySelector<HTMLInputElement>('#login-password')!
+    expect(email.placeholder).toBe('请输入邮箱')
+    expect(password.placeholder).toBe('请输入密码')
+    expect(element.innerHTML).not.toContain('recruiter@smartrecruit.local')
+    expect(element.innerHTML).not.toContain('recruiter123')
   })
 
   it('桌面教程在介绍区下方，重要操作仍在登录卡片内', async () => {
@@ -138,11 +151,67 @@ describe('登录页教程布局', () => {
     expect(push).toHaveBeenCalledWith(route.query.redirect)
   })
 
+  it('只有一个未选择的工作空间时自动进入系统', async () => {
+    vi.mocked(loginWithEmail).mockResolvedValue({
+      kind: 'authenticated',
+      user: { id: 'admin-1', name: '系统管理员', email: 'admin@smartrecruit.local', role: 'admin', departmentId: 'dept-tech' },
+      sessionId: 'session-admin',
+      expiresAt: '2026-11-05T00:00:00Z',
+      workspaces: [{ id: 'workspace-1', name: '龙道测试企业', kind: 'test', status: 'active', role: 'owner', createdAt: '2026-11-05' }],
+    })
+    const element = await mount()
+    const email = element.querySelector<HTMLInputElement>('#login-email')!
+    const password = element.querySelector<HTMLInputElement>('#login-password')!
+    email.value = 'admin@smartrecruit.local'
+    email.dispatchEvent(new Event('input'))
+    password.value = 'test-password'
+    password.dispatchEvent(new Event('input'))
+    element.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush()
+    expect(switchWorkspace).toHaveBeenCalledWith('workspace-1')
+    expect(push).toHaveBeenCalledWith('/')
+    expect(element.querySelector('.workspace-choice')).toBeNull()
+  })
+
+  it('没有企业工作空间的平台管理员直接进入企业客户管理', async () => {
+    const response = {
+      kind: 'authenticated' as const,
+      user: { id: 'platform-admin-1', name: '平台管理员', email: 'platform-admin@example.test', role: 'admin' as const, departmentId: 'dept-hr', platformRole: 'admin' as const },
+      sessionId: 'session-platform-admin',
+      expiresAt: '2026-11-05T00:00:00Z',
+      workspaces: [],
+    }
+    vi.mocked(loginWithEmail).mockImplementation(async () => {
+      session.user = response.user
+      return response
+    })
+    const element = await mount()
+    const email = element.querySelector<HTMLInputElement>('#login-email')!
+    const password = element.querySelector<HTMLInputElement>('#login-password')!
+    email.value = 'platform-admin@example.test'
+    email.dispatchEvent(new Event('input'))
+    password.value = 'test-password'
+    password.dispatchEvent(new Event('input'))
+    element.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flush()
+    expect(switchWorkspace).not.toHaveBeenCalled()
+    expect(push).toHaveBeenCalledWith('/platform/customers')
+  })
+
   it('已有会话进入登录页时保留邀请跳转', async () => {
     session.user = { workspaceId: 'workspace-1' }
     route.query = { redirect: '/workspaces?join=1' }
     await mount()
     expect(push).toHaveBeenCalledWith(route.query.redirect)
     expect(authSession.user?.workspaceId).toBe('workspace-1')
+  })
+
+  it('密码重置提示只展示一次，并从地址中清除 reset 参数', async () => {
+    route.query = { reset: '1', redirect: '/offers' }
+
+    const element = await mount()
+
+    expect(element.textContent).toContain('密码已重置，请使用新密码登录。')
+    expect(replace).toHaveBeenCalledWith({ name: 'login', query: { redirect: '/offers' } })
   })
 })

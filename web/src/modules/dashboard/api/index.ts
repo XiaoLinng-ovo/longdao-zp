@@ -4,6 +4,7 @@ import type { Metric, Requisition } from '../../../shared/types/recruiting'
 export interface DashboardTodo {
   id: string
   category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding'
+  actionKey?: 'confirm-job-spec' | 'confirm-job-jd' | 'publish-job'
   title: string
   description: string
   actionLabel: string
@@ -38,14 +39,13 @@ interface DashboardSummaryContract {
     updatedAt: string
     approval?: { approver?: string }
   }>
-  pendingFeedback: Array<{
+  pendingInterviews: Array<{
     id: string
     code: string
     title: string
     round: number
     scheduledStartAt?: string
     status: string
-    feedbackStatus: string
     candidateName: string
     jobTitle: string
   }>
@@ -65,7 +65,7 @@ export interface DashboardData {
   metrics: Metric[]
   pending: Requisition[]
   funnel: Array<{ label: string; value: number; conversionRate: number | null }>
-  pendingFeedback: DashboardSummaryContract['pendingFeedback']
+  pendingInterviews: DashboardSummaryContract['pendingInterviews']
   failedTasks: DashboardSummaryContract['failedTasks']
 }
 
@@ -97,8 +97,7 @@ export async function loadDashboard(period?: DashboardPeriod): Promise<Dashboard
   return {
     ...(response.data.activity ? { activity: response.data.activity } : {}),
     todos: response.data.todos ?? [
-      ...response.data.pendingApprovals.map((row): DashboardTodo => ({ id: `request-${row.id}`, category: 'requisition', title: row.title, description: `待审批 · ${row.department}`, actionLabel: '去审批', path: `/requisitions/${row.id}`, updatedAt: row.updatedAt })),
-      ...response.data.pendingFeedback.map((row): DashboardTodo => ({ id: `feedback-${row.id}`, category: 'interview', title: `${row.candidateName}：待反馈面试`, description: `${row.jobTitle} · 第 ${row.round} 轮`, actionLabel: '去反馈', path: `/interviews/${row.id}`, updatedAt: row.scheduledStartAt ?? '' })),
+      ...response.data.pendingInterviews.map((row): DashboardTodo => ({ id: `complete-${row.id}`, category: 'interview', title: '面试待完成', description: `${row.candidateName} · ${row.jobTitle} · 第 ${row.round} 轮`, actionLabel: '去完成', path: `/interviews/${row.id}`, updatedAt: row.scheduledStartAt ?? '' })),
       ...response.data.failedTasks.map((row): DashboardTodo => ({ id: `analysis-${row.id}`, category: 'resume', title: '简历分析任务待重试', description: row.lastError || '分析失败', actionLabel: '查看简历', path: '/candidates', updatedAt: row.availableAt })),
     ],
     metrics: response.data.metrics.map((row, index) => {
@@ -109,7 +108,7 @@ export async function loadDashboard(period?: DashboardPeriod): Promise<Dashboard
     }),
     pending: response.data.pendingApprovals.map(toRequisition),
     funnel,
-    pendingFeedback: response.data.pendingFeedback,
+    pendingInterviews: response.data.pendingInterviews,
     failedTasks: response.data.failedTasks,
   }
 }

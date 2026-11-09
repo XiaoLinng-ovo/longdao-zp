@@ -1,13 +1,66 @@
+import { createHash, randomBytes } from 'node:crypto'
 import { LocalAuthSessionStore } from './session-store.js'
-import type { AuthContext, AuthSession, LoginInput, RegisterInput, RegisterResult, Role, SessionUser, WorkspaceCreateInput, WorkspaceSummary } from './types.js'
-import { LoginRateLimiter } from './rate-limit.js'
-import type { SessionRepository } from './session-repository.js'
+import type {
+  AuthContext,
+  AuthenticatedRegisterResult,
+  LoginInput,
+  LoginResult,
+  MfaChallenge,
+  ProfileContact,
+  ProfileUpdateInput,
+  RegisterInput,
+  Role,
+  SessionUser,
+  WorkspaceCreateInput,
+  WorkspaceSummary,
+} from './types.js'
 import { PostgresSessionRepository } from './session-repository.js'
 import { createDatabasePool } from '../db/connection.js'
 import { loadDatabaseConfig } from '../db/config.js'
+import { EmailVerificationService } from './verification-service.js'
+import { hashPassword } from './password.js'
+import { normalizeRegistrationInput } from './registration.js'
+import { assertVerificationSecret, hashVerificationCode, normalizeVerificationCode, normalizeVerificationEmail } from './verification-code.js'
+import { buildTotpUri, consumeRecoveryCode, createRecoveryCodes, decryptMfaSecret, encryptMfaSecret, generateTotpSecret, verifyTotp } from './totp.js'
+import { loadTurnstileConfig, verifyTurnstile } from './turnstile.js'
+import { isPlatformAdmin } from '../platform/roles.js'
+import { isSystemAdministrator, requireSystemAdministrator } from './system-administrator.js'
 
-export type AuthSessionStore = Pick<LocalAuthSessionStore, 'findUserByEmailPassword' | 'createSession' | 'findSessionByToken' | 'deleteSession' | 'registerUser' | 'listWorkspaces' | 'createWorkspace' | 'archiveWorkspace' | 'resetWorkspace' | 'selectWorkspace'>
+export type AuthSessionStore = Pick<
+  LocalAuthSessionStore,
+  | 'findUserByEmailPassword'
+  | 'findUserById'
+  | 'updateUserProfile'
+  | 'findUserForPasswordAuthentication'
+  | 'hasUserByEmail'
+  | 'createEmailVerificationChallenge'
+  | 'invalidateVerificationChallenge'
+  | 'registerUserWithVerification'
+  | 'resetPasswordWithVerification'
+  | 'startLoginAttempt'
+  | 'finishLoginAttempt'
+  | 'getMfaCredential'
+  | 'createMfaChallenge'
+  | 'findMfaChallengeByTokenHash'
+  | 'recordMfaChallengeFailure'
+  | 'completeMfaChallenge'
+  | 'invalidateMfaChallenge'
+  | 'revokeAllSessions'
+  | 'createSession'
+  | 'findSessionByToken'
+  | 'deleteSession'
+  | 'listWorkspaces'
+  | 'createWorkspace'
+  | 'archiveWorkspace'
+  | 'resetWorkspace'
+  | 'selectWorkspace'
+>
 
+export interface AuthServiceOptions {
+  env?: NodeJS.ProcessEnv
+  verificationService?: EmailVerificationService
+  turnstileFetcher?: typeof fetch
+}
 export function createAuthSessionStore(env: NodeJS.ProcessEnv = process.env): AuthSessionStore {
   const hasDatabase = Boolean(env.DATABASE_URL?.trim() || env.PGPASSWORD?.trim())
   if (env.NODE_ENV === 'production' && !hasDatabase) {
@@ -15,56 +68,309 @@ export function createAuthSessionStore(env: NodeJS.ProcessEnv = process.env): Au
   }
   if (hasDatabase) {
     const pool = createDatabasePool(loadDatabaseConfig(env))
-    return new PostgresSessionRepository(pool) as SessionRepository & AuthSessionStore
+    return new PostgresSessionRepository(pool)
   }
   return new LocalAuthSessionStore()
 }
 
+const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+const authError = (message: string, code: string, status: number) => Object.assign(new Error(message), { code, status })
+const issueChallengeToken = () => randomBytes(32).toString('base64url')
+
 export class AuthService {
   private readonly sessionStore: AuthSessionStore
-  private readonly loginLimiter: LoginRateLimiter
+  private readonly env: NodeJS.ProcessEnv
+  private readonly verificationService: EmailVerificationService
+  private readonly turnstileFetcher: typeof fetch
 
-  constructor(sessionStore = createAuthSessionStore(), loginLimiter = new LoginRateLimiter()) {
+  constructor(sessionStore: AuthSessionStore = createAuthSessionStore(), options: AuthServiceOptions = {}) {
     this.sessionStore = sessionStore
-    this.loginLimiter = loginLimiter
+    this.env = options.env ?? process.env
+    this.verificationService = options.verificationService ?? new EmailVerificationService(this.sessionStore, undefined, this.env)
+    this.turnstileFetcher = options.turnstileFetcher ?? fetch
   }
 
-  async login(input: LoginInput): Promise<{ session: AuthSession; token: string }> {
-    const email = (input.email ?? '').trim()
+  private async assertHuman(input: { token?: string; ipAddress?: string; expectedAction: string }): Promise<void> {
+    await verifyTurnstile({
+      token: input.token ?? '',
+      ...(input.ipAddress ? { remoteIp: input.ipAddress } : {}),
+      expectedAction: input.expectedAction,
+      config: loadTurnstileConfig(this.env),
+      fetcher: this.turnstileFetcher,
+    })
+  }
+
+  async requestRegistrationCode(input: { email: string; ipAddress?: string; turnstileToken?: string }): Promise<{ accepted: true; retryAfterSeconds: number }> {
+    await this.assertHuman({ ...(input.turnstileToken ? { token: input.turnstileToken } : {}), ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}), expectedAction: 'register-code' })
+    return this.verificationService.requestCode({ purpose: 'registration', email: input.email, ...(input.ipAddress ? { requestIp: input.ipAddress } : {}) })
+  }
+
+  async requestPasswordReset(input: { email: string; ipAddress?: string; turnstileToken?: string }): Promise<{ accepted: true; retryAfterSeconds: number }> {
+    await this.assertHuman({ ...(input.turnstileToken ? { token: input.turnstileToken } : {}), ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}), expectedAction: 'password-reset' })
+    return this.verificationService.requestCode({ purpose: 'password_reset', email: input.email, ...(input.ipAddress ? { requestIp: input.ipAddress } : {}) })
+  }
+
+  async register(input: RegisterInput): Promise<AuthenticatedRegisterResult> {
+    await this.assertHuman({ ...(input.turnstileToken ? { token: input.turnstileToken } : {}), ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}), expectedAction: 'register-confirm' })
+    const data = normalizeRegistrationInput(input)
+    const code = normalizeVerificationCode(input.verificationCode)
+    assertVerificationSecret(this.env)
+    const codeHash = hashVerificationCode('registration', data.email, code, this.env.AUTH_OTP_HMAC_SECRET)
+    const registered = await this.sessionStore.registerUserWithVerification(input, { codeHash })
+    const session = await this.sessionStore.createSession(registered.user, undefined, input.ipAddress ? { ipAddress: input.ipAddress } : {})
+    return { ...registered, ...session }
+  }
+
+  async confirmPasswordReset(input: {
+    email: string
+    verificationCode: string
+    password: string
+    ipAddress?: string
+    turnstileToken?: string
+  }): Promise<{ ok: true }> {
+    await this.assertHuman({
+      ...(input.turnstileToken ? { token: input.turnstileToken } : {}),
+      ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
+      expectedAction: 'password-reset-confirm',
+    })
+    const email = normalizeVerificationEmail(input.email)
     const password = String(input.password ?? '')
-    if (!email || !password) {
-      const error = new Error('邮箱和密码不能为空') as Error & { code?: string; status?: number }
-      error.code = 'VALIDATION_ERROR'
-      error.status = 400
-      throw error
+    if (password.length < 8) throw authError('密码至少需要 8 个字符', 'VALIDATION_ERROR', 400)
+    const code = normalizeVerificationCode(input.verificationCode)
+    assertVerificationSecret(this.env)
+    await this.sessionStore.resetPasswordWithVerification({
+      email,
+      codeHash: hashVerificationCode('password_reset', email, code, this.env.AUTH_OTP_HMAC_SECRET),
+      passwordHash: await hashPassword(password),
+    })
+    return { ok: true }
+  }
+
+  async login(input: LoginInput): Promise<LoginResult> {
+    const email = normalizeVerificationEmail(input.email)
+    const password = String(input.password ?? '')
+    if (!password) throw authError('邮箱和密码不能为空', 'VALIDATION_ERROR', 400)
+    const attempt = await this.sessionStore.startLoginAttempt({ email, ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}), windowMs: 15 * 60_000, emailLimit: 5, ipLimit: 30 })
+    if (!attempt.allowed) throw authError('登录尝试过于频繁，请稍后再试', 'LOGIN_RATE_LIMITED', 429)
+    const authenticated = await this.sessionStore.findUserForPasswordAuthentication(email, password)
+    if (!authenticated) {
+      await this.sessionStore.finishLoginAttempt(attempt.id, false, 'invalid_credentials')
+      throw authError('邮箱或密码错误', 'INVALID_CREDENTIALS', 401)
     }
-    const key = email.toLowerCase()
-    if (!this.loginLimiter.allow(key)) {
-      const error = new Error('登录尝试过于频繁，请稍后再试') as Error & { code?: string; status?: number }
-      error.code = 'LOGIN_RATE_LIMITED'; error.status = 429
-      throw error
+    const user = this.withSystemAdministratorStatus(authenticated.user)
+    if (this.mfaRequired() && !this.isMfaExempt(user.email)) {
+      if (authenticated.mfaEnabled) {
+        const challengeToken = issueChallengeToken()
+        const challenge = await this.sessionStore.createMfaChallenge({
+          tokenHash: sha256(challengeToken),
+          userId: user.id,
+          ...(attempt.id ? { loginAttemptId: attempt.id } : {}),
+          kind: 'login',
+          ...(input.ipAddress ? { requestIp: input.ipAddress } : {}),
+          expiresInMs: 5 * 60_000,
+          maxAttempts: 5,
+        })
+        return { kind: 'mfa_required', challengeToken, expiresAt: challenge.expiresAt, methods: ['totp', 'recovery_code'] }
+      }
+      if (this.isAdministrator(user)) {
+        const setup = await this.createMfaSetupChallenge(user, attempt.id, input.ipAddress)
+        return { kind: 'mfa_setup_required', challengeToken: setup.challengeToken, expiresAt: setup.expiresAt, secret: setup.secret, otpauthUri: buildTotpUri(setup.secret, user.email) }
+      }
     }
-    const user = await this.sessionStore.findUserByEmailPassword(email, password)
-    if (!user) {
-      const error = new Error('邮箱或密码错误') as Error & { code?: string; status?: number }
-      error.code = 'INVALID_CREDENTIALS'
-      error.status = 401
-      throw error
+    await this.sessionStore.finishLoginAttempt(attempt.id, true)
+    const session = await this.sessionStore.createSession(user, undefined, input.ipAddress ? { ipAddress: input.ipAddress } : {})
+    return { kind: 'authenticated', ...session }
+  }
+
+  private mfaRequired(): boolean {
+    return this.env.AUTH_MFA_REQUIRED?.trim().toLowerCase() === 'true'
+  }
+
+  private isMfaExempt(email: string): boolean {
+    const exemptEmails = (this.env.AUTH_MFA_EXEMPT_EMAILS ?? '')
+      .split(',')
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean)
+    return exemptEmails.includes(email.trim().toLowerCase())
+  }
+
+  private isAdministrator(user: SessionUser): boolean {
+    return isSystemAdministrator(user, this.env) || isPlatformAdmin(user.platformRole)
+  }
+
+  private withSystemAdministratorStatus(user: SessionUser): SessionUser {
+    const { isSystemAdmin: _cached, ...currentUser } = user
+    return { ...currentUser, ...(isSystemAdministrator(currentUser, this.env) ? { isSystemAdmin: true } : {}) }
+  }
+
+  async authorizeSystemAdministrator(auth: AuthContext | undefined): Promise<void> {
+    if (!auth || auth.method !== 'session') return requireSystemAdministrator(undefined)
+    const user = await this.sessionStore.findUserById(auth.user.id)
+    const permitted = user !== undefined && isSystemAdministrator(user, this.env)
+    auth.user = { ...auth.user, isSystemAdmin: permitted }
+    requireSystemAdministrator(auth)
+  }
+
+  private parseProfileUpdate(input: unknown): ProfileUpdateInput {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw authError('个人资料格式不正确', 'PROFILE_INVALID', 400)
     }
-    this.loginLimiter.clear(key)
-    return this.sessionStore.createSession(user)
+    const record = input as Record<string, unknown>
+    const allowedFields = new Set(['name', 'phone'])
+    if (Object.keys(record).some((key) => !allowedFields.has(key))) {
+      throw authError('个人资料仅支持修改姓名和手机号', 'PROFILE_FIELDS_NOT_ALLOWED', 400)
+    }
+    if (!Object.keys(record).length) {
+      throw authError('请至少修改一项个人资料', 'PROFILE_UPDATE_EMPTY', 400)
+    }
+
+    const result: ProfileUpdateInput = {}
+    if (record.name !== undefined) {
+      if (typeof record.name !== 'string') throw authError('姓名必须是文本', 'PROFILE_NAME_INVALID', 400)
+      const name = record.name.trim()
+      if (!name || Array.from(name).length > 50) {
+        throw authError('姓名长度应为 1 至 50 个字符', 'PROFILE_NAME_INVALID', 400)
+      }
+      result.name = name
+    }
+    if (record.phone !== undefined) {
+      if (typeof record.phone !== 'string') throw authError('手机号必须是文本', 'PROFILE_PHONE_INVALID', 400)
+      const phone = record.phone.trim()
+      if (Array.from(phone).length > 30) {
+        throw authError('手机号不能超过 30 个字符', 'PROFILE_PHONE_INVALID', 400)
+      }
+      result.phone = phone || null
+    }
+    return result
+  }
+
+  private async createMfaSetupChallenge(
+    user: SessionUser,
+    loginAttemptId?: string,
+    ipAddress?: string,
+  ): Promise<{ challengeToken: string; expiresAt: string; secret: string }> {
+    const secret = generateTotpSecret()
+    const challengeToken = issueChallengeToken()
+    const challenge = await this.sessionStore.createMfaChallenge({
+      tokenHash: sha256(challengeToken),
+      userId: user.id,
+      ...(loginAttemptId ? { loginAttemptId } : {}),
+      kind: 'setup',
+      encryptedSecret: encryptMfaSecret(secret, this.env.AUTH_MFA_ENCRYPTION_KEY),
+      ...(ipAddress ? { requestIp: ipAddress } : {}),
+      expiresInMs: 10 * 60_000,
+      maxAttempts: 5,
+    })
+    return { challengeToken, expiresAt: challenge.expiresAt, secret }
+  }
+
+  private async rejectMfa(
+    challenge: MfaChallenge,
+    message: string,
+    code: string,
+    failureReason: string,
+  ): Promise<never> {
+    await this.sessionStore.recordMfaChallengeFailure(challenge.id)
+    if (challenge.loginAttemptId) {
+      await this.sessionStore.finishLoginAttempt(challenge.loginAttemptId, false, failureReason)
+    }
+    throw authError(message, code, 401)
+  }
+
+  async startMfaSetup(user: SessionUser): Promise<{ challengeToken: string; expiresAt: string; secret: string; otpauthUri: string }> {
+    if (!this.isAdministrator(user)) throw authError('仅管理员可以启用 MFA', 'FORBIDDEN', 403)
+    if (await this.sessionStore.getMfaCredential(user.id)) throw authError('该账号已启用 MFA', 'MFA_ALREADY_ENABLED', 409)
+    const setup = await this.createMfaSetupChallenge(user)
+    return { ...setup, otpauthUri: buildTotpUri(setup.secret, user.email) }
+  }
+
+  async verifyMfa(input: { challengeToken: string; code: string; ipAddress?: string }): Promise<{
+    session: Awaited<ReturnType<AuthSessionStore['createSession']>>['session']
+    token: string
+    recoveryCodes?: string[]
+  }> {
+    const challengeToken = String(input.challengeToken ?? '').trim()
+    const code = String(input.code ?? '').trim()
+    if (!challengeToken || !code) throw authError('请输入 MFA 验证码', 'VALIDATION_ERROR', 400)
+    const challenge = await this.sessionStore.findMfaChallengeByTokenHash(sha256(challengeToken))
+    if (!challenge) throw authError('MFA 验证已失效，请重新登录', 'MFA_CHALLENGE_EXPIRED', 401)
+
+    let user: SessionUser | undefined
+    let recoveryCodes: string[] | undefined
+    if (challenge.kind === 'setup') {
+      if (!challenge.encryptedSecret) {
+        await this.sessionStore.invalidateMfaChallenge(challenge.id)
+        throw authError('MFA 设置已失效，请重新开始', 'MFA_CHALLENGE_EXPIRED', 401)
+      }
+      const secret = decryptMfaSecret(challenge.encryptedSecret, this.env.AUTH_MFA_ENCRYPTION_KEY)
+      const verification = verifyTotp(secret, code)
+      if (!verification.valid) {
+        await this.rejectMfa(challenge, 'MFA 验证码错误', 'INVALID_MFA_CODE', 'invalid_mfa_code')
+      }
+      const recovery = createRecoveryCodes()
+      recoveryCodes = recovery.codes
+      await this.sessionStore.completeMfaChallenge(challenge.id, {
+        userId: challenge.userId,
+        secretEncrypted: challenge.encryptedSecret,
+        recoveryCodeHashes: recovery.hashes,
+        lastUsedStep: verification.step,
+        enabledAt: new Date().toISOString(),
+      })
+      user = await this.sessionStore.findUserById(challenge.userId)
+    } else {
+      const credential = await this.sessionStore.getMfaCredential(challenge.userId)
+      if (!credential) {
+        return this.rejectMfa(challenge, 'MFA 凭据不存在', 'INVALID_MFA_CODE', 'invalid_mfa_code')
+      }
+      const secret = decryptMfaSecret(credential.secretEncrypted, this.env.AUTH_MFA_ENCRYPTION_KEY)
+      if (/^\d{6}$/u.test(code)) {
+        const verification = verifyTotp(secret, code)
+        if (!verification.valid) {
+          await this.rejectMfa(challenge, 'MFA 验证码错误', 'INVALID_MFA_CODE', 'invalid_mfa_code')
+        }
+        if (credential.lastUsedStep !== undefined && verification.step <= credential.lastUsedStep) {
+          await this.rejectMfa(challenge, '动态验证码已使用，请等待下一个验证码', 'MFA_CODE_REPLAYED', 'mfa_code_replayed')
+        }
+        await this.sessionStore.completeMfaChallenge(challenge.id, { ...credential, lastUsedStep: verification.step })
+      } else {
+        const recovery = consumeRecoveryCode(code, credential.recoveryCodeHashes)
+        if (!recovery.matched) {
+          await this.rejectMfa(challenge, '恢复码无效或已使用', 'INVALID_MFA_CODE', 'invalid_mfa_code')
+        }
+        await this.sessionStore.completeMfaChallenge(challenge.id, { ...credential, recoveryCodeHashes: recovery.remaining })
+      }
+      user = await this.sessionStore.findUserById(challenge.userId)
+    }
+    if (!user) throw authError('账号不存在或已停用', 'AUTHENTICATION_REQUIRED', 401)
+    if (challenge.loginAttemptId) {
+      await this.sessionStore.finishLoginAttempt(challenge.loginAttemptId, true)
+    }
+    const session = await this.sessionStore.createSession(this.withSystemAdministratorStatus(user), undefined, input.ipAddress ? { ipAddress: input.ipAddress } : {})
+    return { ...session, ...(recoveryCodes ? { recoveryCodes } : {}) }
+  }
+
+  getSecurityConfig(): { turnstileEnabled: boolean; turnstileSiteKey: string; adminMfaRequired: boolean } {
+    const turnstile = loadTurnstileConfig(this.env)
+    return { turnstileEnabled: turnstile.enabled, turnstileSiteKey: turnstile.siteKey, adminMfaRequired: this.mfaRequired() }
   }
 
   async logout(sessionId: string): Promise<void> {
     if (sessionId) await this.sessionStore.deleteSession(sessionId)
   }
 
-  async register(input: RegisterInput): Promise<RegisterResult> {
-    return this.sessionStore.registerUser(input)
-  }
-
   async listWorkspaces(userId: string): Promise<WorkspaceSummary[]> {
     return this.sessionStore.listWorkspaces(userId)
+  }
+
+  async updateCurrentUserProfile(user: SessionUser, input: unknown): Promise<SessionUser> {
+    const updates = this.parseProfileUpdate(input)
+    const contact: ProfileContact = await this.sessionStore.updateUserProfile(user.id, updates)
+    const { phone: _previousPhone, ...currentUser } = user
+    return {
+      ...currentUser,
+      name: contact.name,
+      ...(contact.phone ? { phone: contact.phone } : {}),
+    }
   }
 
   async createWorkspace(userId: string, input: WorkspaceCreateInput): Promise<WorkspaceSummary> {
@@ -80,45 +386,31 @@ export class AuthService {
   }
 
   async selectWorkspace(sessionId: string, userId: string, workspaceId: string): Promise<SessionUser> {
-    return this.sessionStore.selectWorkspace(sessionId, userId, workspaceId)
+    return this.withSystemAdministratorStatus(await this.sessionStore.selectWorkspace(sessionId, userId, workspaceId))
   }
 
   async authenticateToken(token: string | undefined): Promise<AuthContext | undefined> {
     if (!token) return undefined
     const session = await this.sessionStore.findSessionByToken(token)
     if (!session) return undefined
-    return {
-      user: session.user,
-      sessionId: session.sessionId,
-      method: 'session',
-    }
+    return { user: this.withSystemAdministratorStatus(session.user), sessionId: session.sessionId, method: 'session' }
   }
 
   getBootstrapUser(env: NodeJS.ProcessEnv = process.env): SessionUser | undefined {
-    if (env.NODE_ENV !== 'development') return undefined
-    const enabled = env.ALLOW_DEV_BOOTSTRAP_AUTH !== 'false'
-    if (!enabled) return undefined
+    if (env.NODE_ENV !== 'development' || env.ALLOW_DEV_BOOTSTRAP_AUTH === 'false') return undefined
     return {
       id: env.DEV_BOOTSTRAP_USER_ID?.trim() || 'user-recruiter',
       name: env.DEV_BOOTSTRAP_USER_NAME?.trim() || '招聘专员（开发）',
       email: env.DEV_BOOTSTRAP_USER_EMAIL?.trim() || 'recruiter@smartrecruit.local',
-      role: (env.DEV_BOOTSTRAP_USER_ROLE?.trim() || 'recruiter') as Role,
+      role: 'recruiter',
       departmentId: env.DEV_BOOTSTRAP_USER_DEPARTMENT?.trim() || 'dept-tech',
     }
   }
 
   requirePermission(auth: AuthContext | undefined, roles?: Role[]): void {
-    if (!auth) {
-      const error = new Error('未登录，请先完成身份认证') as Error & { code?: string; status?: number }
-      error.code = 'AUTHENTICATION_REQUIRED'
-      error.status = 401
-      throw error
-    }
+    if (!auth) throw authError('未登录，请先完成身份认证', 'AUTHENTICATION_REQUIRED', 401)
     if (roles && roles.length > 0 && !roles.includes(auth.user.role)) {
-      const error = new Error('当前账号没有执行此操作的权限') as Error & { code?: string; status?: number }
-      error.code = 'FORBIDDEN'
-      error.status = 403
-      throw error
+      throw authError('当前账号没有执行此操作的权限', 'FORBIDDEN', 403)
     }
   }
 }

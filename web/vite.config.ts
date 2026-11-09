@@ -2,12 +2,16 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
+  base: process.env.VITE_ROUTER_MODE === 'hash' ? './' : '/',
   plugins: [vue()],
   server: {
     port: Number(process.env.VITE_PORT || 5174),
     strictPort: true,
     proxy: {
-      '/api': process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:3100',
+      '/api': {
+        target: process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:3100',
+        xfwd: true,
+      },
       // Browser (and Cloudflare Tunnel) connects to the same origin; Vite bridges
       // the WebSocket to the local FunASR service, which must not be exposed publicly.
       '/funasr-stream': {

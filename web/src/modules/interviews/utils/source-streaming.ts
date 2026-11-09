@@ -127,7 +127,10 @@ async function startStreamingAudio(stream: MediaStream): Promise<void> {
   const version = streamingVersion
   const configuredUrl = (import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_FUNASR_STREAM_URL?.trim()
   // Keep WebSocket traffic on the app origin, including tunneled deployments.
-  const defaultUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/funasr-stream`
+  // Keep a Notebook proxy prefix such as /proxy/7860/ in the WebSocket path.
+  const streamEndpoint = new URL('funasr-stream', document.baseURI)
+  streamEndpoint.protocol = streamEndpoint.protocol === 'https:' ? 'wss:' : 'ws:'
+  const defaultUrl = streamEndpoint.toString()
   const socket = new WebSocket(configuredUrl || defaultUrl)
   socket.binaryType = 'arraybuffer'
   streamSocket = socket

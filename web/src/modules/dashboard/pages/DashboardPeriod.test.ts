@@ -7,7 +7,7 @@ import { loadDashboard, type DashboardData } from '../api'
 
 vi.mock('../api', () => ({ loadDashboard: vi.fn() }))
 let app: App, root: HTMLDivElement
-const base: DashboardData = { metrics: [{ label: '简历数量', value: 99, tone: 'teal', trend: '已上传的简历总数' }], todos: [], pending: [], funnel: [], pendingFeedback: [], failedTasks: [] }
+const base: DashboardData = { metrics: [{ label: '简历数量', value: 99, tone: 'teal', trend: '已上传的简历总数' }], todos: [], pending: [], funnel: [], pendingInterviews: [], failedTasks: [] }
 const counts = { resumes: 3, applications: 2, screened: 1, interviews: 1, offers: 0, onboarded: 0 }
 const ranged: DashboardData = { ...base, metrics: [{ label: '简历数量', value: 3, tone: 'teal', trend: '较前段 +3' }], activity: {
   period: { from: '2026-10-28T16:00:00Z', to: '2026-10-29T16:00:00Z', timeZone: 'Asia/Shanghai' },
@@ -22,28 +22,42 @@ async function mount() {
 }
 async function range(from = '2026-10-29', to = '2026-10-29') {
   for (const [label, value] of [['统计开始日期', from], ['统计结束日期', to]]) {
-    const field = root.querySelector<HTMLInputElement>('[aria-label="' + label + '"]')!
-    field.value = value!; field.dispatchEvent(new Event('input', { bubbles: true }))
+    root.querySelector<HTMLButtonElement>('[aria-label="' + label + '"]')!.click()
+    await nextTick()
+    if (value) root.querySelector<HTMLButtonElement>('[data-date="' + value + '"]')!.click()
+    else [...root.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent === '清除')!.click()
   }
   await nextTick()
   root.querySelector<HTMLFormElement>('[aria-label="工作台日期筛选"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await flush()
 }
+
+function dateValue(label: string) {
+  return root.querySelector<HTMLButtonElement>('[aria-label="' + label + '"]')!.dataset.value
+}
 beforeEach(() => { vi.mocked(loadDashboard).mockResolvedValue(base) })
 afterEach(() => { app?.unmount(); root?.remove(); vi.resetAllMocks() })
 
-it.each(['2026-10-30T00:15:00', '2026-10-30T23:59:00', '2027-01-01T00:01:00'])('defaults both dates and the initial query to the local day at %s', async (now) => {
+it('隐藏功能不会继续出现在工作台主线中', async () => {
+  await mount()
+  expect(root.textContent).not.toContain('一键发布渠道')
+  expect(root.textContent).not.toContain('自动统计排序')
+  expect(root.textContent).toContain('6步一站式主线')
+})
+
+it.each(['2026-10-30T00:15:00', '2026-10-30T23:59:00', '2027-01-01T00:01:00'])('defaults the initial query to the local 30-day period at %s', async (now) => {
   vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(now))
   try {
     await mount()
     const day = now.slice(0, 10)
-    expect(root.querySelector<HTMLInputElement>('[aria-label="统计开始日期"]')!.value).toBe(day)
-    expect(root.querySelector<HTMLInputElement>('[aria-label="统计结束日期"]')!.value).toBe(day)
-    const todayButton = [...root.querySelectorAll<HTMLButtonElement>('.period-shortcuts button')].find(item => item.textContent === '今日')!
-    expect(todayButton.getAttribute('aria-pressed')).toBe('true')
+    const start = new Date(day + 'T00:00:00'); start.setDate(start.getDate() - 29)
+    expect(dateValue('统计开始日期')).toBe([start.getFullYear(), String(start.getMonth() + 1).padStart(2, '0'), String(start.getDate()).padStart(2, '0')].join('-'))
+    expect(dateValue('统计结束日期')).toBe(day)
+    const recentButton = [...root.querySelectorAll<HTMLButtonElement>('.period-shortcuts button')].find(item => item.textContent === '近30天')!
+    expect(recentButton.getAttribute('aria-pressed')).toBe('true')
     const end = new Date(day + 'T00:00:00'); end.setDate(end.getDate() + 1)
     expect(loadDashboard).toHaveBeenCalledTimes(1)
-    expect(loadDashboard).toHaveBeenLastCalledWith({ from: new Date(day + 'T00:00:00').toISOString(), to: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    expect(loadDashboard).toHaveBeenLastCalledWith({ from: start.toISOString(), to: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
   } finally { vi.useRealTimers() }
 })
 
@@ -51,13 +65,15 @@ it('queries a same-day selection from local midnight through the whole end date'
   await mount(); vi.mocked(loadDashboard).mockResolvedValue(ranged)
   await range()
   expect(loadDashboard).toHaveBeenLastCalledWith({ from: new Date('2026-10-29T00:00').toISOString(), to: new Date('2026-10-30T00:00').toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
-  expect(root.querySelectorAll('input[type="date"]')).toHaveLength(2)
+  expect(root.querySelectorAll('[data-date-picker-trigger]')).toHaveLength(2)
+  expect(root.querySelectorAll('input[type="date"]')).toHaveLength(0)
   expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
   expect(root.querySelector('[aria-label="时段数据变化"]')).toBeNull()
   expect(root.textContent).not.toContain('时段数据变化')
   expect(root.querySelector('.metric-card strong')?.textContent).toBe('3')
   expect(root.textContent).toContain('较前段 +3')
-  expect(root.textContent).toContain('时段内更新的待办')
+  expect(root.textContent).toContain('待办事项')
+  expect(root.textContent).not.toContain('时段内更新的待办')
   expect(root.textContent).not.toContain('当前整体转化率')
   const reset = root.querySelector<HTMLButtonElement>('[aria-label="恢复全部时间"]')!
   vi.mocked(loadDashboard).mockResolvedValue(base); reset.click(); await flush()
@@ -91,7 +107,7 @@ it.each([['今日', 1], ['近7天', 7], ['近30天', 30]] as const)('queries %s 
     const expectedStart = new Date('2026-10-30T00:00:00'); expectedStart.setDate(expectedStart.getDate() - days + 1)
     expect(period.from).toBe(expectedStart.toISOString())
     expect(period.to).toBe(new Date('2026-10-31T00:00:00').toISOString())
-    expect(root.querySelector<HTMLInputElement>('[aria-label="统计结束日期"]')!.value).toBe('2026-10-30')
+    expect(dateValue('统计结束日期')).toBe('2026-10-30')
   } finally { vi.useRealTimers() }
 })
 

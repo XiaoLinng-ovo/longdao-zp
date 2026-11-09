@@ -1,4 +1,5 @@
 import { createPlatformAccessMiddleware } from './platform/access.js'
+import { createSystemAdministrationAccessMiddleware } from './admin/access.js'
 import { PaymentService } from './payments/service.js'
 import { paymentRoutes } from './payments/routes.js'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -17,57 +18,20 @@ import { createConfiguredQuestionPreparationService } from './interviews/questio
 import { startQuestionPreparationPoll } from './interviews/question-preparation-service.js';
 import { createConfiguredQuestionSheetService } from './interviews/question-sheet-runtime.js';
 import { createConfiguredInterviewSummaryService, startInterviewSummaryPoll } from './interviews/interview-summary-service.js';
+import { createConfiguredInterviewTranscriptPostprocessService, startInterviewTranscriptPostprocessPoll } from './interviews/interview-transcript-postprocess-service.js';
 import { createConfiguredLiveAudioTranscriptionService, startLiveAudioTranscriptionPoll } from './interviews/live-audio-transcription.js';
-import { createConfiguredDingTalkApprovalClient } from './integrations/dingtalk/approval-client.js';
-import { DingTalkApprovalWorkflow } from './integrations/dingtalk/approval-workflow.js';
-import { PostgresDingTalkApprovalRepository } from './integrations/dingtalk/postgres-approval-workflow.js';
 import { createResumeUploadAdmission } from './recruiting/upload-admission.js';
+import { tenantBackgroundService } from './db/tenant-background.js'
 
 /**
  * 面试表生成是分钟级的模型调用，放在 API 进程内做后台轮询，避免阻塞请求。
  * 与 worker 的轮询写法一致；单实例部署下由 updated_at 顺序领取任务。
  */
-function startQuestionSheetPollResolved(): () => void {
+function startQuestionSheetPollResolved(registry: ReturnType<typeof createDatabasePool>): () => void {
   if (process.env.NODE_ENV === 'test' || (process.env.QUESTION_SHEET_POLL ?? '').toLowerCase() === 'off') return () => undefined
   const interval = Number(process.env.QUESTION_SHEET_POLL_MS ?? '5000')
-  const service = createConfiguredQuestionSheetService()
+  const service = tenantBackgroundService(createConfiguredQuestionSheetService(), 'processPendingGeneration', registry)
   return startQuestionSheetPoll({ service, pollIntervalMs: Number.isFinite(interval) && interval > 0 ? interval : 5000 })
-}
-
-/**
- * 钉钉回调可能因网络抖动或订阅配置暂时不可用而丢失；后台定期查询仍处于 pending 的实例，
- * 将最终状态补写回平台。未完整配置钉钉时不启动，避免开发环境产生无意义的连接和错误日志。
- */
-function startDingTalkApprovalReconcileResolved(): () => void {
-  if (process.env.NODE_ENV === 'test' || (process.env.DINGTALK_APPROVAL_RECONCILE ?? 'on').toLowerCase() === 'off' || (process.env.DINGTALK_APPROVAL_MODE ?? 'mock').trim().toLowerCase() !== 'real') return () => undefined
-  const client = createConfiguredDingTalkApprovalClient()
-  const callbackToken = process.env.DINGTALK_CALLBACK_TOKEN?.trim()
-  const callbackAesKey = process.env.DINGTALK_CALLBACK_AES_KEY?.trim()
-  const callbackCorpId = process.env.DINGTALK_CALLBACK_CORP_ID?.trim()
-  if (!client || !callbackToken || !callbackAesKey || !callbackCorpId) return () => undefined
-
-  const workflow = new DingTalkApprovalWorkflow(
-    new PostgresDingTalkApprovalRepository(createDatabasePool()),
-    client,
-    { callbackToken, callbackAesKey, callbackCorpId },
-  )
-  const configuredInterval = Number(process.env.DINGTALK_APPROVAL_RECONCILE_MS ?? '300000')
-  const intervalMs = Number.isFinite(configuredInterval) && configuredInterval >= 10_000 ? configuredInterval : 300_000
-  let running = false
-  const run = async () => {
-    if (running) return
-    running = true
-    try {
-      await workflow.reconcilePending()
-    } catch {
-      // 单轮失败不应影响 API 进程；下一轮继续补偿。
-    } finally {
-      running = false
-    }
-  }
-  const timer = setInterval(() => void run(), intervalMs)
-  timer.unref?.()
-  return () => clearInterval(timer)
 }
 
 const authMiddleware: Middleware = async (context, next) => {
@@ -85,6 +49,7 @@ export type HttpApp = ((req: IncomingMessage, res: ServerResponse) => void) & { 
 
 export function createApp(config: AppConfig = loadConfig(), options: { paymentService?: PaymentService } = {}): HttpApp {
   const uploadPool = process.env.NODE_ENV === 'test' ? undefined : createDatabasePool()
+  const schemaRegistryPool = process.env.TENANT_SCHEMA_ROUTING === 'on' ? createDatabasePool() : undefined
   const uploadAdmission = createResumeUploadAdmission({
     ...(uploadPool ? { queueDepth: async (workspaceId: string) => {
       const result = await uploadPool.query<{ total: number; workspace: number }>(
@@ -100,7 +65,8 @@ export function createApp(config: AppConfig = loadConfig(), options: { paymentSe
     requestIdMiddleware,
     authMiddleware,
     // Reject stale-tab writes/reads before any cached response can be replayed.
-    createWorkspaceContextMiddleware(),
+    createWorkspaceContextMiddleware(undefined, schemaRegistryPool),
+    createSystemAdministrationAccessMiddleware(),
     createPlatformAccessMiddleware(),
     uploadAdmission,
     paymentRoutes(options.paymentService ?? new PaymentService(createDatabasePool())),
@@ -124,7 +90,7 @@ export function createApp(config: AppConfig = loadConfig(), options: { paymentSe
 
     void pipeline(context, async () => undefined);
   };
-  return Object.assign(app, { close: async () => { await uploadPool?.end() } });
+  return Object.assign(app, { close: async () => { await Promise.all([uploadPool?.end(), schemaRegistryPool?.end()]) } });
 }
 
 export function createHttpServer(config: AppConfig = loadConfig(), options: { paymentService?: PaymentService } = {}): Server {
@@ -150,14 +116,16 @@ export async function startServer(config: AppConfig = loadConfig()): Promise<Ser
     server.listen(config.port, config.host);
   });
   // Do not claim background jobs until the port is bound; a failed startup must stay idle.
+  const backgroundRegistry = createDatabasePool()
   const stopPreparationPoll = process.env.NODE_ENV === 'test' || process.env.INTERVIEW_QUESTION_PREPARATION_POLL === 'off'
-    ? () => undefined : startQuestionPreparationPoll(createConfiguredQuestionPreparationService())
-  const stopQuestionSheetPoll = startQuestionSheetPollResolved()
-  const stopSummaryPoll = process.env.NODE_ENV === 'test' || process.env.INTERVIEW_SUMMARY_POLL === 'off'
-    ? () => undefined : startInterviewSummaryPoll(createConfiguredInterviewSummaryService())
+    ? () => undefined : startQuestionPreparationPoll(tenantBackgroundService(createConfiguredQuestionPreparationService(), 'processPending', backgroundRegistry))
+  const stopQuestionSheetPoll = startQuestionSheetPollResolved(backgroundRegistry)
   const stopAudioPoll = process.env.NODE_ENV === 'test' || process.env.INTERVIEW_AUDIO_POLL === 'off'
-    ? () => undefined : startLiveAudioTranscriptionPoll(createConfiguredLiveAudioTranscriptionService())
-  const stopDingTalkApprovalReconcile = startDingTalkApprovalReconcileResolved()
+    ? () => undefined : startLiveAudioTranscriptionPoll(tenantBackgroundService(createConfiguredLiveAudioTranscriptionService(), 'processPending', backgroundRegistry))
+  const stopTranscriptPostprocessPoll = process.env.NODE_ENV === 'test' || process.env.INTERVIEW_TRANSCRIPT_POSTPROCESS_POLL === 'off'
+    ? () => undefined : startInterviewTranscriptPostprocessPoll(tenantBackgroundService(createConfiguredInterviewTranscriptPostprocessService(), 'processPending', backgroundRegistry))
+  const stopSummaryPoll = process.env.NODE_ENV === 'test' || process.env.INTERVIEW_SUMMARY_POLL === 'off'
+    ? () => undefined : startInterviewSummaryPoll(tenantBackgroundService(createConfiguredInterviewSummaryService(), 'processPending', backgroundRegistry))
   const paymentService = new PaymentService(createDatabasePool())
   let paymentRunning = false
   const paymentTimer = process.env.NODE_ENV === 'test' ? undefined : setInterval(() => {
@@ -169,9 +137,10 @@ export async function startServer(config: AppConfig = loadConfig()): Promise<Ser
   server.once('close', () => {
     stopPreparationPoll()
     stopQuestionSheetPoll()
-    stopSummaryPoll()
     stopAudioPoll()
-    stopDingTalkApprovalReconcile()
+    stopTranscriptPostprocessPoll()
+    stopSummaryPoll()
+    void backgroundRegistry.end().catch(() => undefined)
     if (paymentTimer) clearInterval(paymentTimer)
   })
   return server;

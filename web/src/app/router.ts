@@ -1,7 +1,9 @@
-import { createRouter, createWebHistory, type Router } from 'vue-router'
+import { createRouter, createWebHashHistory, createWebHistory, type Router } from 'vue-router'
 import { authSession, refreshAuthSession } from '../modules/auth/session'
+import { getPlatformLandingPath, isPlatformAdminRole } from '../modules/auth/platform-roles'
 import { appRoutes } from './routes'
 import { recruitmentRequestsEnabled } from '../shared/config/features'
+import { loadRuntimeFeatures, runtimeFeatures } from '../shared/config/runtime-features'
 import { navigationItems, getNavigationItemsForRole } from './navigation'
 
 export { navigationItems, getNavigationItemsForRole }
@@ -10,23 +12,24 @@ export function installAuthGuard(router: Router): void {
   router.beforeEach(async (to) => {
     if (!authSession.ready) await refreshAuthSession()
 
-    if (to.name === 'login' || to.name === 'register') {
+    if (to.name === 'login' || to.name === 'register' || to.name === 'forgot-password') {
       if (to.name === 'login' && to.query.addAccount === '1') return true
       if (authSession.user) {
         const redirect = typeof to.query.redirect === 'string' && /^\/workspaces(?:[?#]|$)/.test(to.query.redirect) ? to.query.redirect : undefined
-        return redirect || { name: authSession.user.workspaceId ? 'dashboard' : 'workspaces' }
+        const platformLandingPath = getPlatformLandingPath(authSession.user.platformRole)
+        return redirect || (authSession.user.workspaceId ? { name: 'dashboard' } : platformLandingPath ?? { name: 'workspaces' })
       }
       return true
     }
 
     if (!authSession.user) return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
-    // AI configuration is platform-managed. Keep old enterprise bookmarks
-    // usable by sending platform administrators to the new global page.
+    await loadRuntimeFeatures(`${authSession.sessionId}:${authSession.user.id}`)
+    // Preserve old bookmarks; the destination enforces system administrator access.
     if (to.name === 'enterprise-ai') return { name: 'administration', query: { module: 'ai' } }
-    if (to.name === 'administration' && to.query.module === 'users') return { name: 'platform-users' }
+    if (to.meta.systemAdminOnly && authSession.user.isSystemAdmin !== true) return { name: 'forbidden', query: { from: to.fullPath } }
     if (to.meta.platformOnly && !authSession.user.platformRole) return { name: 'forbidden', query: { from: to.fullPath } }
-    if (to.meta.platformAdminOnly && authSession.user.platformRole !== 'admin') return { name: 'forbidden', query: { from: to.fullPath } }
-    if (!authSession.user.workspaceId && to.name !== 'workspaces' && to.name !== 'forbidden' && !to.meta.platformOnly && !to.meta.billingOnly) return { name: 'workspaces' }
+    if (to.meta.platformAdminOnly && !isPlatformAdminRole(authSession.user.platformRole)) return { name: 'forbidden', query: { from: to.fullPath } }
+    if (!authSession.user.workspaceId && to.name !== 'workspaces' && to.name !== 'profile' && to.name !== 'forbidden' && !to.meta.platformOnly && !to.meta.systemAdminOnly && !to.meta.billingOnly) return { name: 'workspaces' }
 
 
 
@@ -34,8 +37,11 @@ export function installAuthGuard(router: Router): void {
     if (to.meta.requiresRecruitmentRequests && !recruitmentRequestsEnabled) {
       return { name: 'jobs', query: { notice: 'recruitment-requests-disabled' }, replace: true }
     }
+    if (to.meta.requiresRecruitmentReports && !runtimeFeatures.recruitmentReportsEnabled) {
+      return { name: 'dashboard', query: { notice: 'recruitment-reports-disabled' }, replace: true }
+    }
 
-    if (to.meta.adminOnly && !['admin', 'hr_admin'].includes(authSession.user.role)) return { name: 'forbidden', query: { from: to.fullPath } }
+    if (to.meta.adminOnly && !isPlatformAdminRole(authSession.user.platformRole)) return { name: 'forbidden', query: { from: to.fullPath } }
     if (to.meta.workspaceAdminOnly) {
       const billingId = to.meta.billingOnly && typeof to.query.workspace === 'string' ? to.query.workspace : authSession.user?.workspaceId
       const workspaceRole = authSession.workspaces.find((workspace) => workspace.id === billingId)?.role
@@ -48,5 +54,6 @@ export function installAuthGuard(router: Router): void {
 }
 
 export function createAppRouter() {
-  return createRouter({ history: createWebHistory(), routes: appRoutes, scrollBehavior: () => ({ top: 0 }) })
+  const history = import.meta.env.VITE_ROUTER_MODE === 'hash' ? createWebHashHistory() : createWebHistory()
+  return createRouter({ history, routes: appRoutes, scrollBehavior: () => ({ top: 0 }) })
 }

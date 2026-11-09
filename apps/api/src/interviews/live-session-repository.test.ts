@@ -3,6 +3,105 @@ import { describe, it } from 'node:test'
 import { LiveInterviewSessionRepository } from './live-session-repository.js'
 import { ACTUAL_ANSWER_PROMPT_VERSION } from './actual-answer-analysis.js'
 
+describe('live session creation state gate', () => {
+  function fixture(interviewStatus: string | undefined, insertError?: Error) {
+    const calls: Array<{ sql: string; values?: unknown[] }> = []
+    let releases = 0
+    const sessionRow = {
+      id: 'session-1', interview_id: 'interview-1', status: 'active', external_status: 'not_configured',
+      started_at: '2026-01-01T00:00:00.000Z', created_by: 'user-1', current_question: '',
+    }
+    const client = {
+      async query(sql: string, values?: unknown[]) {
+        calls.push({ sql, ...(values ? { values } : {}) })
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+        if (sql.startsWith('SELECT status FROM interviews')) return { rows: interviewStatus ? [{ status: interviewStatus }] : [] }
+        if (sql.startsWith('INSERT INTO interview_live_sessions')) {
+          if (insertError) throw insertError
+          return { rows: [sessionRow] }
+        }
+        return { rows: [] }
+      },
+      release() { releases++ },
+    }
+    const repository = new LiveInterviewSessionRepository({ async connect() { return client } } as never)
+    return { repository, calls, released: () => releases }
+  }
+
+  it('locks a scheduled interview and creates the session in one transaction', async () => {
+    const fixtureResult = fixture('scheduled')
+
+    const session = await fixtureResult.repository.create('interview-1', 'user-1')
+
+    assert.equal(session.id, 'session-1')
+    assert.equal(session.interviewId, 'interview-1')
+    assert.deepEqual(fixtureResult.calls.map(call => call.sql), [
+      'BEGIN',
+      'SELECT status FROM interviews WHERE id = $1::uuid FOR UPDATE',
+      'INSERT INTO interview_live_sessions (interview_id, created_by) VALUES ($1::uuid, $2::uuid) RETURNING *',
+      'COMMIT',
+    ])
+    assert.deepEqual(fixtureResult.calls[2]?.values, ['interview-1', 'user-1'])
+    assert.equal(fixtureResult.released(), 1)
+  })
+
+  for (const scenario of [
+    ['completed', 'INTERVIEW_ALREADY_COMPLETED'],
+    ['cancelled', 'INTERVIEW_CANCELLED'],
+    ['draft', 'INTERVIEW_NOT_SCHEDULED'],
+    ['in_progress', 'INTERVIEW_NOT_SCHEDULED'],
+  ] as const) {
+    it(`rejects ${scenario[0]} interviews without inserting a session`, async () => {
+      const fixtureResult = fixture(scenario[0])
+
+      await assert.rejects(fixtureResult.repository.create('interview-1', 'user-1'), {
+        code: scenario[1], status: 409,
+      })
+
+      assert.ok(!fixtureResult.calls.some(call => call.sql.startsWith('INSERT')))
+      assert.equal(fixtureResult.calls.at(-1)?.sql, 'ROLLBACK')
+      assert.equal(fixtureResult.released(), 1)
+    })
+  }
+
+  it('returns not found when the interview does not exist', async () => {
+    const fixtureResult = fixture(undefined)
+
+    await assert.rejects(fixtureResult.repository.create('missing', 'user-1'), {
+      code: 'INTERVIEW_NOT_FOUND', status: 404,
+    })
+
+    assert.ok(!fixtureResult.calls.some(call => call.sql.startsWith('INSERT')))
+    assert.equal(fixtureResult.calls.at(-1)?.sql, 'ROLLBACK')
+    assert.equal(fixtureResult.released(), 1)
+  })
+
+  it('maps a database trigger rejection to a domain 409 instead of a 500', async () => {
+    const trigger = Object.assign(new Error('INTERVIEW_ALREADY_COMPLETED'), { code: 'P0001' })
+    const fixtureResult = fixture('scheduled', trigger)
+
+    await assert.rejects(fixtureResult.repository.create('interview-1', 'user-1'), {
+      code: 'INTERVIEW_ALREADY_COMPLETED', status: 409, message: '面试已完成，不能重新创建实时会话',
+    })
+
+    assert.equal(fixtureResult.calls.at(-1)?.sql, 'ROLLBACK')
+    assert.equal(fixtureResult.released(), 1)
+  })
+
+  it('maps an active-session unique violation and rolls back', async () => {
+    const conflict = Object.assign(new Error('duplicate active session'), { code: '23505' })
+    const fixtureResult = fixture('scheduled', conflict)
+
+    await assert.rejects(fixtureResult.repository.create('interview-1', 'user-1'), {
+      code: 'LIVE_SESSION_ALREADY_ACTIVE', status: 409,
+    })
+
+    assert.equal(fixtureResult.calls.filter(call => call.sql.startsWith('INSERT')).length, 1)
+    assert.equal(fixtureResult.calls.at(-1)?.sql, 'ROLLBACK')
+    assert.equal(fixtureResult.released(), 1)
+  })
+})
+
 describe('LiveInterviewSessionRepository question persistence', () => {
   it('updates the current question and records an immutable question event', async () => {
     const calls: Array<{ text: string; values?: unknown[] }> = []

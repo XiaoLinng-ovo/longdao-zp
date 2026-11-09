@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection, listAccountOrganizations, createAdminUser } from './index'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection, listAccountOrganizations, createAdminUser, listEnterpriseDepartments, createEnterpriseDepartment, updateEnterpriseDepartment, deleteEnterpriseDepartment } from './index'
 import { apiClient } from '../../../shared/api'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
@@ -33,6 +33,25 @@ describe('管理后台 API', () => {
     ;(apiClient as unknown as { postJson: typeof postJson }).postJson = postJson
     expect(await createAdminUser({ email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })).toEqual(result)
     expect(postJson).toHaveBeenCalledWith('/admin/users', { email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })
+  })
+  it('普通成员通过企业级接口读取和维护当前企业部门', async () => {
+    const department = { id: 'dept/1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-11-05T00:00:00.000Z', updatedAt: '2026-11-05T00:00:00.000Z' }
+    const deleted = { id: department.id, code: department.code, name: department.name, removedApprovalPolicies: 1 }
+    getJson.mockResolvedValue({ ok: true, data: [department], requestId: 'test' } as never)
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: department, requestId: 'test' })
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: department, requestId: 'test' })
+    const deleteJson = vi.fn().mockResolvedValue({ ok: true, data: deleted, requestId: 'test' })
+    Object.assign(apiClient, { postJson, patchJson, deleteJson })
+
+    expect(await listEnterpriseDepartments()).toEqual([department])
+    expect(await createEnterpriseDepartment({ name: '技术部' })).toEqual(department)
+    expect(await updateEnterpriseDepartment(department.id, { name: '研发部', isActive: false })).toEqual(department)
+    expect(await deleteEnterpriseDepartment(department.id)).toEqual(deleted)
+
+    expect(getJson).toHaveBeenCalledWith('/departments?activeOnly=false')
+    expect(postJson).toHaveBeenCalledWith('/departments', { name: '技术部' })
+    expect(patchJson).toHaveBeenCalledWith('/departments/dept%2F1', { name: '研发部', isActive: false })
+    expect(deleteJson).toHaveBeenCalledWith('/departments/dept%2F1')
   })
   it('读取并更新钉钉环境配置', async () => {
     getJson.mockResolvedValue({ ok: true, data: {}, requestId: 'test' } as never)

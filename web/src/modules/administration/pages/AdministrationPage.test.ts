@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import AdministrationPage from './AdministrationPage.vue'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings, listAiPromptSkills, getDingTalkApprovalConfig, listAccountOrganizations, createAdminUser } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, getAiSharingSettings, updateAiSharingSettings, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings, listAiPromptSkills, listAccountOrganizations, createAdminUser } from '../api'
 
-vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getDingTalkApprovalConfig: vi.fn(), updateDingTalkDepartmentApprovalConfig: vi.fn(), updateDingTalkUserMapping: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn(), listAiPromptSkills: vi.fn(), createAiPromptSkill: vi.fn(), updateAiPromptSkill: vi.fn(), deleteAiPromptSkill: vi.fn(), listAccountOrganizations: vi.fn(), createAdminUser: vi.fn() }))
+vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), getAiSharingSettings: vi.fn(), updateAiSharingSettings: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn(), listAiPromptSkills: vi.fn(), createAiPromptSkill: vi.fn(), updateAiPromptSkill: vi.fn(), deleteAiPromptSkill: vi.fn(), listAccountOrganizations: vi.fn(), createAdminUser: vi.fn() }))
 const mockedChecks = vi.mocked(listAdminChecks)
 const mockedCreateDepartment = vi.mocked(createAdminDepartment)
 const mockedUpdateDepartment = vi.mocked(updateAdminDepartment)
@@ -16,10 +16,11 @@ const mockedRoles = vi.mocked(listAdminRoles)
 const mockedDepartments = vi.mocked(listAdminDepartments)
 const mockedSettings = vi.mocked(getAdminSettings)
 const mockedDingTalkSettings = vi.mocked(getDingTalkSettings)
-const mockedDingTalkApprovalConfig = vi.mocked(getDingTalkApprovalConfig)
 const mockedVirusScan = vi.mocked(getResumeVirusScanSetting)
 const mockedAiSettings = vi.mocked(getAiSettings)
 const mockedAiConnectionTest = vi.mocked(testAiConnection)
+const mockedAiSharingSettings = vi.mocked(getAiSharingSettings)
+const mockedUpdateAiSharingSettings = vi.mocked(updateAiSharingSettings)
 const mockedFailedTasks = vi.mocked(listFailedAnalysisTasks)
 const mockedAuditLogs = vi.mocked(listAdminAuditLogs)
 const mockedChannelSettings = vi.mocked(getChannelSettings)
@@ -34,7 +35,6 @@ let app: App | undefined
 let root: HTMLDivElement | undefined
 async function flush() { for (let i = 0; i < 8; i++) { await Promise.resolve(); await nextTick() } }
 beforeEach(() => {
-  mockedDingTalkApprovalConfig.mockResolvedValue({ subjectType: 'recruitment_request', callbackUrl: null, callbackUrlConfigured: false, departments: [], users: [] })
   mockedAiSettings.mockResolvedValue({
     configured: true, baseUrlHost: 'api.example.com', model: 'gpt-4o-mini', timeoutMs: 30000, apiKeyConfigured: true, missing: [],
     env: {
@@ -45,6 +45,8 @@ beforeEach(() => {
     },
   })
   mockedAiConnectionTest.mockResolvedValue({ ok: true, message: 'ok', latencyMs: 12, models: ['gpt-4o-mini'] })
+  mockedAiSharingSettings.mockResolvedValue({ enabled: false, activeOrganizationCount: 2, sharedOrganizationCount: 0 })
+  mockedUpdateAiSharingSettings.mockResolvedValue({ enabled: true, activeOrganizationCount: 2, sharedOrganizationCount: 2 })
   mockedChannelSettings.mockResolvedValue({
     boss: { id: 'boss', name: 'BOSS直聘', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
     liepin: { id: 'liepin', name: '猎聘', description: '', enabled: false, configured: false, missing: [], values: {}, fields: [], capabilities: [] },
@@ -140,6 +142,23 @@ describe('管理后台页面', () => {
 
     await mountAdmin('audit-logs')
     expect(root!.textContent).toContain('共 1 条，第 1 / 1 页')
+  })
+
+  it('系统管理员可以切换招聘报表，并保存到系统设置', async () => {
+    mockedChecks.mockResolvedValue([]); mockedUsers.mockResolvedValue([]); mockedRoles.mockResolvedValue([])
+    mockedDepartments.mockResolvedValue([]); mockedSettings.mockResolvedValue({ recruitment_reports_enabled: false })
+    mockedDingTalkSettings.mockResolvedValue({}); mockedVirusScan.mockResolvedValue({ enabled: false }); mockedAuditLogs.mockResolvedValue([])
+    vi.mocked(updateAdminSettings).mockResolvedValue({ recruitment_reports_enabled: true })
+
+    await mountAdmin('settings')
+    const toggle = root!.querySelector<HTMLInputElement>('.settings-row input[type="checkbox"]')!
+    expect(toggle.checked).toBe(false)
+    toggle.click()
+    await flush()
+
+    expect(updateAdminSettings).toHaveBeenCalledWith({ recruitment_reports_enabled: true })
+    expect(root!.textContent).toContain('招聘报表已启用')
+    expect(root!.querySelector<HTMLInputElement>('.settings-row input[type="checkbox"]')!.checked).toBe(true)
   })
 
   it('账号创建模块可从平台管理后台进入并加载账号配置表单', async () => {
@@ -280,6 +299,21 @@ describe('管理后台页面', () => {
 
 
 describe('兼容路由中的平台统一 AI 配置', () => {
+  it('系统管理员可以在 AI 模型配置中开启企业共享', async () => {
+    await mountAdmin('ai')
+
+    expect(root!.textContent).toContain('允许企业用户共享本系统管理员 AI 配置')
+    const sharingToggle = root!.querySelector<HTMLInputElement>('input[type="checkbox"]')
+    expect(sharingToggle).not.toBeNull()
+    expect(sharingToggle!.checked).toBe(false)
+
+    sharingToggle!.click()
+    await flush()
+
+    expect(mockedUpdateAiSharingSettings).toHaveBeenCalledWith(true)
+    expect(root!.textContent).toContain('已开启')
+  })
+
   it('兼容页面明确显示为平台统一配置', async () => {
     await mountAdmin('ai','/administration',true)
     expect(root!.textContent).toContain('平台 AI 配置');expect(root!.textContent).toContain('由平台管理员统一维护，所有企业共用')

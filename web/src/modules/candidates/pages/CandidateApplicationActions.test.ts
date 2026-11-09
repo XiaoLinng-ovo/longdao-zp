@@ -24,7 +24,7 @@ async function mount() {
 }
 async function expand() { root.querySelector<HTMLButtonElement>('.applications-toggle')!.click(); await flush() }
 beforeEach(() => {
-  authSession.user = { id: 'u1', name: '管理员', email: 'test@example.com', role: 'admin', departmentId: 'd1' }
+  authSession.user = { id: 'u1', name: '系统管理员', email: 'test@example.com', role: 'admin', departmentId: 'd1', workspaceId: 'workspace-1' }
   vi.mocked(loadCandidates).mockResolvedValue([{ ...pending, applicationRows: [pending, sibling] }])
   vi.mocked(loadJobs).mockResolvedValue([])
   vi.mocked(loadCandidateTags).mockResolvedValue([])

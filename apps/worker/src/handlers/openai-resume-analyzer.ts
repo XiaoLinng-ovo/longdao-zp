@@ -19,8 +19,21 @@ export interface OpenAIResumeAnalyzerOptions {
   fetch?: typeof fetch
 }
 
+/**
+ * OpenAI 兼容接口挂在 /v1 下。运营后台只填站点根域名时（例如 https://ai.example.com），
+ * 直接拼 /chat/completions 会命中站点首页并返回 HTML，表现为「评分 JSON 格式无效」。
+ * 这里在地址缺少路径时补 /v1，与平台 AI 设置页的规范化保持一致。
+ */
 function endpoint(baseUrl: string): string {
-  return `${baseUrl.replace(/\/+$/u, '')}/chat/completions`
+  const trimmed = baseUrl.trim().replace(/\/+$/u, '')
+  let normalized = trimmed
+  try {
+    const { pathname } = new URL(trimmed)
+    if (pathname === '' || pathname === '/') normalized = `${trimmed}/v1`
+  } catch {
+    normalized = trimmed
+  }
+  return `${normalized}/chat/completions`
 }
 
 function responseContent(value: unknown): string {
@@ -165,10 +178,15 @@ export function createOpenAIResumeAnalyzer(options: OpenAIResumeAnalyzerOptions)
           }
           controller.signal.throwIfAborted()
           try {
-            const payload = await response.json().catch((error: unknown) => {
-              if (error instanceof SyntaxError) throw error
+            const raw = await response.text().catch((error: unknown) => {
               throw new WorkerFailure('读取大模型评分响应时连接中断，尚未生成分数。', { category: 'network', code: 'MODEL_NETWORK_ERROR', cause: error })
-            }) as unknown
+            })
+            // 平台 AI 配置若只填站点根域名，接口会返回站点首页（HTTP 200 的 HTML），
+            // 直接解析只会得到「invalid JSON syntax」，无法定位到配置问题。
+            if (/text\/html/iu.test(response.headers.get('content-type') ?? '') || /^\s*<(?:!doctype\s+html|html|head|body)\b/iu.test(raw)) {
+              throw new WorkerFailure('AI 模型接口返回的是网页而不是 API 数据，请把平台 AI 配置里的接口地址改成以 /v1 结尾的地址（例如 https://你的域名/v1）。', { category: 'dependency_unavailable', code: 'MODEL_ENDPOINT_INVALID', retryable: false })
+            }
+            const payload = JSON.parse(raw) as unknown
             controller.signal.throwIfAborted()
             return validate(payload)
           } catch (error: unknown) {

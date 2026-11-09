@@ -12,10 +12,12 @@ async function flush() { for (let i = 0; i < 5; i++) { await Promise.resolve(); 
 function button(text: string) { return [...root.querySelectorAll('button')].find(item => item.textContent?.includes(text))! }
 beforeEach(() => {
   vi.resetAllMocks()
+  authSession.user = { id: 'admin', name: '系统管理员', email: 'admin@example.com', role: 'admin', departmentId: 'hr' }
+  authSession.workspaces = []
   root = document.createElement('div')
   document.body.appendChild(root)
   app = createApp(TopBar, { title: '工作台', crumb: '招聘' })
-  app.component('router-link', { props: ['to'], template: '<a :href="to"><slot /></a>' })
+  app.component('router-link', { props: ['to'], template: '<a :href="to" @click.prevent><slot /></a>' })
   app.mount(root)
 })
 afterEach(() => { app.unmount(); root.remove() })
@@ -53,5 +55,24 @@ describe('account popover', () => {
     await flush()
     expect(root.querySelector('[role="alert"]')?.textContent).toBeTruthy()
     expect(root.querySelector('.account-add')).not.toBeNull()
+  })
+
+  it('shows the current workspace and opens user information from the account details', async () => {
+    Object.assign(authSession.user!, { workspaceId: 'workspace-1', workspaceName: '龙道科技', workspaceKind: 'production' })
+    authSession.workspaces = [{ id: 'workspace-1', name: '龙道科技', kind: 'production', status: 'active', role: 'owner', createdAt: '2026-10-26' }]
+
+    root.querySelector<HTMLButtonElement>('.account-trigger')!.click()
+    await flush()
+
+    expect(root.querySelector('.account-workspace-row')?.textContent).toContain('当前企业空间')
+    expect(root.querySelector('.account-workspace-row')?.textContent).toContain('龙道科技')
+    expect(root.querySelector('.account-workspace-kind')?.textContent).toBe('正式')
+    expect(root.querySelector('.account-workspace-row')?.textContent).toContain('企业所有者')
+
+    const profileLink = root.querySelector<HTMLAnchorElement>('.account-profile-entry')!
+    expect(profileLink.getAttribute('href')).toBe('/profile')
+    profileLink.click()
+    await flush()
+    expect(root.querySelector('.account-card')).toBeNull()
   })
 })

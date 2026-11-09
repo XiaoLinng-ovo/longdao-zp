@@ -102,11 +102,15 @@ export function applyResumeReview(id: string, source: Record<string, unknown>, a
       : (aiScore >= 80 ? 'AI 建议通过，人工确认淘汰' : 'AI 评分低于 80 分，人工确认简历筛选淘汰')
     report.humanDecision = { status: input.decision, stage: input.decision === 'passed' ? 'initial_interview' : 'rejected', reason: input.comment?.trim() || defaultReason, decidedBy: actorId, decidedAt: now }
   }
-  if (input.talentPool !== undefined) {
+  if (input.decision === 'eliminated') {
+    // 淘汰结果的入库规则由 AI 评分统一决定，不能由前端或其他调用方绕过。
+    report.talentPool = { included: aiScore >= 80, updatedBy: actorId, updatedAt: now }
+  } else if (input.talentPool !== undefined) {
+    // 保留独立的人才库操作：只有低于 80 分的候选人可以人工加入。
     if (input.talentPool && aiScore >= 80) fail('仅 AI 评分低于 80 分的候选人可选择加入人才库')
     report.talentPool = { included: input.talentPool, updatedBy: actorId, updatedAt: now }
   }
-  // A rescore above the cutoff no longer belongs to the rejected-resume talent pool.
-  if (aiScore >= 80 && current.talentPool) report.talentPool = { included: false, updatedBy: actorId, updatedAt: now }
+  // 高分重新评分后不再属于“低分淘汰人才库”；淘汰决定本身则以上面的自动规则为准。
+  if (input.decision !== 'eliminated' && aiScore >= 80 && current.talentPool) report.talentPool = { included: false, updatedBy: actorId, updatedAt: now }
   return { report, nextStatus, summary: resumeScoreSummary(id, report) }
 }

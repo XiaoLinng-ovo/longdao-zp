@@ -110,7 +110,23 @@ function platformRuntimeEnv(env = process.env) {
   }
 }
 
-/** Tenant identity is still checked for data isolation, but model credentials are platform-wide. */
+function enterpriseRuntimeEnv(id, row, masterKey, env = process.env) {
+  const baseUrl = row?.base_url?.trim() ?? ''
+  const apiKeyCiphertext = row?.api_key_ciphertext ?? ''
+  const model = row?.model?.trim() ?? ''
+  const timeout = String(row?.timeout_ms ?? 120000)
+  if (!baseUrl || !apiKeyCiphertext || !model || !/^\d+$/u.test(timeout) || Number(timeout) < 1) return {}
+  const apiKey = decryptApiKey(apiKeyCiphertext, id, masterKey)
+  assertAiEndpointAllowed(baseUrl, env)
+  return {
+    OPENAI_BASE_URL: normalizeAiBaseUrl(baseUrl),
+    OPENAI_API_KEY: apiKey,
+    OPENAI_MODEL: model,
+    OPENAI_TIMEOUT_MS: timeout,
+  }
+}
+
+/** Resolve the configuration permitted for this enterprise. Platform sharing is explicit. */
 export class EnterpriseAiStore {
   constructor(pool, masterKey = process.env.AI_CONFIG_ENCRYPTION_KEY) { this.pool = pool; this.masterKey = masterKey }
   async assertAdmin(organizationId, actorId, executor = this.pool, lock = false) {
@@ -128,9 +144,33 @@ export class EnterpriseAiStore {
   }
   async runtimeEnv(organizationId) {
     const id = scope(organizationId)
-    const result = await this.pool.query('SELECT id FROM organizations WHERE id = $1::uuid AND status = \'active\'', [id])
+    const result = await this.pool.query(`SELECT o.id, o.use_platform_ai, o.platform_ai_source_organization_id,
+      own.base_url AS own_base_url, own.api_key_ciphertext AS own_api_key_ciphertext, own.model AS own_model, own.timeout_ms AS own_timeout_ms,
+      source.base_url AS source_base_url, source.api_key_ciphertext AS source_api_key_ciphertext, source.model AS source_model, source.timeout_ms AS source_timeout_ms
+      FROM organizations o
+      LEFT JOIN enterprise_ai_settings own ON own.organization_id = o.id
+      LEFT JOIN enterprise_ai_settings source ON source.organization_id = o.platform_ai_source_organization_id
+      WHERE o.id = $1::uuid AND o.status = 'active'`, [id])
     if (!result.rows[0]) return {}
-    return platformRuntimeEnv()
+    const organization = result.rows[0]
+    if (organization.use_platform_ai === true) {
+      if (organization.platform_ai_source_organization_id) {
+        const sourceId = scope(String(organization.platform_ai_source_organization_id))
+        return enterpriseRuntimeEnv(sourceId, {
+          base_url: organization.source_base_url,
+          api_key_ciphertext: organization.source_api_key_ciphertext,
+          model: organization.source_model,
+          timeout_ms: organization.source_timeout_ms,
+        }, this.masterKey)
+      }
+      return platformRuntimeEnv()
+    }
+    return enterpriseRuntimeEnv(id, {
+      base_url: organization.own_base_url,
+      api_key_ciphertext: organization.own_api_key_ciphertext,
+      model: organization.own_model,
+      timeout_ms: organization.own_timeout_ms,
+    }, this.masterKey)
   }
   async save(organizationId, patch, actorId, requestId) {
     validateEnterpriseAiPatch(patch)

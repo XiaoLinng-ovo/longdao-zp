@@ -28,14 +28,12 @@ describe('DingTalk env settings', () => {
     const root = await mkdtemp(join(tmpdir(), 'smartrecruit-dingtalk-'))
     const file = join(root, '.env')
     await writeFile(file, '# keep me\nOTHER=value\nDINGTALK_APP_SECRET=old\n', 'utf8')
-    await updateDingTalkEnvSettings(file, { DINGTALK_APP_SECRET: 'new-secret', DINGTALK_CALLBACK_TOKEN: 'callback-token' })
+    await updateDingTalkEnvSettings(file, { DINGTALK_APP_SECRET: 'new-secret' })
     const content = await readFile(file, 'utf8')
     assert.match(content, /# keep me/)
     assert.match(content, /OTHER=value/)
     assert.match(content, /DINGTALK_APP_SECRET=new-secret/)
-    assert.match(content, /DINGTALK_CALLBACK_TOKEN=callback-token/)
     assert.equal(process.env.DINGTALK_APP_SECRET, 'new-secret')
-    assert.equal(process.env.DINGTALK_CALLBACK_TOKEN, 'callback-token')
   })
 
   it('rejects unknown keys and unsafe newlines', async () => {

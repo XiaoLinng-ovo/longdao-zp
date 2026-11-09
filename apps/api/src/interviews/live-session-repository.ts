@@ -10,6 +10,14 @@ export interface LiveSegment { transcriptComparison?: TranscriptComparison; audi
 
 function mapSession(row: Record<string, unknown>): LiveSession { return { id: String(row.id), interviewId: String(row.interview_id), status: String(row.status), externalStatus: String(row.external_status), startedAt: new Date(String(row.started_at)).toISOString(), ...(row.ended_at ? { endedAt: new Date(String(row.ended_at)).toISOString() } : {}), createdBy: String(row.created_by), currentQuestion: typeof row.current_question === 'string' ? row.current_question : '请先做一下自我介绍，并重点说明与你应聘岗位相关的经历。' } }
 function mapSegment(row: Record<string, unknown>): LiveSegment { const raw=row.analysis; const analysis=raw && typeof raw==='object' ? raw as InterviewAnswerAnalysis : undefined; return { ...(row.transcript_comparison ? { transcriptComparison: row.transcript_comparison as TranscriptComparison } : {}), ...(row.audio_source === 'microphone' || row.audio_source === 'meeting' ? { audioSource: row.audio_source } : {}), speakerConfirmed: row.speaker_confirmed === true, id: String(row.id), sessionId: String(row.session_id), speakerId: String(row.speaker_id), role: String(row.role) as InterviewRole, confidence: Number(row.role_confidence), text: simplifyTranscript(String(row.text)), startMs: Number(row.start_ms), endMs: Number(row.end_ms), status: String(row.status), ...(analysis ? { analysis } : {}) } }
+function mapCorrectedTurn(row: Record<string, unknown>, sessionId: string): LiveSegment {
+  return {
+    ...(row.audioSource === 'microphone' || row.audioSource === 'meeting' ? { audioSource: row.audioSource } : {}),
+    id: String(row.id), sessionId, speakerId: String(row.speakerId), role: String(row.role) as InterviewRole,
+    confidence: Number(row.confidence), text: simplifyTranscript(String(row.text)), startMs: Number(row.startMs),
+    endMs: Number(row.endMs), status: 'transcribed', speakerConfirmed: row.speakerConfirmed === true,
+  }
+}
 
 export class LiveInterviewSessionRepository {
   constructor(private readonly pool: Pick<Pool, 'query'> | Pick<Pool, 'query' | 'connect'>) {}
@@ -17,10 +25,60 @@ export class LiveInterviewSessionRepository {
     if (!('connect' in this.pool)) throw new Error('TRANSACTION_POOL_REQUIRED')
     return this.pool.connect()
   }
-  async create(interviewId: string, createdBy: string): Promise<LiveSession> { try { const result = await this.pool.query('INSERT INTO interview_live_sessions (interview_id, created_by) VALUES ($1::uuid, $2::uuid) RETURNING *', [interviewId, createdBy]); return mapSession(result.rows[0]) } catch (error) { if ((error as { code?: string }).code === '23505') throw Object.assign(new Error('该面试已存在进行中的实时会话，请先结束当前会话'), { code: 'LIVE_SESSION_ALREADY_ACTIVE', status: 409 }); throw error } }
+  async create(interviewId: string, createdBy: string): Promise<LiveSession> {
+    const client = await this.transactionClient()
+    try {
+      await client.query('BEGIN')
+      const interview = await client.query('SELECT status FROM interviews WHERE id = $1::uuid FOR UPDATE', [interviewId])
+      const interviewStatus = interview.rows[0]?.status
+      if (!interviewStatus) throw Object.assign(new Error('未找到该面试'), { code: 'INTERVIEW_NOT_FOUND', status: 404 })
+      if (interviewStatus === 'completed') throw Object.assign(new Error('面试已完成，不能重新创建实时会话'), { code: 'INTERVIEW_ALREADY_COMPLETED', status: 409 })
+      if (interviewStatus === 'cancelled') throw Object.assign(new Error('面试已取消，不能创建实时会话'), { code: 'INTERVIEW_CANCELLED', status: 409 })
+      if (interviewStatus !== 'scheduled') throw Object.assign(new Error('仅已排期的面试可以创建实时会话'), { code: 'INTERVIEW_NOT_SCHEDULED', status: 409 })
+      const result = await client.query('INSERT INTO interview_live_sessions (interview_id, created_by) VALUES ($1::uuid, $2::uuid) RETURNING *', [interviewId, createdBy])
+      await client.query('COMMIT')
+      return mapSession(result.rows[0])
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      const candidate = error as { code?: string; message?: string }
+      if (candidate.code === '23505') throw Object.assign(new Error('该面试已存在进行中的实时会话，请先结束当前会话'), { code: 'LIVE_SESSION_ALREADY_ACTIVE', status: 409 })
+      // 数据库触发器是绕过 HTTP 状态校验时的最后一道防线。把 P0001 领域异常
+      // 还原成带状态码的错误，否则前端只会看到 500「服务器内部错误」。
+      if (candidate.code === 'P0001' && candidate.message) {
+        const known: Record<string, { status: number; message: string }> = {
+          INTERVIEW_ALREADY_COMPLETED: { status: 409, message: '面试已完成，不能重新创建实时会话' },
+          INTERVIEW_CANCELLED: { status: 409, message: '面试已取消，不能创建实时会话' },
+          INTERVIEW_NOT_SCHEDULED: { status: 409, message: '仅已排期的面试可以创建实时会话' },
+          INTERVIEW_NOT_FOUND: { status: 404, message: '未找到该面试' },
+          TRIAL_INTERVIEW_LIMIT_REACHED: { status: 409, message: '试用期内最多进行 3 场真实面试，请升级套餐或联系平台管理员' },
+        }
+        const mapped = known[candidate.message.trim()]
+        if (mapped) throw Object.assign(new Error(mapped.message), { code: candidate.message.trim(), status: mapped.status })
+      }
+      throw error
+    } finally {
+      client.release()
+    }
+  }
   async findActive(interviewId: string): Promise<{ session: LiveSession; segments: LiveSegment[] } | undefined> { const found=await this.pool.query("SELECT id FROM interview_live_sessions WHERE interview_id=$1::uuid AND status IN ('active','paused') ORDER BY started_at DESC LIMIT 1",[interviewId]); return found.rows[0] ? this.get(String(found.rows[0].id)) : undefined }
   async findLatest(interviewId: string): Promise<{ session: LiveSession; segments: LiveSegment[] } | undefined> { const found=await this.pool.query('SELECT id FROM interview_live_sessions WHERE interview_id=$1::uuid ORDER BY started_at DESC LIMIT 1',[interviewId]); return found.rows[0] ? this.get(String(found.rows[0].id)) : undefined }
-  async get(sessionId: string): Promise<{ session: LiveSession; segments: LiveSegment[] }> { const session = await this.pool.query('SELECT * FROM interview_live_sessions WHERE id = $1::uuid', [sessionId]); if (!session.rows[0]) throw new Error('LIVE_SESSION_NOT_FOUND'); const segments = await this.pool.query(`SELECT s.*, CASE WHEN a.id IS NULL OR a.prompt_version <> 'whole-dialogue-v3' THEN NULL ELSE jsonb_build_object('summary',a.summary,'evidence',a.evidence,'scores',a.scores,'concerns',a.concerns,'confidence',a.confidence,'nextQuestion',a.next_question,'advisoryOnly',true,'applicationStatusMutation','none','transcriptRefinement',a.transcript_refinement,'sourceSegments',a.source_segments) END AS analysis FROM interview_live_segments s LEFT JOIN interview_live_analyses a ON a.segment_id=s.id WHERE s.session_id = $1::uuid ORDER BY s.start_ms, s.id`, [sessionId]); return { session: mapSession(session.rows[0]), segments: segments.rows.map(mapSegment) } }
+  async get(sessionId: string): Promise<{ session: LiveSession; segments: LiveSegment[]; transcriptWarnings?: string[]; transcriptRoleReviewRequired?: boolean }> {
+    const session = await this.pool.query('SELECT * FROM interview_live_sessions WHERE id = $1::uuid', [sessionId])
+    if (!session.rows[0]) throw new Error('LIVE_SESSION_NOT_FOUND')
+    const versionId = session.rows[0].corrected_transcript_version_id
+    if (typeof versionId === 'string') {
+      const version = await this.pool.query('SELECT turns, metadata FROM interview_transcript_versions WHERE id=$1::uuid AND session_id=$2::uuid', [versionId, sessionId])
+      if (Array.isArray(version.rows[0]?.turns)) {
+        const warnings = Array.isArray(version.rows[0].metadata?.warnings)
+          ? version.rows[0].metadata.warnings.filter((warning: unknown): warning is string => typeof warning === 'string' && Boolean(warning.trim()))
+          : []
+        return { session: mapSession(session.rows[0]), segments: version.rows[0].turns.map((row: Record<string, unknown>) => mapCorrectedTurn(row, sessionId)), transcriptWarnings: warnings,
+          transcriptRoleReviewRequired: version.rows[0].metadata?.roleReviewRequired === true }
+      }
+    }
+    const segments = await this.pool.query(`SELECT s.*, CASE WHEN a.id IS NULL OR a.prompt_version <> 'whole-dialogue-v3' THEN NULL ELSE jsonb_build_object('summary',a.summary,'evidence',a.evidence,'scores',a.scores,'concerns',a.concerns,'confidence',a.confidence,'nextQuestion',a.next_question,'advisoryOnly',true,'applicationStatusMutation','none','transcriptRefinement',a.transcript_refinement,'sourceSegments',a.source_segments) END AS analysis FROM interview_live_segments s LEFT JOIN interview_live_analyses a ON a.segment_id=s.id WHERE s.session_id = $1::uuid ORDER BY s.start_ms, s.id`, [sessionId])
+    return { session: mapSession(session.rows[0]), segments: segments.rows.map(mapSegment) }
+  }
   async addSegment(sessionId: string, input: { speakerId: string; role: InterviewRole; confidence: number; text: string; startMs: number; endMs: number; audioSource?: 'microphone' | 'meeting'; audioObjectKey?: string; transcriptComparison?: TranscriptComparison }, connection: Pick<Pool, 'query'> = this.pool): Promise<LiveSegment> { const result = await connection.query('INSERT INTO interview_live_segments (session_id, speaker_id, role, role_confidence, text, start_ms, end_ms, audio_object_key, audio_source, transcript_comparison) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) RETURNING *', [sessionId, input.speakerId, input.role, input.confidence, simplifyTranscript(input.text), input.startMs, input.endMs, input.audioObjectKey ?? null, input.audioSource ?? null, JSON.stringify(input.transcriptComparison ?? null)]); return mapSegment(result.rows[0]) }
   async correctRole(segmentId: string, role: Exclude<InterviewRole, 'unknown'>): Promise<LiveSegment> { const result = await this.pool.query("UPDATE interview_live_segments SET role = $2, role_confidence = 1, speaker_confirmed = true WHERE id = $1::uuid RETURNING *", [segmentId, role]); if (!result.rows[0]) throw new Error('LIVE_SEGMENT_NOT_FOUND'); return mapSegment(result.rows[0]) }
   private async selectUtterance(primarySegmentId: string, segmentIds: string[]): Promise<LiveSegment[]> {

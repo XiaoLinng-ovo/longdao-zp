@@ -3,7 +3,7 @@ import type { ApiRequisition } from './api'
 
 export const REQ_STATUS_LABEL: Record<string, string> = {
   draft: '草稿',
-  pending_approval: '待审批',
+  pending_approval: '历史待处理',
   progress: '审批中',
   approved: '已通过',
   rejected: '已驳回',
@@ -14,10 +14,8 @@ export const REQ_STATUS_LABEL: Record<string, string> = {
 }
 
 export const REQ_ACTION_LABEL: Record<RequisitionAction, string> = {
-  submit: '提交审批',
-  resubmit: '重新提交',
-  approve: '审批通过',
-  reject: '驳回',
+  submit: '提交需求',
+  resubmit: '重新提交需求',
   withdraw: '撤回',
   close: '关闭',
   cancel: '取消',
@@ -25,17 +23,15 @@ export const REQ_ACTION_LABEL: Record<RequisitionAction, string> = {
 }
 
 export const REQ_ACTION_HINT: Record<RequisitionAction, string> = {
-  submit: '将生成审批实例并通知当前审批人处理。',
-  resubmit: '重新提交会重建审批实例，保留旧审批记录。',
-  approve: '当前审批步骤通过后，状态将变为已通过。',
-  reject: '驳回后需求返回待修正状态，需补充原因。',
+  submit: '提交后需求直接生效。',
+  resubmit: '修改后重新提交，需求直接生效。',
   withdraw: '撤回后需求进入已撤回状态，不可再继续流程。',
   close: '关闭需求并归档当前编制申请。',
   cancel: '取消需求后流程终止，仅草稿/待审批/已驳回可取消。',
   convert: '将已通过需求转换为招聘岗位，进入岗位管理。',
 }
 
-export const REQ_REASON_REQUIRED: RequisitionAction[] = ['reject', 'withdraw', 'close', 'cancel']
+export const REQ_REASON_REQUIRED: RequisitionAction[] = ['withdraw', 'close', 'cancel']
 
 export function requisitionStatusLabel(status: string): string {
   return REQ_STATUS_LABEL[status] ?? status
@@ -62,7 +58,7 @@ export function requisitionActionsFor(status: string): RequisitionAction[] {
     case 'draft':
       return ['submit', 'cancel']
     case 'pending_approval':
-      return ['approve', 'reject', 'withdraw']
+      return ['withdraw']
     case 'rejected':
       return ['resubmit', 'cancel']
     case 'approved':
@@ -76,36 +72,9 @@ export function requisitionActionsFor(status: string): RequisitionAction[] {
   }
 }
 
-/** 钉钉接管审批期间，平台不再显示本地通过/驳回按钮。 */
-export function requisitionActionsForApproval(status: string, approval?: {
-  provider?: string
-  status?: string
-  externalInstanceId?: string
-}): RequisitionAction[] {
-  const actions = requisitionActionsFor(status)
-  const dingtalkActive = status === 'pending_approval'
-    && approval?.provider === 'dingtalk'
-    && approval.status === 'pending'
-    && Boolean(approval.externalInstanceId)
-  if (dingtalkActive) {
-    return actions.filter((action) => action !== 'approve' && action !== 'reject' && action !== 'withdraw')
-  }
-  return actions
-}
-
-export function describeApproval(request: ApiRequisition | null): { approver: string; status: string; history: Array<{ actedAt?: string; status?: string; approver?: string; comment?: string }> } {
-  if (!request) return { approver: '待指定', status: 'unknown', history: [] }
-  const approval = request.approval
-  return {
-    approver: approval?.approver?.trim() || '待指定',
-    status: approval?.status || 'pending',
-    history: approval?.actedAt ? [{ actedAt: approval.actedAt, status: approval.status, approver: approval.approver, comment: approval.comment }] : [],
-  }
-}
-
 export function conversionHint(request: ApiRequisition | null): string {
   if (!request) return ''
-  if (request.status === 'approved') return '该需求已通过审批，可继续创建关联岗位后执行转换。'
+  if (request.status === 'approved') return '该需求已生效，可继续创建关联岗位后执行转换。'
   if (request.convertedJobIds && request.convertedJobIds.length) return `该需求已生成 ${request.convertedJobIds.length} 个关联岗位，可执行转换。`
   if (request.status === 'converted') return '该需求已转换为岗位，无需重复转换。'
   return ''

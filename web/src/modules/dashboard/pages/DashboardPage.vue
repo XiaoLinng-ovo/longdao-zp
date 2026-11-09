@@ -2,11 +2,14 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { CalendarDays, Search, RotateCcw } from '@lucide/vue'
 import type { DashboardPeriod } from '../api'
-import { recruitmentRequestsEnabled } from '../../../shared/config/features'
+import { externalJobPublishingEnabled, recruitmentRequestsEnabled } from '../../../shared/config/features'
+import { runtimeFeatures } from '../../../shared/config/runtime-features'
+import { availableDashboardTodos } from '../utils/todo-availability'
 import { useRouter } from 'vue-router'
 import { loadDashboard } from '../api'
 import MetricCard from '../../../shared/components/MetricCard.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
+import CalendarDatePicker from '../../../shared/components/CalendarDatePicker.vue'
 import FunnelSummary from '../components/FunnelSummary.vue'
 import { processAnalysisTask } from '../../candidates/api'
 import { formatAnalysisError } from '../../../shared/utils/analysis-error'
@@ -16,7 +19,7 @@ type DashboardPayload = Awaited<ReturnType<typeof loadDashboard>>
 const metrics = ref<DashboardPayload['metrics']>([])
 const pending = ref<DashboardPayload['pending']>([])
 const funnel = ref<DashboardPayload['funnel']>([])
-const pendingFeedback = ref<DashboardPayload['pendingFeedback']>([])
+const pendingInterviews = ref<DashboardPayload['pendingInterviews']>([])
 const failedTasks = ref<DashboardPayload['failedTasks']>([])
 const todos = ref<DashboardPayload['todos']>([])
 const todoDialog = ref<HTMLDialogElement>()
@@ -24,10 +27,12 @@ const todoSearch = ref('')
 const todoCategory = ref('')
 const syncError = ref('')
 const activity = ref<DashboardPayload['activity']>()
-const today = localInput(new Date())
-const rangeFrom = ref(today), rangeTo = ref(today), rangeError = ref('')
+const initialEnd = new Date()
+const initialStart = new Date(initialEnd)
+initialStart.setDate(initialStart.getDate() - 29)
+const rangeFrom = ref(localInput(initialStart)), rangeTo = ref(localInput(initialEnd)), rangeError = ref('')
 const appliedPeriod = ref<DashboardPeriod>()
-const shortcut = ref('today')
+const shortcut = ref('30')
 let requestVersion = 0
 function localInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, '0')
@@ -57,8 +62,12 @@ let refreshing = false
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 let disposed = false
 const categoryLabels = { requisition: '招聘需求', job: '岗位', resume: '简历', interview: '面试', offer: '录用', onboarding: '入职' }
-const visibleTodos = computed(() => todos.value.filter(row => recruitmentRequestsEnabled || row.category !== 'requisition'))
-const todoCategories = computed(() => Object.entries(categoryLabels).filter(([key]) => recruitmentRequestsEnabled || key !== 'requisition'))
+const visibleTodos = computed(() => availableDashboardTodos(todos.value, { externalJobPublishingEnabled, recruitmentRequestsEnabled }))
+const todoCounts = computed(() => visibleTodos.value.reduce<Record<string, number>>((counts, row) => {
+  counts[row.category] = (counts[row.category] ?? 0) + 1
+  return counts
+}, {}))
+const todoCategories = computed(() => Object.entries(categoryLabels).filter(([key]) => Boolean(todoCounts.value[key])))
 const filteredTodos = computed(() => {
   const keyword = todoSearch.value.trim().toLocaleLowerCase()
   return visibleTodos.value.filter(row => (!todoCategory.value || row.category === todoCategory.value)
@@ -78,6 +87,24 @@ const flowSteps = computed(() => {
   }))
 })
 const todoTotal = computed(() => visibleTodos.value.length)
+const quickFlowSteps = computed(() => {
+  const steps = [
+    recruitmentRequestsEnabled
+      ? { label: '一键导入需求', action: openRequirementForm }
+      : { label: '新建岗位', action: openJobForm },
+    { label: 'AI岗位说明书', action: openJobForm },
+    { label: '一键生成JD', action: openJobForm },
+  ]
+  if (externalJobPublishingEnabled) steps.push({ label: '一键发布渠道', action: () => router.push('/jobs') })
+  steps.push(
+    { label: 'AI筛选简历', action: () => router.push('/candidates') },
+    { label: '一键面试表', action: () => router.push('/interviews') },
+  )
+  if (runtimeFeatures.recruitmentReportsEnabled) steps.push({ label: '自动统计排序', action: () => router.push('/reports') })
+  steps.push({ label: '一键发Offer', action: () => router.push('/offers') })
+  return steps
+})
+const quickFlowTitle = computed(() => `${quickFlowSteps.value.length}步一站式主线`)
 const conversionRate = computed(() => {
   const first = Number(funnel.value[0]?.value ?? 0)
   const last = Number(funnel.value[funnel.value.length - 1]?.value ?? 0)
@@ -98,7 +125,7 @@ async function refresh(background = false, force = false) {
     metrics.value = data.metrics
     pending.value = recruitmentRequestsEnabled ? data.pending : []
     funnel.value = data.funnel
-    pendingFeedback.value = data.pendingFeedback
+    pendingInterviews.value = data.pendingInterviews
     failedTasks.value = data.failedTasks
     todos.value = data.todos
   } catch (cause) {
@@ -139,8 +166,18 @@ function openRequisition(row: DashboardPayload['pending'][number]) {
   router.push({ name: 'requisition-detail', params: { id: row.entityId || row.id } })
 }
 
-function openInterview(row: DashboardPayload['pendingFeedback'][number]) {
+function openInterview(row: DashboardPayload['pendingInterviews'][number]) {
   router.push({ name: 'interview-detail', params: { id: row.id } })
+}
+
+function formatInterviewTime(value?: string) {
+  if (!value) return '待安排'
+  return new Date(value).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 async function retryTask(row: DashboardPayload['failedTasks'][number]) {
@@ -185,9 +222,9 @@ onUnmounted(() => {
     <div class="period-shortcuts" role="group" aria-label="快捷时段">
       <button v-for="item in [{ value: 'all', label: '全部时间' }, { value: 'today', label: '今日' }, { value: '7', label: '近7天' }, { value: '30', label: '近30天' }]" :key="item.value" type="button" :aria-pressed="shortcut === item.value" @click="selectPeriod(item.value)">{{ item.label }}</button>
     </div>
-    <label>开始日期<input v-model="rangeFrom" type="date" aria-label="统计开始日期" @input="shortcut = 'custom'" /></label>
+    <label>开始日期<CalendarDatePicker v-model="rangeFrom" ariaLabel="统计开始日期" @update:model-value="shortcut = 'custom'" /></label>
     <span class="period-separator" aria-hidden="true">至</span>
-    <label>结束日期<input v-model="rangeTo" type="date" aria-label="统计结束日期" @input="shortcut = 'custom'" /></label>
+    <label>结束日期<CalendarDatePicker v-model="rangeTo" ariaLabel="统计结束日期" @update:model-value="shortcut = 'custom'" /></label>
     <button class="btn btn-primary period-submit" type="submit"><Search :size="14" aria-hidden="true" />查询</button>
     <button v-if="appliedPeriod" class="period-reset" type="button" aria-label="恢复全部时间" title="恢复全部时间" @click="selectPeriod('all')"><RotateCcw :size="16" aria-hidden="true" /></button>
     <p v-if="rangeError" class="period-error" role="alert">{{ rangeError }}</p>
@@ -204,7 +241,7 @@ onUnmounted(() => {
     <div class="dashboard-overview-grid">
       <section class="dashboard-card todo-card">
         <div class="card-heading">
-          <div><h3>{{ activity ? '时段内更新的待办' : '📌 待办事项' }} <em>{{ todoTotal }}</em></h3></div>
+          <div><h3>待办事项 <em>{{ todoTotal }}</em></h3></div>
           <button class="heading-link" type="button" @click="openTodos">全部查看 →</button>
         </div>
         <div class="todo-list">
@@ -217,19 +254,11 @@ onUnmounted(() => {
 
       <section class="dashboard-card quickflow-card">
         <div class="card-heading">
-          <div><h3>⚡ 八步一站式主线</h3></div>
+          <div><h3>⚡ {{ quickFlowTitle }}</h3></div>
           <span class="flow-status"><span class="live-dot"></span>进行中</span>
         </div>
         <div class="quickflow-list">
-          <button v-if="recruitmentRequestsEnabled" class="quickflow-step" type="button" @click="openRequirementForm"><span>1. 一键导入需求</span><b>→</b></button>
-          <button v-else class="quickflow-step" type="button" @click="openJobForm"><span>1. 新建岗位</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="openJobForm"><span>2. AI岗位说明书</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="openJobForm"><span>3. 一键生成JD</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="router.push('/jobs')"><span>4. 一键发布渠道</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="router.push('/candidates')"><span>5. AI筛选简历</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="router.push('/interviews')"><span>6. 一键面试表</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="router.push('/reports')"><span>7. 自动统计排序</span><b>→</b></button>
-          <button class="quickflow-step" type="button" @click="router.push('/offers')"><span>8. 一键发Offer</span></button>
+          <button v-for="(step, index) in quickFlowSteps" :key="step.label" class="quickflow-step" type="button" @click="step.action"><span>{{ index + 1 }}. {{ step.label }}</span><b v-if="index < quickFlowSteps.length - 1">→</b></button>
         </div>
       </section>
     </div>
@@ -249,18 +278,18 @@ onUnmounted(() => {
 
     <section v-if="recruitmentRequestsEnabled" class="section dashboard-section"><div class="section-heading"><div><span class="section-eyebrow">需要推进</span><h3 class="section-title">待审批需求</h3></div><span class="section-note">共 {{ pending.length }} 条记录</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>需求</th><th>部门</th><th>审批人</th><th>状态</th></tr></thead><tbody><tr v-for="row in pending" :key="row.id" class="row-clickable" role="link" tabindex="0" @click="openRequisition(row)" @keydown.enter="openRequisition(row)"><td><span class="row-link" @click.stop="openRequisition(row)">{{ row.title }}</span></td><td>{{ row.department }}</td><td>{{ row.approver }}</td><td><StatusTag :status="row.status" /></td></tr><tr v-if="!pending.length"><td colspan="4" class="table-empty">暂无待审批需求</td></tr></tbody></table></div></section>
 
-    <section class="section dashboard-section"><div class="section-heading"><div><h3 class="section-title">待反馈面试</h3></div><span class="section-note">共 {{ pendingFeedback.length }} 条记录</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>候选人</th><th>岗位</th><th>轮次</th><th>反馈状态</th></tr></thead><tbody><tr v-for="row in pendingFeedback" :key="row.id" class="row-clickable" role="link" tabindex="0" @click="openInterview(row)" @keydown.enter="openInterview(row)"><td><span class="row-link" @click.stop="openInterview(row)">{{ row.candidateName }}</span></td><td>{{ row.jobTitle }}</td><td>第 {{ row.round }} 轮</td><td><StatusTag :status="row.feedbackStatus" /></td></tr><tr v-if="!pendingFeedback.length"><td colspan="4" class="table-empty">暂无待反馈面试</td></tr></tbody></table></div></section>
+    <section class="section dashboard-section"><div class="section-heading"><div><h3 class="section-title">待完成面试</h3></div><span class="section-note">共 {{ pendingInterviews.length }} 条记录</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>候选人</th><th>岗位</th><th>轮次</th><th>计划时间</th></tr></thead><tbody><tr v-for="row in pendingInterviews" :key="row.id" class="row-clickable" role="link" tabindex="0" @click="openInterview(row)" @keydown.enter="openInterview(row)"><td><span class="row-link" @click.stop="openInterview(row)">{{ row.candidateName }}</span></td><td>{{ row.jobTitle }}</td><td>第 {{ row.round }} 轮</td><td><time v-if="row.scheduledStartAt" :datetime="row.scheduledStartAt">{{ formatInterviewTime(row.scheduledStartAt) }}</time><span v-else>待安排</span></td></tr><tr v-if="!pendingInterviews.length"><td colspan="4" class="table-empty">暂无待完成面试</td></tr></tbody></table></div></section>
 
     <section class="section dashboard-section"><div class="section-heading"><div><h3 class="section-title">失败分析任务</h3></div><span class="section-note">自动化处理队列</span></div><div class="table-wrap dashboard-table"><table><thead><tr><th>状态</th><th>尝试次数</th><th>失败原因</th><th>操作</th></tr></thead><tbody><tr v-for="row in failedTasks" :key="row.id"><td><StatusTag :status="row.status" /></td><td>{{ row.attempts }}</td><td>{{ formatAnalysisError(row.lastError) }}</td><td><button class="btn btn-primary" type="button" :disabled="retryingTaskId === row.id" @click="retryTask(row)">{{ retryingTaskId === row.id ? '重试中...' : '重新处理' }}</button></td></tr><tr v-if="!failedTasks.length"><td colspan="4" class="table-empty">暂无失败分析任务</td></tr></tbody></table></div></section>
   </template>
   <dialog ref="todoDialog" class="todos-dialog" aria-labelledby="todos-title" @click="event => { if (event.target === todoDialog) todoDialog?.close() }">
     <header class="todos-heading">
-      <div><h2 id="todos-title">全部待办 <span>{{ todoTotal }}</span></h2><p>{{ activity ? '所选时段内更新，目前仍未处理的事项' : '未处理事项' }}</p></div>
+      <div><h2 id="todos-title">全部待办 <span>{{ todoTotal }}</span></h2><p>当前所有未处理事项</p></div>
       <button class="todos-close" type="button" aria-label="关闭待办列表" title="关闭" @click="todoDialog?.close()">×</button>
     </header>
     <div class="todos-filters">
       <input v-model="todoSearch" type="search" aria-label="搜索待办" placeholder="搜索候选人、岗位或事项" />
-      <select v-model="todoCategory" aria-label="待办分类"><option value="">全部分类</option><option v-for="[key, label] in todoCategories" :key="key" :value="key">{{ label }}（{{ visibleTodos.filter(row => row.category === key).length }}）</option></select>
+      <select v-model="todoCategory" aria-label="待办分类"><option value="">全部分类</option><option v-for="[key, label] in todoCategories" :key="key" :value="key">{{ label }}（{{ todoCounts[key] }}）</option></select>
     </div>
     <p class="todos-result" role="status">共 {{ filteredTodos.length }} 项<span v-if="syncError"> · 同步失败：{{ syncError }}</span></p>
     <div class="todos-scroll">
@@ -276,7 +305,7 @@ onUnmounted(() => {
 .dashboard-period{display:flex;align-items:flex-end;flex-wrap:wrap;gap:12px;margin:0 0 18px;padding:14px 0;border-top:1px solid #e0ebf3;border-bottom:1px solid #e0ebf3;color:#526f85}
 .period-title{display:flex;align-items:center;gap:7px;align-self:center;font-size:13px;font-weight:650}.period-title svg{color:#399b9a}
 .period-shortcuts{display:flex;gap:2px;align-self:center;padding:3px;background:#eaf2f8;border-radius:7px}.period-shortcuts button{border:0;border-radius:5px;padding:8px 10px;background:transparent;color:#637d91;font-size:12px;cursor:pointer;white-space:nowrap}.period-shortcuts button[aria-pressed=true]{background:#fff;color:#287e8e;box-shadow:0 2px 5px #315c7a14}
-.dashboard-period label{display:grid;gap:5px;width:210px;min-width:0;font-size:11px}.dashboard-period input{min-height:36px;min-width:0;max-width:100%;padding:6px 9px;border:1px solid #cfe0ec;border-radius:7px;background:#ffffffb3;color:#36536a;font:inherit;font-size:12px;color-scheme:light}.dashboard-period input:focus-visible{outline:2px solid #75b9d3;outline-offset:2px}.period-separator{align-self:flex-end;padding-bottom:10px;font-size:12px}.period-submit{display:flex;align-items:center;gap:6px;min-height:36px;white-space:nowrap}.period-reset{display:grid;place-items:center;flex:none;width:36px;height:36px;border:1px solid #cfe0ec;border-radius:7px;background:white;color:#638296;cursor:pointer}.period-error{flex-basis:100%;margin:0;color:#b54858;font-size:12px}
+.dashboard-period label{display:grid;gap:5px;width:210px;min-width:0;font-size:11px}.period-separator{align-self:flex-end;padding-bottom:10px;font-size:12px}.period-submit{display:flex;align-items:center;gap:6px;min-height:36px;white-space:nowrap}.period-reset{display:grid;place-items:center;flex:none;width:36px;height:36px;border:1px solid #cfe0ec;border-radius:7px;background:white;color:#638296;cursor:pointer}.period-error{flex-basis:100%;margin:0;color:#b54858;font-size:12px}
 @media(max-width:680px){.dashboard-period{gap:10px}.period-title{flex-basis:100%}.dashboard-period label{flex:1 1 100%;width:100%;max-width:100%}.period-separator{display:none}.period-shortcuts{flex-basis:100%}.period-shortcuts button{flex:1;padding:9px 7px}}
 
 .row-clickable { cursor: pointer; }

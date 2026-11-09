@@ -38,6 +38,37 @@ describe('unavailable AI score', () => {
 })
 
 describe('AI advice with manual screening decisions', () => {
+  it.each([
+    ['passed', '.pass-button', '.eliminate-button', '通过'],
+    ['eliminated', '.eliminate-button', '.pass-button', '淘汰'],
+  ] as const)('highlights the saved %s decision when reopening the detail panel', async (decision, selectedSelector, otherSelector, label) => {
+    const root = await mount({ aiScore: 88, decision })
+    const selected = root.querySelector<HTMLButtonElement>(selectedSelector)!
+    const other = root.querySelector<HTMLButtonElement>(otherSelector)!
+
+    expect(selected.classList.contains('decision-selected')).toBe(true)
+    expect(selected.getAttribute('aria-pressed')).toBe('true')
+    expect(selected.textContent?.trim()).toBe(label)
+    expect(selected.textContent).not.toContain('已选')
+    expect(other.classList.contains('decision-selected')).toBe(false)
+    expect(other.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('highlights the newly selected decision before confirmation and restores the saved state after cancelling', async () => {
+    const root = await mount({ aiScore: 88, decision: 'passed' })
+    const eliminate = root.querySelector<HTMLButtonElement>('.eliminate-button')!
+
+    eliminate.click()
+    await nextTick()
+    expect(eliminate.classList.contains('decision-selected')).toBe(true)
+    expect(root.querySelector<HTMLButtonElement>('.pass-button')?.classList.contains('decision-selected')).toBe(false)
+
+    root.querySelector<HTMLButtonElement>('.decision-confirm .btn-ghost')!.click()
+    await nextTick()
+    expect(root.querySelector<HTMLButtonElement>('.pass-button')?.classList.contains('decision-selected')).toBe(true)
+    expect(eliminate.classList.contains('decision-selected')).toBe(false)
+  })
+
   it.each([79.99, 80, 80.01])('preserves AI advice for %s without restricting either manual decision', async (aiScore) => {
     const root = await mount({ aiScore, humanScore: 100, finalScore: 99, history: [{ humanScore: 100, finalScore: 99, comment: '旧人工分', actorId: 'u1', updatedAt: '' }] })
     expect(root.textContent).not.toContain('人工评分')
@@ -74,9 +105,23 @@ it.each([80, 100])('allows manual elimination despite AI score %s recommending p
   root.querySelector<HTMLButtonElement>('.eliminate-button')!.click()
   await nextTick()
   expect(root.querySelector('.decision-confirm .warning')?.textContent).toContain('人工确认淘汰')
+  expect(root.querySelector('.decision-confirm p')?.textContent).toContain('自动加入人才库')
   root.querySelector<HTMLButtonElement>('.decision-confirm .btn-primary')!.click()
   for (let i = 0; i < 5; i++) { await Promise.resolve(); await nextTick() }
-  expect(updateResumeReview).toHaveBeenCalledWith('result', { decision: 'eliminated', comment: '' })
+  expect(updateResumeReview).toHaveBeenCalledWith('result', { decision: 'eliminated', comment: '', talentPool: true })
+  expect(root.querySelector('.decision-confirm')).toBeNull()
+})
+
+it.each([0, 79.99])('does not add low-score candidates to the talent pool after elimination at %s', async (aiScore) => {
+  const root = await mount({ aiScore })
+  vi.mocked(updateResumeReview).mockResolvedValue({} as never)
+  root.querySelector<HTMLButtonElement>('.eliminate-button')!.click()
+  await nextTick()
+  expect(root.querySelector('.decision-confirm p')?.textContent).toContain('不加入人才库')
+  expect(root.querySelector('.talent-check')).toBeNull()
+  root.querySelector<HTMLButtonElement>('.decision-confirm .btn-primary')!.click()
+  for (let i = 0; i < 5; i++) { await Promise.resolve(); await nextTick() }
+  expect(updateResumeReview).toHaveBeenCalledWith('result', { decision: 'eliminated', comment: '', talentPool: false })
   expect(root.querySelector('.decision-confirm')).toBeNull()
 })
 

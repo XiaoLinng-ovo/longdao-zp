@@ -6,6 +6,7 @@ import { latestAnalysisByKey } from './latest-analysis.js'
 export interface DashboardTodo {
   id: string
   category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding'
+  actionKey?: 'confirm-job-spec' | 'confirm-job-jd' | 'publish-job'
   title: string
   description: string
   actionLabel: string
@@ -25,8 +26,8 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
     return `${candidates.get(app?.candidateId ?? '')?.fullName ?? '未知候选人'} · ${jobs.get(app?.jobId ?? '')?.title ?? '未知岗位'}`
   }
   const candidatePath = (id: string) => `/candidates/${applications.get(id)?.candidateId ?? ''}?applicationId=${encodeURIComponent(id)}`
-  const add = (id: string, category: DashboardTodo['category'], title: string, description: string, actionLabel: string, path: string, updatedAt: string) => {
-    todos.push({ id, category, title, description, actionLabel, path, updatedAt })
+  const add = (id: string, category: DashboardTodo['category'], title: string, description: string, actionLabel: string, path: string, updatedAt: string, actionKey?: DashboardTodo['actionKey']) => {
+    todos.push({ id, category, ...(actionKey ? { actionKey } : {}), title, description, actionLabel, path, updatedAt })
   }
 
   const requestActions: Record<string, string> = { draft: '提交需求审批', pending_approval: '审批招聘需求', approved: '需求转为岗位' }
@@ -37,8 +38,11 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
   }
   for (const row of state.jobs) {
     if (row.status !== 'draft' && row.status !== 'ready') continue
-    const action = !row.spec?.confirmed ? '待确认岗位说明书' : !row.jd?.confirmed ? '待确认岗位 JD' : '岗位待发布'
-    add(`job-${row.id}`, 'job', action, row.title, '去处理', `/jobs/${row.id}`, row.updatedAt)
+    const needsSpec = !row.spec?.confirmed
+    const needsJd = !needsSpec && !row.jd?.confirmed
+    const action = needsSpec ? '待确认岗位说明书' : needsJd ? '待确认岗位 JD' : '岗位待发布'
+    const actionKey = needsSpec ? 'confirm-job-spec' : needsJd ? 'confirm-job-jd' : 'publish-job'
+    add(`job-${row.id}`, 'job', action, row.title, '去处理', `/jobs/${row.id}`, row.updatedAt, actionKey)
   }
 
   const latestTasks = latestAnalysisByKey(state.analysisTasks, row => `${row.applicationId ?? ''}:${row.resumeId}`)
@@ -76,12 +80,8 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
     if (reviewsByInterview.get(row.id)?.hasCompletedLive) completedLiveStages.add(key)
     const previous = latestInterviews.get(key)
     if (!previous || row.round > previous.round || (row.round === previous.round && row.createdAt > previous.createdAt)) latestInterviews.set(key, row)
-    const feedback = state.interviewFeedback.filter(item => item.interviewId === row.id)
-    const missingRequired = row.participants.some(person => person.required && person.role === 'interviewer' && !feedback.some(item => item.interviewerId === person.userId && item.status === 'locked'))
-    if (!feedback.length || feedback.some(item => item.status !== 'locked') || missingRequired) {
-      add(`feedback-${row.id}`, 'interview', '面试反馈待完成', `${context(row.applicationId)} · 第 ${row.round} 轮`, '去反馈', `/interviews/${row.id}`, row.updatedAt)
-    } else if (row.status === 'scheduled') {
-      add(`conclude-${row.id}`, 'interview', '面试待确认完成', context(row.applicationId), '去确认', `/interviews/${row.id}`, row.updatedAt)
+    if (row.status === 'scheduled' && row.scheduledStartAt) {
+      add(`complete-${row.id}`, 'interview', '面试待完成', `${context(row.applicationId)} · 第 ${row.round} 轮`, '去完成', `/interviews/${row.id}`, row.updatedAt)
     }
   }
   for (const row of latestInterviews.values()) {
@@ -105,7 +105,8 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
     }
   }
 
-  const offerActions: Record<string, string> = { draft: 'Offer 待提交', pending_approval: 'Offer 待审批', approved: 'Offer 待发送', sent: 'Offer 待确认接受结果' }
+  // Historical approval statuses remain readable, but all unsent offers now use the direct-send flow.
+  const offerActions: Record<string, string> = { draft: 'Offer 待发送', pending_approval: 'Offer 待发送', approved: 'Offer 待发送', sent: 'Offer 待确认接受结果' }
   for (const row of state.offers) {
     const action = offerActions[row.status]
     if (action && active(row.applicationId)) add(`offer-${row.id}`, 'offer', action, context(row.applicationId), '去处理', `/offers/${row.id}`, row.updatedAt)

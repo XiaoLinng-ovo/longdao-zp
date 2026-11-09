@@ -56,6 +56,7 @@ it('saves real sessions, switches server-side identity, rejects unauthorized swi
   cookies.set('smartrecruit_accounts', '%ZZ')
   let result = await call('/auth/login', { email: 'admin@smartrecruit.local', password: 'admin123' })
   assert.equal(result.response.status, 200)
+  assert.equal(result.payload.data.kind, 'authenticated')
   const adminId = result.payload.data.user.id
   const adminToken = cookies.get('smartrecruit_session')
   assert.ok(result.response.headers.getSetCookie().some(cookie => cookie.startsWith('smartrecruit_accounts=') && cookie.includes('HttpOnly')))

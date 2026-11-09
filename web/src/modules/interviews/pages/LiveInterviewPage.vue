@@ -105,7 +105,11 @@ const sourceStates = ref<Record<InterviewAudioSource, SourceStreamingState>>({ m
 const streamingWarning = computed(() => activeSources.value.filter(source => sourceWarnings.value[source]).map(source => sourceLabels[source] + '：' + sourceWarnings.value[source]).join(' '))
 const captureActive = ref(false)
 const pausing = ref(false)
-const audioSettingsLocked = computed(() => pausing.value || ['starting', 'recording', 'manual', 'stopping', 'completed'].includes(status.value) || (captureActive.value && status.value !== 'paused'))
+const interviewCompleted = computed(() => detail.value?.status === 'completed')
+const interviewCancelled = computed(() => detail.value?.status === 'cancelled')
+const interviewReadOnly = computed(() => interviewCompleted.value || interviewCancelled.value || status.value === 'completed')
+const canStartLiveInterview = computed(() => detail.value?.status === 'scheduled' && status.value !== 'completed')
+const audioSettingsLocked = computed(() => interviewReadOnly.value || pausing.value || ['starting', 'recording', 'manual', 'stopping', 'completed'].includes(status.value) || (captureActive.value && status.value !== 'paused'))
 const meetingStatusLabel = computed(() => ({ idle: '尚未共享', authorizing: '等待共享授权', connected: '音轨已接入', failed: '未接入会议音频', ended: '共享已停止' })[meetingState.value])
 let audioCapture: InterviewAudioCapture | undefined
 let captureVersion = 0
@@ -248,6 +252,8 @@ watch(() => [utterances.value.map(row => `${row.id}:${row.text}`).join('\n'), st
   else trackTranscriptScroll()
 })
 const statusLabel = computed(() => {
+  if (interviewCancelled.value) return '面试已取消'
+  if (interviewCompleted.value) return '面试已完成'
   if (status.value === 'stopping' && pendingAudioCount.value) return '正在保存（剩余 ' + pendingAudioCount.value + ' 段）'
   if (status.value === 'paused' && pendingAudioCount.value) return '录音已暂停，待保存'
   return ({ idle: '尚未开始', starting: '正在启动', recording: '正在录音', paused: '录音已暂停', manual: '手动记录中', stopping: '正在保存', failed: '服务异常', completed: '面试已结束' })[status.value]
@@ -369,7 +375,7 @@ async function confirmRoomLeave() {
 }
 
 async function confirmRecordingAuthorization() {
-  if (!recordingConsent.value || !detail.value) return
+  if (!recordingConsent.value || !detail.value || !canStartLiveInterview.value) return
   authorizationDialogOpen.value = false
   await start()
 }
@@ -378,6 +384,7 @@ function toBase64(blob: Blob): Promise<string> { return new Promise((resolve, re
 function formatTimestamp(ms: number): string { const total=Math.max(0,Math.round(ms/1000)); return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}` }
 function microphoneErrorState(error: unknown): typeof microphoneState.value { const name=(error as {name?:string})?.name; if(name==='NotAllowedError'||name==='PermissionDeniedError'||name==='SecurityError')return 'denied'; if(name==='NotFoundError'||name==='DevicesNotFoundError')return 'not-found'; if(name==='NotReadableError'||name==='TrackStartError')return 'busy'; return 'error' }
 async function refreshMicrophoneState(requestPermission = false) {
+  if (interviewReadOnly.value) return
   if (!navigator.mediaDevices?.enumerateDevices) { microphoneState.value = 'unsupported'; return }
   try {
     if (requestPermission) {
@@ -422,7 +429,8 @@ function isCompleteQuestionBank(questions: GeneratedInterviewQuestion[]): boolea
       && group.dimensions.every(dimension => questions.filter(question => question.group === group.id && question.dimension === dimension.id).length === 1))
 }
 async function generateResumeQuestions(force = false, retryPreparation = false) {
-  if (!detail.value || generatingQuestions.value || Object.values(refinementLoading.value).some(Boolean) || (force && ['starting', 'stopping', 'completed'].includes(status.value))) return
+  if (!detail.value || generatingQuestions.value || Object.values(refinementLoading.value).some(Boolean)
+    || (force && (interviewReadOnly.value || ['starting', 'stopping', 'completed'].includes(status.value)))) return
   const targetGroup = force ? referenceGroup.value : null
   questionGenerationGroup.value = targetGroup
   backgroundPreparation.value = null
@@ -446,7 +454,17 @@ async function generateResumeQuestions(force = false, retryPreparation = false) 
   try {
     const saved = force ? null : await Promise.race([getInterviewQuestions(detail.value.id, controller.signal), aborted])
     if (disposed) return
-    if (status.value === 'completed' && !saved?.questions.length) { questionLoadError.value = '已完成面试暂无已保存题库，不会自动重新生成。'; return }
+    if (interviewReadOnly.value) {
+      if (!saved?.questions.length) {
+        questionLoadError.value = interviewCancelled.value
+          ? '面试已取消，暂无已保存题库，不能重新生成。'
+          : '面试已完成，暂无已保存题库，不能重新生成。'
+        return
+      }
+      generatedQuestions.value = saved.questions
+      questionEngine.value = saved.engine
+      return
+    }
     const result = saved?.questions.length ? saved : await Promise.race([targetGroup
       ? generateInterviewQuestions(detail.value.id, 10, true, controller.signal, targetGroup)
       : waitForPreparedInterviewQuestions(detail.value.id, {
@@ -517,7 +535,7 @@ function cancelQuestionGeneration() {
 }
 async function refineCurrentQuestionGroup(content: string) {
   const group = referenceGroup.value
-  if (!group || !detail.value || ['starting', 'stopping', 'completed'].includes(status.value)) return
+  if (!group || !detail.value || interviewReadOnly.value || ['starting', 'stopping', 'completed'].includes(status.value)) return
 
   const trimmed = content.trim()
   if (!trimmed || generatingQuestions.value || Object.values(refinementLoading.value).some(Boolean)) return
@@ -605,9 +623,10 @@ async function load() {
       for (const row of utterances.value) {
         if (applicableAnalyses.value[row.id]) analysisRetryState.restore(analysisSourceKey(analysisSourceSegments(row)))
       }
-      status.value = active.session.status === 'completed' ? 'completed' : 'paused'
+      // A closed interview stays read-only even if an old active session is still present.
+      status.value = interviewReadOnly.value || active.session.status === 'completed' ? 'completed' : 'paused'
       elapsedSeconds.value = Math.floor(Math.max(0, ...active.segments.map(item => item.endMs)) / 1000)
-      if (active.session.status === 'completed') await refreshFinalInterviewScore()
+      if (interviewReadOnly.value || active.session.status === 'completed') await refreshFinalInterviewScore()
     }
     const available = await refreshExternalServices()
     if (!available) watchExternalServices()
@@ -617,8 +636,8 @@ async function load() {
     error.value = describeApiFailure(cause, '读取面试信息失败').message
   } finally { loading.value = false }
 }
-async function startManual() { if(!detail.value || status.value==='starting' || status.value==='manual' || !recordingConsent.value)return; error.value=''; status.value='starting'; try { if(!sessionId.value){const session=await createLiveInterviewSession(detail.value.id);sessionId.value=session.id; if(currentQuestion.value.trim()) await updateLiveInterviewQuestion(session.id,currentQuestion.value.trim(),'manual')} status.value='manual'; if(!timer) timer=setInterval(()=>{elapsedSeconds.value++;recordingNowMs.value=Math.max(recordingNowMs.value,elapsedSeconds.value*1000)},1000) } catch(cause) { error.value=describeApiFailure(cause,'启动手动面试失败').message; status.value='failed' } }
-async function addManualSegment() { const text=manualText.value.trim(); if(!sessionId.value || !text)return; try { const startMs=recordingNowMs.value; const segment=await addManualLiveSegment(sessionId.value,text,manualRole.value,startMs,startMs); segments.value.push(segment); recordingNowMs.value=segment.endMs+ANSWER_SILENCE_MS; manualText.value='' } catch(cause) { error.value=describeApiFailure(cause,'添加发言失败').message } }
+async function startManual() { if(!canStartLiveInterview.value || status.value==='starting' || status.value==='manual' || !recordingConsent.value)return; error.value=''; status.value='starting'; try { if(!sessionId.value){const session=await createLiveInterviewSession(detail.value!.id);sessionId.value=session.id; if(currentQuestion.value.trim()) await updateLiveInterviewQuestion(session.id,currentQuestion.value.trim(),'manual')} status.value='manual'; if(!timer) timer=setInterval(()=>{elapsedSeconds.value++;recordingNowMs.value=Math.max(recordingNowMs.value,elapsedSeconds.value*1000)},1000) } catch(cause) { error.value=describeApiFailure(cause,'启动手动面试失败').message; status.value='failed' } }
+async function addManualSegment() { const text=manualText.value.trim(); if(!canStartLiveInterview.value || !sessionId.value || !text)return; try { const startMs=recordingNowMs.value; const segment=await addManualLiveSegment(sessionId.value,text,manualRole.value,startMs,startMs); segments.value.push(segment); recordingNowMs.value=segment.endMs+ANSWER_SILENCE_MS; manualText.value='' } catch(cause) { error.value=describeApiFailure(cause,'添加发言失败').message } }
 function scheduleChunkRotation() {
   if(chunkRotationTimer)clearTimeout(chunkRotationTimer)
   chunkRotationTimer=setTimeout(()=>{ if(recorder?.state==='recording')recorder.stop() },TRANSCRIPTION_CHUNK_MS)
@@ -794,7 +813,7 @@ function beginRecordingClock() {
   timer = setInterval(() => { recordingNowMs.value = Math.round(performance.now() - recordingStartedAt); elapsedSeconds.value = Math.floor(recordingNowMs.value / 1000) }, 1000)
 }
 async function start() {
-  if (!detail.value || !recordingConsent.value || ['starting', 'recording', 'stopping', 'completed'].includes(status.value)) return
+  if (!canStartLiveInterview.value || !detail.value || !recordingConsent.value || ['starting', 'recording', 'stopping', 'completed'].includes(status.value)) return
   const version = ++captureVersion
   error.value = ''; audioWarning.value = ''; status.value = 'starting'
   clearRecordingTimers()
@@ -857,7 +876,7 @@ async function start() {
   }
 }
 async function togglePause() {
-  if (pausing.value) return
+  if (!canStartLiveInterview.value || interviewReadOnly.value || pausing.value) return
   if (status.value === 'recording') {
     pausing.value = true
     status.value = 'paused'
@@ -888,7 +907,7 @@ async function togglePause() {
   } else await start()
 }
 async function stop() {
-  if (!sessionId.value || status.value === 'stopping' || status.value === 'completed') return
+  if (!canStartLiveInterview.value || interviewReadOnly.value || !sessionId.value || status.value === 'stopping' || status.value === 'completed') return
   status.value = 'stopping'
   error.value = ''
   pauseStreamingAudio()
@@ -913,7 +932,23 @@ async function stop() {
     status.value = uploadsTransferred ? 'completed' : 'paused'
   } finally { stopStreamingAudio() }
 }
-async function setRole(segment:LiveInterviewSegment & {sourceIds?:string[]},role:'interviewer'|'candidate'){ try { const updated=await correctLiveSegmentRole(segment.id,role,segment.sourceIds??[segment.id]); updated.forEach((item)=>{const existing=segments.value.find((row)=>row.id===item.id);if(existing)Object.assign(existing,item)}) } catch(cause) { error.value=describeApiFailure(cause,'修正说话人失败').message } }
+async function setRole(segment:LiveInterviewSegment & {sourceIds?:string[]},role:'interviewer'|'candidate'){
+  if(interviewReadOnly.value)return
+  // 把已经确认过的发言改成另一个说话人属于人工复核，不自动调用模型分析，避免无谓的额度消耗；需要评分时由面试官点击“分析完整回答”。
+  const reclassification = segment.role !== 'unknown'
+  try {
+    const updated=await correctLiveSegmentRole(segment.id,role,segment.sourceIds??[segment.id])
+    updated.forEach((item)=>{const existing=segments.value.find((row)=>row.id===item.id);if(existing)Object.assign(existing,item)})
+    if (reclassification) {
+      const touched = new Set(updated.map(item => item.id))
+      for (const row of utterances.value) {
+        if (row.role !== 'candidate' || !row.sourceIds.some(id => touched.has(id))) continue
+        const eligibility = analysisEligibilityById.value[row.id]
+        analysisRetryState.claim(analysisSourceKey(analysisSourceSegments(row)), eligibility?.revision)
+      }
+    }
+  } catch(cause) { error.value=describeApiFailure(cause,'修正说话人失败').message }
+}
 async function analyze(segment: LiveUtterance) {
   if (analyzingId.value || editingRefinements.value[segment.id] || !hasSubstantiveAnswer(segment.text)) return false
   if (blockedAnalysisReasons.value[segment.id]) return false
@@ -987,13 +1022,13 @@ onMounted(async()=>{
   if (disposed) return
   await backgroundAudio.recover().catch(() => undefined)
   if (disposed) return
-  if (sessionId.value && backgroundAudio.has(audioScope, sessionId.value)) {
+  if (!interviewReadOnly.value && sessionId.value && backgroundAudio.has(audioScope, sessionId.value)) {
     uploadsTransferred = true
     status.value = 'completed'
     await router.replace({ path: '/interviews/' + interviewId, query: { backgroundSave: '1' } })
     return
   }
-  if (sessionId.value && status.value !== 'completed') {
+  if (!interviewReadOnly.value && sessionId.value && status.value !== 'completed') {
     try {
       const restored = await restorePendingAudio(audioScope, sessionId.value)
       if (disposed) return
@@ -1002,9 +1037,9 @@ onMounted(async()=>{
       if (restored.length) retryUploads()
     } catch { localCacheWarning.value = '本地录音缓存不可用，未上传音频仅保留在当前页面，请勿刷新或关闭。' }
   }
-  void refreshMicrophoneState(false)
+  if (canStartLiveInterview.value) void refreshMicrophoneState(false)
   navigator.mediaDevices?.addEventListener?.('devicechange',onMicrophoneDeviceChange)
-  if (detail.value && !error.value && status.value !== 'completed') authorizationDialogOpen.value = true
+  if (detail.value && !error.value && canStartLiveInterview.value) authorizationDialogOpen.value = true
 })
 onUnmounted(() => {
   disposed = true
@@ -1047,14 +1082,14 @@ onUnmounted(() => {
           <div class="session-summary">
             <span class="session-state"><span class="record-dot" :class="{ active: status === 'recording' || status === 'manual' }"></span><strong>{{ statusLabel }}</strong></span>
             <span class="session-elapsed">{{ elapsed }}</span>
-            <span class="microphone-status"><span class="microphone-dot" :class="`state-${microphoneState}`"></span>麦克风：{{ microphoneStatusLabel }}</span>
-            <button class="btn btn-ghost btn-sm" type="button" :disabled="microphoneState === 'unsupported' || audioSettingsLocked" @click="refreshMicrophoneState(true)">检查麦克风</button>
+            <span v-if="canStartLiveInterview" class="microphone-status"><span class="microphone-dot" :class="`state-${microphoneState}`"></span>麦克风：{{ microphoneStatusLabel }}</span>
+            <button v-if="canStartLiveInterview" class="btn btn-ghost btn-sm" type="button" :disabled="microphoneState === 'unsupported' || audioSettingsLocked" @click="refreshMicrophoneState(true)">检查麦克风</button>
           </div>
           <div class="inline-actions">
-            <button v-if="status === 'idle' || status === 'failed'" class="btn btn-primary" type="button" @click="authorizationDialogOpen = true">开始面试</button>
-            <button v-if="!funasrAvailable && (status === 'idle' || status === 'failed') && !pendingAudioCount && !captureActive" class="btn btn-ghost" type="button" :disabled="!recordingConsent" @click="startManual">仅手动记录</button>
-            <button v-if="status === 'recording' || status === 'paused'" class="btn btn-ghost" type="button" :disabled="pausing || (status === 'paused' && !recordingConsent)" @click="togglePause">{{ status === 'paused' ? '继续' : '暂停' }}</button>
-            <button v-if="status === 'recording' || status === 'paused' || status === 'manual'" class="btn btn-ghost" type="button" @click="stop">结束面试</button>
+            <button v-if="canStartLiveInterview && (status === 'idle' || status === 'failed')" class="btn btn-primary" type="button" @click="authorizationDialogOpen = true">开始面试</button>
+            <button v-if="canStartLiveInterview && !funasrAvailable && (status === 'idle' || status === 'failed') && !pendingAudioCount && !captureActive" class="btn btn-ghost" type="button" :disabled="!recordingConsent" @click="startManual">仅手动记录</button>
+            <button v-if="canStartLiveInterview && (status === 'recording' || status === 'paused')" class="btn btn-ghost" type="button" :disabled="pausing || (status === 'paused' && !recordingConsent)" @click="togglePause">{{ status === 'paused' ? '继续' : '暂停' }}</button>
+            <button v-if="canStartLiveInterview && (status === 'recording' || status === 'paused' || status === 'manual')" class="btn btn-ghost" type="button" @click="stop">结束面试</button>
           </div>
         </template>
         <button class="btn btn-ghost" type="button" @click="router.push(`/interviews/${route.params.id}`)">返回面试详情</button>
@@ -1076,7 +1111,7 @@ onUnmounted(() => {
         <span v-if="transcriptionProgressWarning">{{ transcriptionProgressWarning }}</span>
       </div>
       <button v-if="status === 'recording' && (audioWarning || streamingWarning || streamingState !== 'ready')" class="btn btn-ghost btn-sm" type="button" @click="reconnectAudio">{{ streamingState === 'ready' ? '恢复音频' : '重新连接' }}</button>
-      <section v-if="status !== 'completed'" class="audio-capture-settings audio-settings-toolbar" aria-label="面试音频采集设置">
+      <section v-if="canStartLiveInterview" class="audio-capture-settings audio-settings-toolbar" aria-label="面试音频采集设置">
         <div class="audio-setting-row">
           <label class="audio-setting-field"><span>采集方式</span>
             <select v-model="audioMode" aria-label="音频采集方式" :disabled="audioSettingsLocked">
@@ -1121,29 +1156,29 @@ onUnmounted(() => {
         <p v-if="audioWarning" class="audio-warning" role="alert">{{ audioWarning }}</p>
         <p v-if="streamingWarning" class="audio-warning" role="alert">{{ streamingWarning }}</p>
       </section>
-      <div v-if="externalServiceWarning && status !== 'completed'" class="list-muted external-service-warning" role="note">{{ externalServiceWarning }}</div>
+      <div v-if="externalServiceWarning && !interviewReadOnly" class="list-muted external-service-warning" role="note">{{ externalServiceWarning }}</div>
       <InterviewAudioDialog v-if="audioDialogOpen" :interview-id="interviewId" :candidate="candidateName" :job="jobTitle" :pending-count="pendingAudioCount" :recording="captureActive" :initial-session-id="audioPlaybackSession" :start-ms="audioPlaybackStartMs" @close="audioDialogOpen = false" />
-      <InterviewQuestionReferenceDialog v-if="referenceGroup" :key="referenceGroup" :group="referenceGroup" :candidate="candidateName" :job="jobTitle" :questions="generatedQuestions" :round="detail.round" :engine="questionEngine" :disabled="status === 'starting' || status === 'stopping' || status === 'completed'" :messages="conversationMessages[referenceGroup]" :conversation-blocked="generatingQuestions || Object.entries(refinementLoading).some(([group, loading]) => group !== referenceGroup && loading)" :conversation-loading="refinementLoading[referenceGroup]" :conversation-error="refinementErrors[referenceGroup]" @close="closeReferenceDialog" @send="refineCurrentQuestionGroup" @cancel="cancelQuestionRefinement">
+      <InterviewQuestionReferenceDialog v-if="referenceGroup" :key="referenceGroup" :group="referenceGroup" :candidate="candidateName" :job="jobTitle" :questions="generatedQuestions" :round="detail.round" :engine="questionEngine" :disabled="interviewReadOnly || status === 'starting' || status === 'stopping'" :messages="conversationMessages[referenceGroup]" :conversation-blocked="generatingQuestions || Object.entries(refinementLoading).some(([group, loading]) => group !== referenceGroup && loading)" :conversation-loading="refinementLoading[referenceGroup]" :conversation-error="refinementErrors[referenceGroup]" @close="closeReferenceDialog" @send="refineCurrentQuestionGroup" @cancel="cancelQuestionRefinement">
         <template #toolbar>
           <div class="question-bank-toolbar" :aria-busy="generatingQuestions">
             <ApplicationResumeButton :application-id="detail.applicationId" />
-            <button class="btn btn-ghost btn-sm regenerate-question-bank" type="button" :disabled="generatingQuestions || Object.values(refinementLoading).some(Boolean) || status === 'starting' || status === 'stopping' || status === 'completed'" @click="generatedQuestions.length ? generateResumeQuestions(true) : generateResumeQuestions(false, true)">
+            <button class="btn btn-ghost btn-sm regenerate-question-bank" type="button" :disabled="interviewReadOnly || generatingQuestions || Object.values(refinementLoading).some(Boolean) || status === 'starting' || status === 'stopping'" @click="generatedQuestions.length ? generateResumeQuestions(true) : generateResumeQuestions(false, true)">
               <span v-if="generatingQuestions" class="generation-spinner" aria-hidden="true"></span>{{ generatingQuestions ? (questionGenerationGroup ? '正在生成当前表…' : '后台准备中…') : (generatedQuestions.length ? '重新生成当前表' : '重试准备面试表') }}
             </button>
             <button v-if="generatingQuestions" class="btn btn-ghost btn-sm cancel-question-generation" type="button" @click="cancelQuestionGeneration">{{ backgroundPreparation ? '停止等待' : '取消生成' }}</button>
             <p v-if="generatingQuestions" class="question-bank-feedback" role="status"><template v-if="backgroundPreparation">{{ backgroundPreparation.status === 'queued' ? '面试表已加入后台准备队列' : '正在后台准备面试表' }}，已完成 {{ backgroundPreparation.completedGroups.length }}/{{ isFinalRound ? 4 : 3 }} 组。关闭页面不会中断，准备完成后自动展示。</template><template v-else>{{ questionGenerationSlow ? '模型仍在生成，原题库保留，可取消后重试。' : (questionGenerationGroup ? '正在生成当前面试表，其他表保持不变。' : '正在读取已准备的面试表。') }}</template> 已等待 {{ questionGenerationSeconds }} 秒。</p>
             <p v-if="questionLoadError" class="question-bank-feedback generation-error" role="alert">{{ questionLoadError }}</p>
             <p v-else-if="questionGenerationNotice" class="question-bank-feedback" :class="questionGenerationWarning ? 'generation-warning' : 'generation-success'" :role="questionGenerationWarning ? 'alert' : 'status'">{{ questionGenerationNotice }}</p>
-            <p v-if="status === 'completed'" class="question-bank-feedback">面试已结束，只能浏览已保存题库，不再重新生成。</p>
+            <p v-if="interviewReadOnly" class="question-bank-feedback">{{ interviewCancelled ? '面试已取消，只能浏览已保存题库。' : '面试已结束，只能浏览已保存题库，不再重新生成。' }}</p>
           </div>
         </template>
       </InterviewQuestionReferenceDialog>
-      <main class="interview-room" :class="{ 'completed-room': status === 'completed' }">
+      <main class="interview-room" :class="{ 'completed-room': interviewReadOnly }">
         <section class="room-panel transcript-panel">
           <header><span>实时转写</span><small>{{ streamingState === 'ready' ? '流式识别中' : streamingState === 'loading' ? '正在加载识别模型' : streamingState === 'connecting' ? '正在连接流式识别' : streamingState === 'unavailable' ? '流式不可用，使用分段识别' : `${utterances.length} 轮发言` }}</small></header>
-          <div v-if="status === 'manual'" class="manual-entry"><select v-model="manualRole"><option value="candidate">候选人回答</option><option value="interviewer">面试官提问</option></select><textarea v-model="manualText" rows="3" placeholder="输入本轮发言内容" /><button class="btn btn-primary btn-sm" type="button" :disabled="!manualText.trim()" @click="addManualSegment">添加发言</button></div>
+          <div v-if="status === 'manual' && canStartLiveInterview" class="manual-entry"><select v-model="manualRole"><option value="candidate">候选人回答</option><option value="interviewer">面试官提问</option></select><textarea v-model="manualText" rows="3" placeholder="输入本轮发言内容" /><button class="btn btn-primary btn-sm" type="button" :disabled="!manualText.trim()" @click="addManualSegment">添加发言</button></div>
           <div ref="transcriptList" class="transcript-list" @scroll="trackTranscriptScroll">
-            <div v-if="!utterances.length && !streamingText" class="room-empty">暂无转写记录</div>
+            <div v-if="!utterances.length && !streamingText" class="room-empty">{{ interviewCancelled ? '面试已取消，不能创建实时面试会话。' : interviewCompleted ? '该面试已完成，暂无实时面试记录，不能重新创建实时会话。' : '暂无转写记录' }}</div>
             <article v-for="segment in utterances" :key="segment.id" class="utterance" :data-role="segment.role">
               <div class="utterance-head"><strong>{{ segment.role==='candidate'?'候选人':segment.role==='interviewer'?'面试官':'待确认' }}<span class="utterance-source">{{ segment.audioSource ? sourceLabels[segment.audioSource] : '历史记录 / 手动记录' }}</span></strong><small>{{ formatTimestamp(segment.startMs) }}–{{ formatTimestamp(segment.endMs) }} · {{ segment.final?'发言已结束':'正在继续...' }}</small></div>
               <div class="utterance-identity"><span>{{ speakerLabel(segment) }}</span><span v-if="segment.sourceIds.length > 1">已合并 {{ segment.sourceIds.length }} 段</span><span v-if="segment.role !== 'unknown' && segment.confidence < 1">角色为自动识别，可人工校正</span><span v-if="segment.overlapping" class="overlap-badge">重叠发言</span></div>
@@ -1159,15 +1194,8 @@ onUnmounted(() => {
                 </details>
               </template>
               <p v-else>{{ segment.text }}</p>
-              <details v-for="source in segment.sourceSegments.filter(row => row.transcriptComparison)" :key="source.id" class="transcript-comparison">
-                <summary>识别版本对照 · {{ formatTimestamp(source.transcriptComparison!.startMs) }}–{{ formatTimestamp(source.transcriptComparison!.endMs) }}</summary>
-                <strong>流式识别{{ source.transcriptComparison!.selectedSource === 'streaming' ? ' · 当前采用' : '' }}{{ source.transcriptComparison!.streamingComplete ? '' : ' · 未完成' }}</strong>
-                <p>{{ source.transcriptComparison!.streamingText }}</p>
-                <strong>录音分段识别{{ source.transcriptComparison!.selectedSource === 'offline' ? ' · 当前采用' : '' }}</strong>
-                <p>{{ source.transcriptComparison!.offlineText }}</p>
-              </details>
               <small v-if="segment.role === 'unknown' && segment.speakerId?.includes(':stream_')" class="stream-source">流式全文保留 · 说话人待确认</small>
-              <div class="utterance-actions"><button v-if="!segment.speakerId?.startsWith('manual_')" type="button" title="从本段开始回听整场录音" @click="openAudio(segment.sessionId, segment.startMs)">回听本段</button><button type="button" :disabled="editingRefinements[segment.id]" title="标记为面试官" @click="setRole(segment,'interviewer')">面试官</button><button type="button" :disabled="editingRefinements[segment.id]" title="标记为候选人" @click="setRole(segment,'candidate')">候选人</button><button v-if="hasSubstantiveAnswer(segment.text) && segment.final && segment.role!=='unknown' && segment.confidence>=.6" class="analyze-button" type="button" :disabled="!!analyzingId || editingRefinements[segment.id] || !!blockedAnalysisReasons[segment.id]" :aria-busy="analyzingId === segment.id" :title="blockedAnalysisReasons[segment.id] || (editingRefinements[segment.id] ? '请先保存或取消编辑' : analyzingId && analyzingId !== segment.id ? '请等待当前回答分析完成' : segment.role === 'interviewer' ? '整理面试官完整发言，不参与候选人评分' : '分析整段回答')" @click="analyze(segment)">{{ analyzingId===segment.id?'分析中...':analysisFeedback[segment.id]?'重新分析完整回答':'分析完整回答' }}</button></div>
+              <div class="utterance-actions"><button v-if="!segment.speakerId?.startsWith('manual_')" type="button" title="从本段开始回听整场录音" @click="openAudio(segment.sessionId, segment.startMs)">回听本段</button><button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id]" title="标记为面试官" @click="setRole(segment,'interviewer')">面试官</button><button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id]" title="标记为候选人" @click="setRole(segment,'candidate')">候选人</button><button v-if="hasSubstantiveAnswer(segment.text) && segment.final && segment.role!=='unknown' && segment.confidence>=.6" class="analyze-button" type="button" :disabled="!!analyzingId || editingRefinements[segment.id] || !!blockedAnalysisReasons[segment.id]" :aria-busy="analyzingId === segment.id" :title="blockedAnalysisReasons[segment.id] || (editingRefinements[segment.id] ? '请先保存或取消编辑' : analyzingId && analyzingId !== segment.id ? '请等待当前回答分析完成' : segment.role === 'interviewer' ? '整理面试官完整发言，不参与候选人评分' : '分析整段回答')" @click="analyze(segment)">{{ analyzingId===segment.id?'分析中...':analysisFeedback[segment.id]?'重新分析完整回答':'分析完整回答' }}</button></div>
               <div v-if="analyzingId === segment.id" class="answer-analysis-feedback" role="status">正在整理并分析完整回答…</div>
               <div v-else-if="segment.final && blockedAnalysisReasons[segment.id]" class="answer-analysis-feedback review" role="status">待核实：{{ blockedAnalysisReasons[segment.id] }}</div>
               <div v-else-if="analysisFeedback[segment.id] && analysisFeedback[segment.id]!.kind !== 'review'" class="answer-analysis-feedback" :class="analysisFeedback[segment.id]!.kind" :role="analysisFeedback[segment.id]!.kind === 'error' ? 'alert' : 'status'">{{ analysisFeedback[segment.id]!.message }}</div>
@@ -1178,8 +1206,8 @@ onUnmounted(() => {
                   <p>{{ source.text }}</p>
                   <div class="utterance-actions">
                     <button v-if="!source.speakerId?.startsWith('manual_')" type="button" title="回听此原始分段" @click="openAudio(source.sessionId, source.startMs)">回听分段</button>
-                    <button type="button" :disabled="editingRefinements[segment.id]" title="仅将此分段标记为面试官" @click="setRole(source, 'interviewer')">面试官</button>
-                    <button type="button" :disabled="editingRefinements[segment.id]" title="仅将此分段标记为候选人" @click="setRole(source, 'candidate')">候选人</button>
+                    <button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id]" title="仅将此分段标记为面试官" @click="setRole(source, 'interviewer')">面试官</button>
+                    <button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id]" title="仅将此分段标记为候选人" @click="setRole(source, 'candidate')">候选人</button>
                   </div>
                 </div>
               </details>
@@ -1192,7 +1220,7 @@ onUnmounted(() => {
         <LiveDialogueAnalysisPanel :interview-id="interviewId" :session-id="sessionId" :completed="status === 'completed'" :segments="segments" :analyses="candidateAnalyses" :phase-score="finalInterviewScore" :phase-formula="finalInterviewScoreFormula" />
       </main>
     </template>
-    <div v-if="authorizationDialogOpen && detail" class="overlay interview-recording-overlay" role="presentation">
+    <div v-if="authorizationDialogOpen && detail && canStartLiveInterview" class="overlay interview-recording-overlay" role="presentation">
       <section class="dialog interview-recording-dialog" role="dialog" aria-modal="true" aria-labelledby="recording-authorization-title">
         <h2 id="recording-authorization-title">{{ sessionId ? '继续面试录音' : '开始面试录音' }}</h2>
         <p class="recording-dialog-intro">{{ candidateName }} · {{ jobTitle }}</p>

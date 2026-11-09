@@ -49,7 +49,7 @@ describe('candidate detail application context', () => {
     expect(scoreText()).toContain('91')
   })
   it('allows recruiters to edit and persist a candidate name without starting analysis', async () => {
-    authSession.user = { id: 'hr', name: 'HR', email: 'hr@example.test', role: 'recruiter', departmentId: '' }
+    authSession.user = { id: 'hr', name: '企业用户', email: 'hr@example.test', role: 'recruiter', departmentId: '', workspaceId: 'workspace-1' }
     vi.mocked(updateCandidate).mockResolvedValue({ ...fixture(), fullName: '人工更正姓名' })
     await mount()
     root!.querySelector<HTMLButtonElement>('[aria-label="修改候选人姓名"]')!.click(); await flush()
@@ -62,7 +62,7 @@ describe('candidate detail application context', () => {
     expect(reanalyzeResume).not.toHaveBeenCalled()
   })
   it('keeps failed name edits editable and allows cancelling without changing the saved name', async () => {
-    authSession.user = { id: 'hr', name: 'HR', email: 'hr@example.test', role: 'admin', departmentId: '' }
+    authSession.user = { id: 'hr', name: '系统管理员', email: 'hr@example.test', role: 'admin', departmentId: '', workspaceId: 'workspace-1' }
     vi.mocked(updateCandidate).mockRejectedValue(new Error('保存失败'))
     await mount()
     root!.querySelector<HTMLButtonElement>('[aria-label="修改候选人姓名"]')!.click(); await flush()

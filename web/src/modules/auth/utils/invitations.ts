@@ -1,7 +1,7 @@
 export const businessRoleLabels: Record<string, string> = {
-  recruiter: '招聘专员', hiring_manager: '部门负责人', approver: '录用审批人', interviewer: '面试官', admin: '系统管理员', hr_admin: 'HR 管理员',
+  recruiter: '企业用户', hiring_manager: '企业用户', approver: '企业用户', interviewer: '企业用户', hr_admin: '企业用户', admin: '企业用户',
 }
-export const membershipLabels: Record<string, string> = { owner: '企业所有者', admin: '企业管理员', member: '普通成员' }
+export const membershipLabels: Record<string, string> = { owner: '企业所有者', admin: '空间管理兼容身份', member: '普通用户' }
 export function extractInvitationCode(input: string): string {
   const trimmed = input.trim()
   let code = trimmed

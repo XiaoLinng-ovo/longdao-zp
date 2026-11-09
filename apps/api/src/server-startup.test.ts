@@ -11,6 +11,7 @@ function runProbe(body: string): { queries: number; closedPools: number } {
     let queries = 0;
     let closedPools = 0;
     Pool.prototype.query = async () => { queries++; return {rows: []}; };
+    Pool.prototype.connect = async () => ({query: Pool.prototype.query, release() {}});
     Pool.prototype.end = async () => { closedPools++; };
     const {startServer, createHttpServer} = await import(${JSON.stringify(new URL('./server.js', import.meta.url).href)});
     const {loadConfig} = await import(${JSON.stringify(new URL('./config.js', import.meta.url).href)});
@@ -19,7 +20,7 @@ function runProbe(body: string): { queries: number; closedPools: number } {
   `
   return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
     encoding: 'utf8', timeout: 10000,
-    env: { ...process.env, NODE_ENV: 'development', QUESTION_SHEET_POLL: 'on', QUESTION_SHEET_POLL_MS: '60000', DINGTALK_APPROVAL_RECONCILE: 'off' },
+    env: { ...process.env, NODE_ENV: 'development', QUESTION_SHEET_POLL: 'on', QUESTION_SHEET_POLL_MS: '60000', TENANT_SCHEMA_ROUTING: 'off', INTERVIEW_QUESTION_PREPARATION_POLL: 'off', INTERVIEW_AUDIO_POLL: 'off', INTERVIEW_TRANSCRIPT_POSTPROCESS_POLL: 'off', INTERVIEW_SUMMARY_POLL: 'off' },
   })) as { queries: number; closedPools: number }
 }
 
@@ -42,7 +43,7 @@ it('API 成功监听后才启动面试表轮询，关闭后不遗留轮询进程
     await new Promise(resolve => server.close(resolve));
   `)
   assert.ok(result.queries > 0)
-  assert.equal(result.closedPools, 1)
+  assert.equal(result.closedPools, 2)
 })
 
 it('closing a standalone HTTP server releases the resume upload admission pool', () => {

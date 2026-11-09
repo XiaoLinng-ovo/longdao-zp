@@ -1,20 +1,30 @@
 import { isPlatformManagementPath } from '../platform/access.js'
+import { isSystemAdministrationPath } from './system-administrator.js'
 import type { Middleware } from '../http.js'
 import { HttpError } from '../http.js'
+import { organizationSchemaName, runWithTenantContext } from '../db/tenant-context.js'
+
+export interface WorkspaceSchemaRegistry {
+  query<T = any>(text: string, values?: unknown[]): Promise<{ rows: T[] }>
+}
 
 // These APIs derive their enterprise from the authenticated session, not from client input.
 export function isWorkspaceScopedPath(path: string): boolean {
-  if (isPlatformManagementPath(path)) return false
+  if (isPlatformManagementPath(path) || isSystemAdministrationPath(path)) return false
   return [
     'departments', 'recruitment-requests', 'jobs', 'candidates', 'candidate-tags',
     'resumes', 'resume-import-batches', 'analysis-tasks', 'analysis-results', 'applications', 'interviews',
     'interviewer-options', 'interview-live-sessions', 'interview-live-segments',
-    'offers', 'onboarding', 'dashboard', 'reports', 'workflow-events', 'admin', 'ai-skills',
+    'offers', 'offer-templates', 'onboarding', 'dashboard', 'reports', 'workflow-events', 'admin', 'ai-skills',
     'trial-usage',
   ].some((name) => path === `/api/v1/${name}` || path.startsWith(`/api/v1/${name}/`))
 }
 
-export function createWorkspaceContextMiddleware(requireWorkspace = process.env.NODE_ENV !== 'test'): Middleware {
+export function createWorkspaceContextMiddleware(
+  requireWorkspace = process.env.NODE_ENV !== 'test',
+  schemas?: WorkspaceSchemaRegistry,
+  routeSchemas = process.env.TENANT_SCHEMA_ROUTING === 'on',
+): Middleware {
   return async (context, next) => {
     if (context.auth && context.url.pathname.startsWith('/api/v1/')) {
       context.res.setHeader('cache-control', 'private, no-store')
@@ -35,6 +45,16 @@ export function createWorkspaceContextMiddleware(requireWorkspace = process.env.
     if (expected !== undefined && (Array.isArray(expected) || expected !== workspaceId)) {
       throw new HttpError(409, 'WORKSPACE_CONTEXT_CHANGED', '当前企业已在其他页面切换，请刷新页面后再操作')
     }
-    await next()
+    if (!routeSchemas || !workspaceId) return next()
+    if (!schemas) throw new HttpError(503, 'WORKSPACE_SCHEMA_UNAVAILABLE', '企业数据暂不可用，请联系平台运营人员')
+    const result = await schemas.query<{ schema_name: string; status: string }>(
+      'SELECT schema_name,status FROM public.organization_schemas WHERE organization_id=$1::uuid',
+      [workspaceId],
+    )
+    const schema = result.rows[0]
+    if (!schema || schema.status !== 'ready' || schema.schema_name !== organizationSchemaName(workspaceId)) {
+      throw new HttpError(503, 'WORKSPACE_SCHEMA_UNAVAILABLE', '企业数据尚未初始化，请联系平台运营人员')
+    }
+    await runWithTenantContext({ organizationId: workspaceId, schemaName: schema.schema_name }, next)
   }
 }

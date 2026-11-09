@@ -5,8 +5,9 @@ import { createAdminUser, listAccountOrganizations, type AdminAccountOrganizatio
 
 const props = defineProps<{ roles: AdminRole[]; departments: AdminDepartment[] }>()
 const emit = defineEmits<{ created: [user: AdminUser] }>()
-const allowedRoles = new Set(['recruiter', 'hiring_manager', 'approver', 'interviewer', 'hr_admin', 'admin'])
-const businessRoles = computed(() => props.roles.filter(role => allowedRoles.has(role.code)))
+const accountTypes = computed(() => props.roles
+  .filter(role => role.code === 'recruiter' || role.code === 'admin')
+  .map(role => ({ ...role, name: role.code === 'admin' ? '系统管理员' : '企业用户' })))
 const activeDepartments = computed(() => props.departments.filter(department => department.isActive))
 const organizations = ref<AdminAccountOrganization[]>([])
 const loading = ref(true)
@@ -42,8 +43,8 @@ async function submit() {
   error.value = ''
   if (!organizations.value.some(item => item.id === draft.organizationId)
     || !activeDepartments.value.some(item => item.code === draft.departmentCode)
-    || !businessRoles.value.some(item => item.code === draft.role)) {
-    error.value = '请选择有效的企业、部门和业务角色'
+    || !accountTypes.value.some(item => item.code === draft.role)) {
+    error.value = '请选择有效的企业、部门和账号类型'
     return
   }
   saving.value = true
@@ -104,7 +105,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <div><dt>姓名</dt><dd>{{ result.user.displayName }}</dd></div>
         <div><dt>企业</dt><dd>{{ organizations.find(item => item.id === draft.organizationId)?.name }}</dd></div>
         <div><dt>部门</dt><dd>{{ activeDepartments.find(item => item.code === draft.departmentCode)?.name }}</dd></div>
-        <div><dt>业务角色</dt><dd>{{ businessRoles.find(item => item.code === draft.role)?.name }}</dd></div>
+        <div><dt>账号类型</dt><dd>{{ accountTypes.find(item => item.code === draft.role)?.name }}</dd></div>
         <div><dt>登录账号</dt><dd data-testid="created-email">{{ result.user.email }}</dd></div>
         <div><dt>初始密码</dt><dd class="account-password" data-testid="created-password">{{ result.initialPassword }}</dd></div>
       </dl>
@@ -122,7 +123,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
           <label for="account-name">姓名<input id="account-name" v-model="draft.displayName" maxlength="80" required /></label>
           <label for="account-organization">所属企业<select id="account-organization" v-model="draft.organizationId" required><option value="" disabled>请选择企业</option><option v-for="item in organizations" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
           <label for="account-department">所属部门<select id="account-department" v-model="draft.departmentCode" required><option value="" disabled>请选择部门</option><option v-for="item in activeDepartments" :key="item.id" :value="item.code">{{ item.name }}</option></select></label>
-          <label for="account-role">业务角色<select id="account-role" v-model="draft.role" required><option v-for="item in businessRoles" :key="item.id" :value="item.code">{{ item.name }}</option></select></label>
+          <label for="account-role">账号类型<select id="account-role" v-model="draft.role" required><option v-for="item in accountTypes" :key="item.id" :value="item.code">{{ item.name }}</option></select></label>
           <div class="password-settings">
             <span>初始密码</span>
             <div class="password-modes"><label><input v-model="passwordMode" type="radio" value="automatic" name="password-mode" @change="draft.password = ''; showPassword = false" /> 自动生成</label><label><input v-model="passwordMode" type="radio" value="custom" name="password-mode" /> 自定义</label></div>
@@ -134,7 +135,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         </div>
         <p v-if="!organizations.length" class="account-empty">暂无服务可用的企业</p>
         <p v-if="!activeDepartments.length" class="account-empty">暂无启用部门</p>
-        <div class="account-actions"><button class="btn btn-primary" type="submit" :disabled="!organizations.length || !activeDepartments.length || !businessRoles.length">{{ saving ? '创建中...' : '创建账号' }}</button></div>
+        <div class="account-actions"><button class="btn btn-primary" type="submit" :disabled="!organizations.length || !activeDepartments.length || !accountTypes.length">{{ saving ? '创建中...' : '创建账号' }}</button></div>
       </fieldset>
     </form>
   </section>

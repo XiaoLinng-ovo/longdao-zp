@@ -8,9 +8,8 @@ const actorId = '00000000-0000-4000-8000-000000000001'
 const targetUserId = '00000000-0000-4000-8000-000000000002'
 const targetOrganizationId = '00000000-0000-4000-8000-000000000003'
 const sourceOrganizationId = '00000000-0000-4000-8000-000000000004'
-
 function serviceFixture(options: {
-  role?: string
+  role?: 'admin' | 'viewer'
   target?: Record<string, unknown> | null
   sourceAvailable?: boolean
 } = {}) {
@@ -18,7 +17,6 @@ function serviceFixture(options: {
   const client = {
     async query(sql: string, values: unknown[] = []) {
       calls.push({ sql, values })
-      if (sql.startsWith('SELECT p.role')) return { rows: [{ role: options.role ?? 'admin' }] }
       if (sql.includes('to_jsonb(o) AS settings')) return { rows: options.target === null ? [] : [{
         id: targetOrganizationId,
         settings: options.target ?? { use_platform_ai: false, platform_ai_source_organization_id: null },
@@ -31,7 +29,7 @@ function serviceFixture(options: {
   const pool = { connect: async () => client } as unknown as Pool
   const service = new PlatformUsersService(pool)
   Object.defineProperty(service, 'access', { value: { requireAccess: async (_id: string, write: boolean) => {
-    if (write && options.role !== undefined && options.role !== 'admin') {
+    if (options.role === 'viewer' && write) {
       const error = new Error('platform write denied') as Error & { status: number; code: string }
       error.status = 403
       error.code = 'PLATFORM_PERMISSION_REQUIRED'
@@ -55,6 +53,63 @@ test('platform user filters validate pagination, status and role', () => {
   assert.throws(() => validateUserListQuery(new URLSearchParams('page=0')), { code: 'VALIDATION_ERROR' })
   assert.throws(() => validateUserListQuery(new URLSearchParams('status=deleted')), { code: 'VALIDATION_ERROR' })
   assert.throws(() => validateUserListQuery(new URLSearchParams('platformRole=owner')), { code: 'VALIDATION_ERROR' })
+})
+
+test('platform admins can filter the user directory by the existing operator roles', async () => {
+  async function listAs(role: 'admin' | 'viewer') {
+    const calls: Array<{ sql: string; values: unknown[] }> = []
+    const pool = {
+      async query(sql: string, values: unknown[] = []) {
+        calls.push({ sql, values })
+        if (sql.startsWith('SELECT count(*)')) return { rows: [{ total: 0 }] }
+        if (sql.includes('FROM users u')) return { rows: [] }
+        throw new Error(`Unexpected query: ${sql}`)
+      },
+    } as unknown as Pool
+    const service = new PlatformUsersService(pool)
+    Object.defineProperty(service, 'access', { value: { requireAccess: async () => role } })
+    await service.list(actorId, new URLSearchParams('platformRole=admin'))
+    return calls
+  }
+
+  const adminCalls = await listAs('admin')
+  assert.equal(adminCalls.length, 2)
+  assert.match(adminCalls[0]!.sql, /AND \(\$5::text IS NULL OR \(\$5='none' AND p\.role IS NULL\) OR p\.role=\$4::text\)/)
+  assert.equal(adminCalls[0]!.values[4], 'admin')
+  assert.equal(adminCalls[1]!.values[4], 'admin')
+  assert.match(adminCalls[1]!.sql, /LIMIT \$6 OFFSET \$7/)
+  assert.equal((await listAs('viewer')).length, 2)
+})
+
+test('platform admins can read platform operator accounts by id', async () => {
+  async function readAs(role: 'admin' | 'viewer') {
+    const calls: string[] = []
+    const pool = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('SELECT u.*,p.role AS platform_role FROM users u')) return { rows: [{
+          id: targetUserId,
+          display_name: '平台管理员',
+          email: 'platform-owner@example.test',
+          phone: null,
+          is_active: true,
+          platform_role: 'admin',
+          registration_source: 'legacy',
+          created_at: '2026-01-01T00:00:00.000Z',
+          last_login_at: null,
+        }] }
+        return { rows: [] }
+      },
+    } as unknown as Pool
+    const service = new PlatformUsersService(pool)
+    Object.defineProperty(service, 'access', { value: { requireAccess: async () => role } })
+    return { service, calls }
+  }
+
+  const admin = await readAs('admin')
+  const detail = await admin.service.detail(actorId, targetUserId)
+  assert.equal(detail.user.platformRole, 'admin')
+  assert.equal(admin.calls.length, 5)
 })
 
 test('platform user mutations require a reason and supported fields', () => {
@@ -125,6 +180,16 @@ test('platform viewers cannot change enterprise AI access', async () => {
   assert.equal(calls.some(call => call.sql === 'ROLLBACK'), true)
 })
 
+test('platform admins retain platform write access', async () => {
+  const { service, calls } = serviceFixture({ role: 'admin' })
+  await service.updateWorkspaceAiAccess(actorId, targetUserId, targetOrganizationId, {
+    usePlatformAi: false,
+    reason: '验证平台管理员写权限',
+  })
+  assert.equal(calls.some(call => call.sql.startsWith('UPDATE organizations')), true)
+  assert.equal(calls.some(call => call.sql === 'COMMIT'), true)
+})
+
 test('shared access requires an active, configured source managed by the acting account', async () => {
   const { service, calls } = serviceFixture({ sourceAvailable: false })
   await assert.rejects(service.updateWorkspaceAiAccess(actorId, targetUserId, targetOrganizationId, {
@@ -142,4 +207,71 @@ test('a workspace switch cannot target an enterprise the account does not belong
     reason: '验证企业成员关系',
   }), { code: 'NOT_FOUND', status: 404 })
   assert.equal(calls.some(call => call.sql.startsWith('UPDATE organizations')), false)
+})
+
+test('platform admins can reset the selected trial enterprise AI generation quota and retain an audit trail', async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = []
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values })
+      if (sql.includes('SELECT u.id AS user_id')) return { rows: [{
+        user_id: targetUserId,
+        organization_id: targetOrganizationId,
+        organization_name: '龙道科技',
+        service_status: 'trial',
+        generations: 3,
+      }] }
+      if (sql.startsWith('UPDATE organization_trial_ai_usage')) return { rows: [{ generations: 0 }] }
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const pool = { connect: async () => client } as unknown as Pool
+  const service = new PlatformUsersService(pool)
+  Object.defineProperty(service, 'access', { value: { requireAccess: async () => 'admin' } })
+
+  const result = await service.resetAiGenerationQuota(actorId, targetUserId, targetOrganizationId, { reason: '修复误扣额度' }, 'request-quota-1')
+
+  assert.deepEqual(result, { organizationId: targetOrganizationId, organizationName: '龙道科技', previousGenerations: 3, generations: 0 })
+  const reset = calls.find(call => call.sql.startsWith('UPDATE organization_trial_ai_usage'))
+  assert.deepEqual(reset?.values, [targetOrganizationId])
+  const audit = calls.find(call => call.sql.includes('platform.user.ai_generation_quota_reset'))
+  assert.deepEqual(audit?.values.slice(0, 3), [actorId, targetOrganizationId, 'request-quota-1'])
+  assert.deepEqual(JSON.parse(String(audit?.values[3])), {
+    targetUserId,
+    organizationId: targetOrganizationId,
+    organizationName: '龙道科技',
+    reason: '修复误扣额度',
+    before: { generations: 3 },
+    after: { generations: 0 },
+  })
+  assert.equal(calls.some(call => call.sql === 'COMMIT'), true)
+})
+
+test('AI generation quota reset rejects non-trial enterprises', async () => {
+  const calls: string[] = []
+  const client = {
+    async query(sql: string) {
+      calls.push(sql)
+      if (sql.includes('SELECT u.id AS user_id')) return { rows: [{
+        user_id: targetUserId,
+        organization_id: targetOrganizationId,
+        organization_name: '正式企业',
+        service_status: 'enabled',
+        generations: 3,
+      }] }
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const pool = { connect: async () => client } as unknown as Pool
+  const service = new PlatformUsersService(pool)
+  Object.defineProperty(service, 'access', { value: { requireAccess: async () => 'admin' } })
+
+  await assert.rejects(
+    service.resetAiGenerationQuota(actorId, targetUserId, targetOrganizationId, { reason: '不应重置正式企业额度' }),
+    { code: 'AI_QUOTA_RESET_NOT_APPLICABLE', status: 409 },
+  )
+  assert.equal(calls.some(sql => sql.startsWith('UPDATE organization_trial_ai_usage')), false)
+  assert.equal(calls.includes('ROLLBACK'), true)
 })

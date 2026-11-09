@@ -25,7 +25,7 @@ export interface ApiInterview {
   meetingUrl?: string
   participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required: boolean }>
   feedbackStatus: 'draft' | 'submitted' | 'locked' | 'pending'
-  outcome?: 'continue' | 'offer' | 'reject' | null
+  outcome?: 'continue' | 'offer' | 'reject' | 'cancelled' | null
   aiScore?: number | null
   aiScoreStatus?: string
   application: { id: string; code: string; candidateId: string; jobId: string; status: string }
@@ -70,11 +70,15 @@ export interface InterviewView {
   id: string
   entityId: string
   stage?: 'initial' | 'final'
+  type?: InterviewType
+  title?: string
   candidate: string
   job: string
   round: string
   scheduledAt: string
   scheduledStartAt?: string
+  location?: string
+  meetingUrl?: string
   interviewers: string[]
   interviewerIds: string[]
   interviewerOptions: InterviewerParticipantOption[]
@@ -120,11 +124,15 @@ function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: M
     id: row.code || row.id,
     entityId: row.id,
     stage: row.stage ?? (row.round >= 2 ? 'final' : 'initial'),
+    type: row.type,
+    title: row.title,
     candidate: candidates.get(app.candidateId) || app.candidateId,
     job: jobs.get(app.jobId) || app.jobId,
     round: `${row.round} 轮`,
     scheduledAt: row.scheduledStartAt ? new Date(row.scheduledStartAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '待安排',
     scheduledStartAt: row.scheduledStartAt,
+    location: row.location,
+    meetingUrl: row.meetingUrl,
     interviewers: row.participants.map((p) => p.name || p.userId),
     interviewerIds: interviewerOptions.map((participant) => participant.id),
     interviewerOptions,
@@ -224,12 +232,16 @@ export async function lockFeedback(id: string, interviewerId: string): Promise<u
   return (await apiClient.postJson(`/interviews/${id}/lock-feedback`, { interviewerId })).data
 }
 
-export async function concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject'): Promise<unknown> {
+export async function concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled'): Promise<unknown> {
   return (await apiClient.postJson(`/interviews/${id}/conclude`, { outcome })).data
 }
 
-export async function completeInterview(id: string, outcome: 'continue' | 'offer' | 'reject'): Promise<unknown> {
+export async function completeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled'): Promise<unknown> {
   return (await apiClient.postJson('/interviews/' + encodeURIComponent(id) + '/complete', { outcome })).data
+}
+
+export async function correctInterviewConclusion(id: string, outcome: NonNullable<ApiInterview['outcome']>, reason: string): Promise<unknown> {
+  return (await apiClient.postJson(`/interviews/${encodeURIComponent(id)}/correct-conclusion`, { outcome, reason })).data
 }
 
 export async function deleteInterview(id: string): Promise<void> {

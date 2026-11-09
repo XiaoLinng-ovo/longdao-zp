@@ -1,17 +1,13 @@
 import { apiClient } from '../../../shared/api'
+import type { OfferTemplateFields } from '../utils/templateFields'
 
 export type OfferStatus = 'draft' | 'pending_approval' | 'approved' | 'sent' | 'accepted' | 'declined' | 'cancelled' | 'expired'
-export type OfferAction = 'submit-approval' | 'approve' | 'reject' | 'send' | 'accept' | 'decline' | 'expire' | 'cancel' | 'archive-onboarding'
-export type OnboardingStatus = 'pending' | 'scheduled' | 'completed' | 'cancelled'
+export type OfferAction = 'send' | 'resend' | 'accept' | 'decline' | 'expire' | 'cancel' | 'archive-onboarding'
+export type OnboardingStatus = 'pending' | 'preparing' | 'scheduled' | 'completed' | 'no_show' | 'cancelled'
 
 export interface MoneyAmount { amount: number; currency: string }
-
-export interface OfferApproval {
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
-  approver?: string
-  comment?: string
-  actedAt?: string
-}
+export interface OfferEmailAttachment { filename: string; mimeType: 'application/pdf'; content: string }
+export interface SendOfferEmailInput { to?: string; subject: string; html?: string; markdown?: string; attachment?: OfferEmailAttachment }
 
 export interface ApiOfferVersion {
   id: string
@@ -20,8 +16,13 @@ export interface ApiOfferVersion {
   departmentId: string
   employmentType: string
   startDate?: string
-  compensation: { baseSalary: MoneyAmount; bonus?: MoneyAmount; equity?: string }
+  reportingLocation?: string
+  invoiceTitle?: string
+  taxNumber?: string
+  templateFields?: OfferTemplateFields
+  compensation: { baseSalary: MoneyAmount; probationSalary?: MoneyAmount; bonus?: MoneyAmount; equity?: string }
   benefits: string[]
+  materials: string[]
   content: string
   createdAt: string
 }
@@ -32,7 +33,6 @@ export interface ApiOffer {
   applicationId: string
   status: OfferStatus
   currentVersionId?: string
-  approval: OfferApproval
   sentAt?: string
   respondedAt?: string
   expiresAt?: string
@@ -40,6 +40,26 @@ export interface ApiOffer {
   createdAt: string
   updatedAt: string
   versions?: ApiOfferVersion[]
+  onboarding?: { status: OnboardingStatus }
+}
+
+export interface ApiOfferTemplate {
+  id: string
+  name: string
+  filename: string
+  content: string
+  isActive: boolean
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OfferTemplateInput {
+  name: string
+  filename: string
+  content: string
+  isActive?: boolean
+  isDefault?: boolean
 }
 
 export interface ApiApplication { id: string; code: string; candidateId: string; jobId: string; status: string; candidateName?: string; jobTitle?: string }
@@ -54,10 +74,16 @@ export interface CreateOfferInput {
   departmentId: string
   employmentType: string
   startDate?: string
+  reportingLocation?: string
+  invoiceTitle?: string
+  taxNumber?: string
+  templateFields?: OfferTemplateFields
   baseSalary: MoneyAmount
+  probationSalary?: MoneyAmount
   bonus?: MoneyAmount
   equity?: string
   benefits?: string[]
+  materials?: string[]
   content: string
   expiresAt?: string
 }
@@ -71,8 +97,6 @@ export interface OfferRow {
   candidate: string
   job: string
   status: OfferStatus
-  approvalStatus: OfferApproval['status']
-  approver: string
   sentAt?: string
   respondedAt?: string
   onboardingStatus?: OnboardingStatus
@@ -86,8 +110,8 @@ export interface OfferDetail {
 
 export const OFFER_STATUS_LABEL: Record<OfferStatus, string> = {
   draft: '草稿',
-  pending_approval: '待审批',
-  approved: '已审批',
+  pending_approval: '待发送',
+  approved: '待发送',
   sent: '已发送',
   accepted: '已接受',
   declined: '已拒绝',
@@ -96,15 +120,26 @@ export const OFFER_STATUS_LABEL: Record<OfferStatus, string> = {
 }
 
 export const OFFER_ACTION_LABEL: Record<OfferAction, string> = {
-  'submit-approval': '提交审批',
-  approve: '审批通过',
-  reject: '审批驳回',
   send: '发送 Offer',
+  resend: '重新发送',
   accept: '候选人接受',
   decline: '候选人拒绝',
   expire: '标记过期',
   cancel: '取消',
   'archive-onboarding': '入职归档',
+}
+
+export function offerActionsFor(status: OfferStatus, onboardingStatus?: OnboardingStatus): OfferAction[] {
+  switch (status) {
+    case 'draft':
+    case 'pending_approval':
+    case 'approved': return ['send', 'cancel']
+    case 'sent': return ['resend', 'accept', 'decline', 'expire', 'cancel']
+    case 'accepted': return onboardingStatus ? [] : ['archive-onboarding']
+    case 'declined':
+    case 'expired': return []
+    case 'cancelled': return ['resend']
+  }
 }
 
 function candidateLabel(candidate: ApiCandidateLookup | undefined): string {
@@ -129,8 +164,6 @@ function toRow(row: ApiOffer, applicationMap: Map<string, ApiApplication>, candi
     candidate: candidateLabel(candidateMap.get(application?.candidateId ?? '')),
     job: jobLabel(jobMap.get(application?.jobId ?? ''), application?.jobId ?? ''),
     status: row.status,
-    approvalStatus: row.approval?.status ?? 'pending',
-    approver: row.approval?.approver ?? '待审批',
     ...(row.sentAt ? { sentAt: row.sentAt } : {}),
     ...(row.respondedAt ? { respondedAt: row.respondedAt } : {}),
     ...(onboarding ? { onboardingStatus: onboarding.status } : {}),
@@ -175,8 +208,32 @@ export async function createOffer(input: CreateOfferInput): Promise<ApiOffer> {
   return (await apiClient.postJson<ApiOffer>('/offers', input)).data
 }
 
+export async function listOfferTemplates(): Promise<ApiOfferTemplate[]> {
+  return (await apiClient.getJson<ApiOfferTemplate[]>('/offer-templates')).data
+}
+
+export async function createOfferTemplate(input: OfferTemplateInput): Promise<ApiOfferTemplate> {
+  return (await apiClient.postJson<ApiOfferTemplate>('/offer-templates', input)).data
+}
+
+export async function updateOfferTemplate(id: string, input: Partial<OfferTemplateInput>): Promise<ApiOfferTemplate> {
+  return (await apiClient.patchJson<ApiOfferTemplate>(`/offer-templates/${encodeURIComponent(id)}`, input)).data
+}
+
+export async function deleteOfferTemplate(id: string): Promise<void> {
+  await apiClient.deleteJson(`/offer-templates/${encodeURIComponent(id)}`)
+}
+
+export function renderOfferTemplate(content: string, values: Record<string, string | number | undefined>): string {
+  return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/gu, (_, name: string) => String(values[name.trim()] ?? ''))
+}
+
 export async function offerAction(id: string, action: OfferAction, reason?: string): Promise<ApiOffer> {
   return (await apiClient.postJson<ApiOffer>(`/offers/${id}/${action}`, reason ? { reason } : {})).data
+}
+
+export async function sendOfferEmail(id: string, input: SendOfferEmailInput): Promise<ApiOffer> {
+  return (await apiClient.postJson<ApiOffer>(`/offers/${id}/send-email`, input)).data
 }
 
 export async function updateOffer(id: string, input: Partial<CreateOfferInput>): Promise<ApiOffer> {

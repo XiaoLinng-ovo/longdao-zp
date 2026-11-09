@@ -119,7 +119,11 @@ export interface ApiCandidateDetail {
 function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
   const application = row.applications[0]
   if (row.applications.length > 1) {
-    const applicationRows = row.applications.map((application): Candidate => ({
+    // 接口返回顺序不能作为“最新申请”的依据（仓储可能按申请创建时间返回）。
+    // 主行必须使用最近更新的申请，否则候选人的更新时间会被旧申请覆盖。
+    const applicationRows = [...row.applications]
+      .sort((left, right) => (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0))
+      .map((application): Candidate => ({
       id: row.code || row.id, entityId: row.id, name: row.fullName, email: row.email, phone: row.phone,
       applicationId: application.id, rawApplicationStatus: application.status, resumeReview: application.resumeReview, interviewProgress: application.interviewProgress,
       job: jobs.get(application.jobId) || application.jobId,
@@ -132,7 +136,7 @@ function toViewModel(row: ApiCandidate, jobs: Map<string, string>): Candidate {
       source: application.source || row.source || '未标注', company: row.company, skills: row.skills, tags: row.tags,
       updatedAt: (application.updatedAt || row.updatedAt).slice(0, 10),
       updatedAtTimestamp: application.updatedAt || row.updatedAt,
-    }))
+      }))
     return { ...applicationRows[0], applicationRows }
   }
   // Candidate score is the latest analysis; application may still carry an older result.
@@ -255,6 +259,13 @@ export async function uploadResume(input: { candidateId: string; applicationId?:
 
 export type ApiResumeImportBatchStatus = 'uploading' | 'completed' | 'cancelled'
 export type ApiResumeImportItemStatus = 'pending_upload' | 'uploading' | 'queued' | 'failed' | 'cancelled'
+export type ApiResumeImportBatchPhase =
+  | 'uploading'
+  | 'waiting_analysis'
+  | 'analyzing'
+  | 'completed'
+  | 'completed_with_issues'
+  | 'cancelled'
 
 export interface ApiResumeImportItem {
   id: string
@@ -280,12 +291,14 @@ export interface ApiResumeImportBatch {
   id: string
   jobId: string
   status: ApiResumeImportBatchStatus
+  phase?: ApiResumeImportBatchPhase
   items: ApiResumeImportItem[]
   counts: {
     total: number
     pendingUpload: number
     uploading: number
     uploaded: number
+    queued?: number
     analyzing: number
     completed: number
     failed: number

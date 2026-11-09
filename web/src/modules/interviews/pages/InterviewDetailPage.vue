@@ -12,10 +12,9 @@ import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { stageOfRound } from '../api/question-sheets'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import {
-  concludeInterview,
+  completeInterview,
+  correctInterviewConclusion,
   getInterview,
-  lockFeedback,
-  submitFeedback,
   updateInterviewSchedule,
   INTERVIEW_TYPE_LABEL,
   PARTICIPANT_ROLE_LABEL,
@@ -95,25 +94,24 @@ async function saveSchedule() {
   }
 }
 
-const showFeedback = ref(false)
-const feedbackForm = ref({
-  interviewerId: '',
-  overallScore: 80,
-  recommendation: 'yes' as FeedbackRecommendation,
-  strengths: '',
-  concerns: '',
-  notes: '',
-})
-
-const showConclude = ref(false)
-const concludeError = ref('')
+const showComplete = ref(false)
+const completeError = ref('')
 const showSheets = ref(false)
 const showSummary = ref(false)
-const concludeOutcome = ref<'continue' | 'offer' | 'reject'>('continue')
+const completeOutcome = ref<'continue' | 'offer' | 'reject' | 'cancelled'>('continue')
+const showCorrectConclusion = ref(false)
+const correctingConclusion = ref(false)
+const correctionError = ref('')
+const correctionOutcome = ref<'continue' | 'offer' | 'reject' | 'cancelled'>('continue')
+const correctionReason = ref('')
 const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
-const recommendations = computed(() => Object.entries(RECOMMENDATION_LABEL).map(([value, label]) => ({ value, label })))
-const interviewerOptions = computed(() => detail.value?.participants.filter((participant) => (participant.role ?? 'interviewer') === 'interviewer') ?? [])
+const completeFinal = computed(() => detail.value?.stage === 'final' || (detail.value?.round ?? 0) >= 2)
+const completeAiScore = computed(() => {
+  const score = detail.value?.aiScore
+  if (score !== null && score !== undefined && Number.isFinite(score)) return score.toFixed(1)
+  return ['pending', 'generating'].includes(detail.value?.aiScoreStatus ?? '') ? '分析中' : '暂无评分'
+})
 const scheduleText = computed(() => {
   if (!detail.value) return ''
   const start = formatDate(detail.value.scheduledStartAt)
@@ -175,81 +173,62 @@ function recommendationLabel(value?: FeedbackRecommendation) {
   return value ? RECOMMENDATION_LABEL[value] : '未填写'
 }
 
-function openFeedback() {
-  if (!detail.value) return
-  clearFlags()
-  feedbackForm.value = {
-    interviewerId: detail.value.participants.find((p) => p.role === 'interviewer')?.userId || detail.value.participants[0]?.userId || '',
-    overallScore: 80,
-    recommendation: 'yes',
-    strengths: '',
-    concerns: '',
-    notes: '',
-  }
-  showFeedback.value = true
-}
-
-function splitList(text: string): string[] {
-  return text.split(/[，,、\n]/).map((item) => item.trim()).filter(Boolean)
-}
-
-async function submitFeedbackForm() {
+function openComplete() {
   if (!detail.value || acting.value) return
-  const form = feedbackForm.value
-  if (!form.interviewerId.trim()) { error.value = '请选择面试官'; return }
-  const score = Number(form.overallScore)
-  if (!Number.isFinite(score) || score < 0 || score > 100) { error.value = '综合评分需在 0-100 之间'; return }
-
-  acting.value = true
   clearFlags()
-  const id = detail.value.id
+  completeError.value = ''
+  completeOutcome.value = completeFinal.value ? 'offer' : 'continue'
+  showComplete.value = true
+}
+
+const conclusionLabel = (outcome?: ApiInterviewDetail['outcome']) => outcome === 'continue' ? '进入下一轮'
+  : outcome === 'offer' ? '通过，进入 Offer' : outcome === 'reject' ? '未通过' : outcome === 'cancelled' ? '取消面试' : '未记录'
+
+function openConclusionCorrection() {
+  if (!detail.value?.outcome || correctingConclusion.value) return
+  correctionOutcome.value = detail.value.outcome
+  correctionReason.value = ''
+  correctionError.value = ''
+  showCorrectConclusion.value = true
+}
+
+async function submitConclusionCorrection() {
+  if (!detail.value || correctingConclusion.value) return
+  const reason = correctionReason.value.trim()
+  if (!reason) { correctionError.value = '请填写修改原因'; return }
+  if (reason.length > 1000) { correctionError.value = '修改原因不能超过 1000 个字符'; return }
+  correctingConclusion.value = true
+  correctionError.value = ''
   try {
-    await submitFeedback(id, {
-      interviewerId: form.interviewerId.trim(),
-      overallScore: score,
-      recommendation: form.recommendation,
-      strengths: splitList(form.strengths),
-      concerns: splitList(form.concerns),
-      notes: form.notes.trim() || undefined,
-    })
-    await lockFeedback(id, form.interviewerId.trim())
-    feedback.value = '面试反馈已提交并锁定'
-    showFeedback.value = false
+    await correctInterviewConclusion(detail.value.id, correctionOutcome.value, reason)
+    showCorrectConclusion.value = false
     await load()
+    feedback.value = '面试结论已更正，原结论及修改原因已记入流程审计'
   } catch (cause) {
-    error.value = describeApiFailure(cause, '提交反馈失败').message
+    correctionError.value = describeApiFailure(cause, '修改面试结论失败').message
   } finally {
-    acting.value = false
+    correctingConclusion.value = false
   }
 }
 
-function openConclude() {
-  if (!detail.value || acting.value) return
-  clearFlags()
-  concludeError.value = ''
-  concludeOutcome.value = 'continue'
-  showConclude.value = true
-}
-
-async function submitConclude() {
+async function submitComplete() {
   if (!detail.value || acting.value) return
   acting.value = true
   clearFlags()
-  concludeError.value = ''
+  completeError.value = ''
   const id = detail.value.id
-  const outcome = concludeOutcome.value
+  const outcome = completeOutcome.value
   try {
-    await concludeInterview(id, outcome)
-    const outcomeLabel = outcome === 'offer' ? '通过，进入 Offer 阶段' : outcome === 'reject' ? '未通过' : '进入下一轮'
-    showConclude.value = false
+    await completeInterview(id, outcome)
+    const outcomeLabel = outcome === 'offer' ? '通过，进入 Offer 阶段'
+      : outcome === 'reject' ? '未通过'
+        : outcome === 'cancelled' ? '已取消面试' : '进入下一轮'
+    showComplete.value = false
     await load()
     feedback.value = `面试已完成：${outcomeLabel}`
-    showSummary.value = true
   } catch (cause) {
     const failure = describeApiFailure(cause, '完成面试失败，请稍后重试')
-    concludeError.value = failure.code === 'INTERVIEW_FEEDBACK_INCOMPLETE'
-      ? '请先填写并锁定所有面试官的综合反馈，再确认完成面试。可取消此窗口，前往“填写综合反馈”处理。'
-      : failure.message
+    completeError.value = failure.message
   } finally {
     acting.value = false
   }
@@ -284,17 +263,17 @@ onMounted(async () => {
     <div class="inline-actions">
       <ApplicationResumeButton v-if="detail" :application-id="detail.applicationId" />
       <button v-if="detail?.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting || savingSchedule" @click="openSchedule">编辑安排</button>
-      <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
+      <button v-if="detail?.status === 'scheduled'" class="btn btn-primary" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
         进入 AI 面试室
+      </button>
+      <button v-else-if="detail?.status === 'completed'" class="btn btn-ghost" type="button" @click="router.push(`/interviews/${detail.id}/live`)">
+        查看面试记录
       </button>
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSheets = true">
         考察点评分
       </button>
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSummary = true">面试总结表</button>
-      <button v-if="detail && detail.feedbackStatus !== 'locked' && detail.status !== 'cancelled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openFeedback">
-        填写综合反馈
-      </button>
-      <button v-if="detail && detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openConclude">
+      <button v-if="detail && detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openComplete">
         完成面试
       </button>
       <button class="btn btn-ghost" type="button" @click="router.push('/interviews')">返回面试中心</button>
@@ -316,10 +295,10 @@ onMounted(async () => {
         </div>
         <div class="summary-status">
           <StatusTag :status="detail.status" />
-          <StatusTag :status="detail.feedbackStatus" />
         </div>
       </div>
       <dl class="summary-facts">
+        <div v-if="detail.outcome"><dt>面试结论</dt><dd>{{ conclusionLabel(detail.outcome) }}</dd></div>
         <div><dt>时间</dt><dd>{{ scheduleText }}</dd></div>
         <div>
           <dt>地点 / 会议</dt>
@@ -327,6 +306,9 @@ onMounted(async () => {
         </div>
         <div><dt>参与人</dt><dd>{{ participantText }}</dd></div>
       </dl>
+      <div v-if="detail.outcome" class="conclusion-actions">
+        <button class="btn btn-primary conclusion-correction-button" type="button" :disabled="correctingConclusion" @click="openConclusionCorrection">修改面试结论</button>
+      </div>
     </section>
 
     <section v-if="detail.feedback.length" class="form-panel">
@@ -388,58 +370,57 @@ onMounted(async () => {
     </form>
   </div>
 
-  <div v-if="showFeedback && detail" class="overlay" role="presentation" @click.self="showFeedback = false">
-    <div class="dialog" role="dialog" aria-modal="true">
-      <h3>填写面试反馈</h3>
+  <div v-if="showComplete && detail" class="overlay" role="presentation" @click.self="!acting && (showComplete = false)">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="complete-dialog-title" :aria-busy="acting">
+      <h3 id="complete-dialog-title">完成面试</h3>
       <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
-      <div class="form-grid">
-        <div class="form-field">
-          <label>面试官</label>
-          <select v-model="feedbackForm.interviewerId">
-            <option value="" disabled>请选择面试官</option>
-            <option v-for="p in interviewerOptions" :key="p.userId" :value="p.userId">{{ p.name || '待确认' }}</option>
-          </select>
-        </div>
-        <div class="form-field">
-          <label>综合评分（0-100）</label>
-          <input v-model.number="feedbackForm.overallScore" type="number" min="0" max="100" />
-        </div>
-        <div class="form-field">
-          <label>推荐结论</label>
-          <select v-model="feedbackForm.recommendation">
-            <option v-for="r in recommendations" :key="r.value" :value="r.value">{{ r.label }}</option>
-          </select>
-        </div>
-        <div class="form-field form-wide"><label>优点（逗号分隔）</label><input v-model="feedbackForm.strengths" /></div>
-        <div class="form-field form-wide"><label>顾虑（逗号分隔）</label><input v-model="feedbackForm.concerns" /></div>
-        <div class="form-field form-wide"><label>备注</label><textarea v-model="feedbackForm.notes" rows="3"></textarea></div>
+      <div class="completion-score"><span>本场面试 AI 评分</span><strong>{{ completeAiScore }}<small v-if="detail.aiScore !== null && detail.aiScore !== undefined"> / 100</small></strong></div>
+      <div v-if="completeError" class="error-note" role="alert">{{ completeError }}</div>
+      <div class="form-field">
+        <label for="complete-outcome">面试结论</label>
+        <select id="complete-outcome" v-model="completeOutcome" :disabled="acting">
+          <option v-if="!completeFinal" value="continue">下一轮</option>
+          <option v-else value="offer">通过，进入 Offer</option>
+          <option value="reject">未通过</option>
+          <option value="cancelled">取消面试</option>
+        </select>
       </div>
+      <p class="list-muted">完成后将更新候选人申请状态。</p>
       <div class="dialog-buttons">
-        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showFeedback = false">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitFeedbackForm">{{ acting ? '提交中...' : '提交并锁定' }}</button>
+        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showComplete = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitComplete">{{ acting ? '提交中...' : '确认完成' }}</button>
       </div>
     </div>
   </div>
 
-  <div v-if="showConclude && detail" class="overlay" role="presentation" @click.self="!acting && (showConclude = false)">
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conclude-dialog-title" :aria-busy="acting">
-      <h3 id="conclude-dialog-title">完成面试</h3>
-      <p>{{ candidateName }} · {{ jobTitle }} · {{ detail.round }} 轮</p>
-      <div v-if="concludeError" class="error-note" role="alert">{{ concludeError }}</div>
+  <div v-if="showCorrectConclusion && detail" class="overlay" role="presentation" @click.self="!correctingConclusion && (showCorrectConclusion = false)">
+    <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="correct-conclusion-title" :aria-busy="correctingConclusion" @submit.prevent="submitConclusionCorrection" @keydown.esc="!correctingConclusion && (showCorrectConclusion = false)">
+      <h3 id="correct-conclusion-title">修改面试结论</h3>
+      <p>{{ candidateName }} · {{ jobTitle }} · 第 {{ detail.round }} 轮</p>
       <div class="form-field">
-        <label for="conclude-outcome">面试结论</label>
-        <select id="conclude-outcome" v-model="concludeOutcome" :disabled="acting">
-          <option value="continue">进入下一轮</option>
-          <option value="offer">通过，进入 Offer</option>
+        <label>当前结论</label>
+        <div class="current-conclusion">{{ conclusionLabel(detail.outcome) }}</div>
+      </div>
+      <div v-if="correctionError" class="error-note" role="alert">{{ correctionError }}</div>
+      <div class="form-field">
+        <label for="correct-outcome">更正为</label>
+        <select id="correct-outcome" v-model="correctionOutcome" :disabled="correctingConclusion">
+          <option v-if="detail.stage !== 'final' && detail.round < 2" value="continue">进入下一轮</option>
+          <option v-if="detail.stage === 'final' || detail.round >= 2" value="offer">通过，进入 Offer</option>
           <option value="reject">未通过</option>
+          <option value="cancelled">取消面试</option>
         </select>
       </div>
-      <p class="list-muted">请先确保所有面试官反馈均已提交并锁定；提交后结论将写入申请状态。</p>
-      <div class="dialog-buttons">
-        <button class="btn btn-ghost" type="button" :disabled="acting" @click="showConclude = false">取消</button>
-        <button class="btn btn-primary" type="button" :disabled="acting" @click="submitConclude">{{ acting ? '提交中...' : '确认完成' }}</button>
+      <div class="form-field">
+        <label for="correct-reason">修改原因</label>
+        <textarea id="correct-reason" v-model="correctionReason" rows="3" maxlength="1000" required :disabled="correctingConclusion" placeholder="请说明修改原因，便于后续追溯" />
       </div>
-    </div>
+      <p class="list-muted">原结论不会删除；如后续复试已开展或已建立 Offer、入职记录，将无法直接更正。</p>
+      <div class="dialog-buttons">
+        <button class="btn btn-ghost" type="button" :disabled="correctingConclusion" @click="showCorrectConclusion = false">取消</button>
+        <button class="btn btn-primary" type="submit" :disabled="correctingConclusion">{{ correctingConclusion ? '保存中...' : '确认修改' }}</button>
+      </div>
+    </form>
   </div>
 
   <InterviewSummaryDialog
@@ -463,6 +444,41 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.completion-score {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 14px 0 18px;
+  padding: 14px 0;
+  border-bottom: 1px solid #e1edf4;
+  color: #648093;
+  font-size: 13px;
+}
+
+.conclusion-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.current-conclusion {
+  padding: 9px 0;
+  color: #334155;
+  font-weight: 600;
+}
+
+.completion-score strong {
+  color: #237a82;
+  font-size: 22px;
+}
+
+.completion-score small {
+  color: #7890a0;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .schedule-fields {
   margin: 0;
   padding: 0;

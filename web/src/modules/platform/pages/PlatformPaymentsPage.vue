@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { authSession } from "../../auth/session";
+import { isPlatformAdminRole } from "../../auth/platform-roles";
 import { listPlans, type PlanVersion } from "../api/entitlements";
 import {
   getPaymentAdmin,
@@ -21,7 +22,7 @@ const report = ref<PaymentAdmin | null>(null),
   busy = ref(false),
   error = ref(""),
   notice = ref("");
-const canWrite = computed(() => authSession.user?.platformRole === "admin");
+const canWrite = computed(() => isPlatformAdminRole(authSession.user?.platformRole));
 const product = reactive({
   planVersionId: "",
   name: "",

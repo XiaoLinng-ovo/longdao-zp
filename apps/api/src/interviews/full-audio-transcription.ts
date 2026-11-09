@@ -16,19 +16,19 @@ export interface FullAudioTranscriptionJob {
 interface AudioStore { read(key: string): Promise<Buffer>; write(key: string, data: Uint8Array, contentType: string): Promise<void> }
 type ChunkTranscriber = (audio: Uint8Array, contentType: string) => Promise<SpeakerSegment[]>
 type AudioSplitter = (audio: Buffer) => Promise<Buffer[]>
-const chunkSeconds = 60
+export const FULL_AUDIO_CHUNK_SECONDS = 60
 const isMissing = (error: unknown) => {
   const cause = error as { code?: string; name?: string; $metadata?: { httpStatusCode?: number } }
   return cause.code === 'ENOENT' || cause.name === 'NoSuchKey' || cause.$metadata?.httpStatusCode === 404
 }
 
-function wavDurationMs(wav: Buffer): number {
+export function wavDurationMs(wav: Buffer): number {
   const dataOffset = wav.indexOf('data')
   if (dataOffset < 0 || dataOffset + 8 > wav.length) return 0
   return Math.floor(wav.readUInt32LE(dataOffset + 4) / 32)
 }
 
-async function splitAudio(audio: Buffer, ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg'): Promise<Buffer[]> {
+export async function splitFullInterviewAudio(audio: Buffer, ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg'): Promise<Buffer[]> {
   const directory = await mkdtemp(join(tmpdir(), 'interview-transcription-'))
   const input = join(directory, 'full.m4a')
   await writeFile(input, audio)
@@ -36,8 +36,8 @@ async function splitAudio(audio: Buffer, ffmpeg = process.env.FFMPEG_PATH || 'ff
     const chunks: Buffer[] = []
     for (let index = 0; index < 240; index++) {
       const chunk = await new Promise<Buffer>((resolve, reject) => {
-        const start = index * chunkSeconds
-        const child = spawn(ffmpeg, ['-hide_banner','-loglevel','error','-nostdin','-ss',String(start),'-i',input,'-t',String(chunkSeconds),'-vn','-ac','1','-ar','16000','-f','wav','pipe:1'], { windowsHide: true, stdio: ['ignore','pipe','pipe'] })
+        const start = index * FULL_AUDIO_CHUNK_SECONDS
+        const child = spawn(ffmpeg, ['-hide_banner','-loglevel','error','-nostdin','-ss',String(start),'-i',input,'-t',String(FULL_AUDIO_CHUNK_SECONDS),'-vn','-ac','1','-ar','16000','-f','wav','pipe:1'], { windowsHide: true, stdio: ['ignore','pipe','pipe'] })
         const stdout: Buffer[] = [], stderr: Buffer[] = []
         let size = 0, timedOut = false
         const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 30_000)
@@ -53,7 +53,7 @@ async function splitAudio(audio: Buffer, ffmpeg = process.env.FFMPEG_PATH || 'ff
       const duration = wavDurationMs(chunk)
       if (!duration) break
       chunks.push(chunk)
-      if (duration < chunkSeconds * 1000 - 1000) break
+      if (duration < FULL_AUDIO_CHUNK_SECONDS * 1000 - 1000) break
     }
     if (!chunks.length) throw new Error('未能从整场录音中提取可识别的音频')
     return chunks
@@ -70,7 +70,7 @@ export class FullAudioTranscription {
   constructor(
     private readonly storage: AudioStore,
     private readonly transcribe: ChunkTranscriber = transcribeInterviewChunk,
-    private readonly split: AudioSplitter = splitAudio,
+    private readonly split: AudioSplitter = splitFullInterviewAudio,
   ) {}
 
   async get(key: string): Promise<FullAudioTranscriptionJob | null> {

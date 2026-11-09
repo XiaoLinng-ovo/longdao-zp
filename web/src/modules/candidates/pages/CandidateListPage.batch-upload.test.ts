@@ -431,6 +431,6 @@ describe('resumable batch upload', () => {
     await flush()
     expect(root.querySelectorAll('.resume-file-row')).toHaveLength(1)
     expect(root.textContent).toContain('恢复.txt')
-    expect(root.textContent).toContain('AI 分析中')
+    expect(root.textContent).toContain('AI 正在分析')
   })
 })

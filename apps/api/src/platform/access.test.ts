@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { isPlatformManagementPath } from './access.js'
 test('enterprise AI usage endpoint is not platform operations',()=>{
  assert.equal(isPlatformManagementPath('/api/v1/admin/ai-usage'),false)
- assert.equal(isPlatformManagementPath('/api/v1/admin/settings'),true)
+ assert.equal(isPlatformManagementPath('/api/v1/admin/settings'),false)
  assert.equal(isPlatformManagementPath('/api/v1/platform/customers'),true)
 })
 

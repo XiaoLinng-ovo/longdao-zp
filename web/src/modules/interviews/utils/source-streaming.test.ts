@@ -6,6 +6,31 @@ import type { PendingInterviewAudio } from './pending-audio'
 const channels: ReturnType<typeof createSourceStreaming>[] = []
 afterEach(() => { channels.forEach(channel => channel.dispose()); channels.length = 0; vi.unstubAllGlobals() })
 
+it('keeps a reverse-proxy path prefix in the default stream URL', async () => {
+  class Socket extends EventTarget {
+    static OPEN = 1; static CLOSING = 2; static url = ''
+    readyState = 0; bufferedAmount = 0
+    onmessage?: (event: { data: string }) => void
+    send = vi.fn(); close() { this.readyState = 3 }
+    constructor(url: string) { super(); Socket.url = url }
+  }
+  const originalPath = location.pathname
+  const node = () => ({ connect: vi.fn(), disconnect: vi.fn(), gain: { value: 0 } })
+  vi.stubGlobal('WebSocket', Socket)
+  vi.stubGlobal('AudioWorkletNode', class { port = { postMessage: vi.fn(), onmessage: undefined }; connect = vi.fn(); disconnect = vi.fn() })
+  vi.stubGlobal('AudioContext', class {
+    state = 'running'; sampleRate = 16000; destination = {}; audioWorklet = { addModule: vi.fn(async () => undefined) }
+    resume = vi.fn(async () => undefined); close = vi.fn(async () => undefined)
+    createMediaStreamSource = node; createGain = node
+  })
+  history.replaceState({}, '', '/proxy/7860/')
+  const channel = createSourceStreaming({ isRecording: () => true, onState: vi.fn(), onText: vi.fn(), onWarning: vi.fn() })
+  channels.push(channel); channel.start({} as MediaStream)
+  await Promise.resolve()
+  expect(Socket.url).toBe(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/proxy/7860/funasr-stream`)
+  history.replaceState({}, '', originalPath)
+})
+
 async function workletHarness() {
   class Socket extends EventTarget {
     static OPEN = 1; static CLOSING = 2; static instance: Socket

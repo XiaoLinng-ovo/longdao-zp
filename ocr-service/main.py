@@ -8,8 +8,10 @@ import threading
 import time
 from pathlib import Path
 
-# Keep PaddleX model files on an ASCII path; Paddle native inference can fail on Chinese Windows paths.
-os.environ.setdefault('PADDLE_PDX_CACHE_HOME', r'D:\work\paddlex-cache')
+# Keep PaddleX model files on an ASCII path; callers can override this for durable
+# Notebook storage. The Windows fallback preserves the existing local behaviour.
+default_paddlex_cache = r'D:\work\paddlex-cache' if os.name == 'nt' else str(Path.home() / '.paddlex')
+os.environ.setdefault('PADDLE_PDX_CACHE_HOME', default_paddlex_cache)
 os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
 
 import pypdfium2 as pdfium

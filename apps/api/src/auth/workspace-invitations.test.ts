@@ -12,7 +12,7 @@ test('invites cannot grant platform administrator roles or owner membership',()=
   assert.throws(()=>validateInvitationInput({membershipRole:'owner'}),InvitationError)
   assert.throws(()=>validateInvitationInput({expiresInDays:0}),InvitationError)
   assert.throws(()=>validateInvitationInput({email:'not-email'}),InvitationError)
-  assert.throws(()=>validateInvitationInput({businessRole:'hiring_manager'}),InvitationError)
+  assert.equal(validateInvitationInput({businessRole:'hiring_manager'}).businessRole, 'recruiter')
   assert.equal(validateInvitationInput({email:' Alice@Example.com '}).email,'alice@example.com')
 })
 function fakePool(responses: Record<string,unknown>[][]) {
@@ -36,6 +36,12 @@ test('members cannot enumerate enterprise invitations',async()=>{
   const {db}=fakePool([[]])
   await assert.rejects(new WorkspaceInvitationsService(db).list(invitation.organization_id,'user'),e=>e instanceof InvitationError && e.status===403)
 })
+test('legacy enterprise roles are read as ordinary users without granting platform access', async () => {
+  const {db} = fakePool([[{role:'owner'}], ['admin','hr_admin','approver','interviewer'].map(business_role => ({id:business_role,business_role,membership_role:'member'}))])
+  const members = await new WorkspaceInvitationsService(db).members(invitation.organization_id,'owner')
+  assert.deepEqual(members.map(member => member.businessRole), Array(4).fill('recruiter'))
+  assert.ok(members.every(member => !('platformRole' in member)))
+})
 test('only owners may generate an enterprise administrator invitation',async()=>{
   const {db,calls}=fakePool([[],[{role:'admin'}]])
   await assert.rejects(new WorkspaceInvitationsService(db).create(invitation.organization_id,'user',{membershipRole:'admin'}),InvitationError)
@@ -51,7 +57,7 @@ test('accept locks code and atomically creates scoped membership, consumes code 
   await assert.doesNotReject(new WorkspaceInvitationsService(db).accept(code,'user'))
   assert.match(calls[1]!.sql,/FOR UPDATE OF i/)
   const insert=calls.find(c=>c.sql.includes('INSERT INTO organization_members'))!
-  assert.deepEqual(insert.values,[invitation.organization_id,'user','member','interviewer',undefined])
+  assert.deepEqual(insert.values,[invitation.organization_id,'user','member','recruiter',undefined])
   assert.ok(calls.some(c=>c.sql==='COMMIT'));assert.ok(calls.some(c=>c.sql.includes('INSERT INTO audit_logs')))
   assert.ok(!calls.some(c=>c.sql.includes('UPDATE user_roles')))
 })

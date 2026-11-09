@@ -12,6 +12,7 @@ const mockedOrganizations = vi.mocked(listAccountOrganizations)
 const roles = [
   { id: 'r1', code: 'platform_admin', name: '平台管理员' },
   { id: 'r2', code: 'recruiter', name: '招聘专员' },
+  { id: 'r3', code: 'admin', name: '管理员' },
 ]
 const departments = [
   { id: 'd1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '', updatedAt: '' },
@@ -39,12 +40,13 @@ function input(selector: string) { return root!.querySelector<HTMLInputElement>(
 function select(selector: string, value: string) { const element = root!.querySelector<HTMLSelectElement>(selector)!; element.value = value; element.dispatchEvent(new Event('change')); }
 
 describe('账号创建组件', () => {
-  it('默认选择当前企业，过滤平台角色和停用部门', async () => {
+  it('默认选择当前企业，只显示企业用户和系统管理员两种账号类型', async () => {
     await mount()
     expect(input('#account-email')).toBeTruthy()
     expect(root!.querySelector<HTMLSelectElement>('#account-organization')!.value).toBe('org-2')
-    expect(root!.querySelectorAll('#account-role option')).toHaveLength(1)
-    expect(root!.querySelector('#account-role option')?.textContent).toBe('招聘专员')
+    expect(root!.querySelectorAll('#account-role option')).toHaveLength(2)
+    expect(root!.querySelector('#account-role option')?.textContent).toBe('企业用户')
+    expect(root!.querySelector('#account-role option[value="admin"]')?.textContent).toBe('系统管理员')
     expect(root!.querySelectorAll('#account-department option')).toHaveLength(2)
     expect(root!.textContent).not.toContain('历史部门')
   })

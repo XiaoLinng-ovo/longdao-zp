@@ -3,6 +3,13 @@ import type { Pool, PoolClient, QueryResultRow } from 'pg'
 
 export type ResumeImportBatchStatus = 'uploading' | 'completed' | 'cancelled'
 export type ResumeImportItemStatus = 'pending_upload' | 'uploading' | 'queued' | 'failed' | 'cancelled'
+export type ResumeImportBatchPhase =
+  | 'uploading'
+  | 'waiting_analysis'
+  | 'analyzing'
+  | 'completed'
+  | 'completed_with_issues'
+  | 'cancelled'
 
 export interface ResumeImportItem {
   id: string
@@ -28,12 +35,14 @@ export interface ResumeImportBatch {
   id: string
   jobId: string
   status: ResumeImportBatchStatus
+  phase: ResumeImportBatchPhase
   items: ResumeImportItem[]
   counts: {
     total: number
     pendingUpload: number
     uploading: number
     uploaded: number
+    queued: number
     analyzing: number
     completed: number
     failed: number
@@ -147,6 +156,7 @@ function batchCounts(items: ResumeImportItem[]): ResumeImportBatch['counts'] {
     pendingUpload: items.filter((item) => item.status === 'pending_upload').length,
     uploading: items.filter((item) => item.status === 'uploading').length,
     uploaded: items.filter((item) => item.status === 'queued' || statusOf(item) === 'completed').length,
+    queued: items.filter((item) => statusOf(item) === 'queued').length,
     analyzing: items.filter((item) => statusOf(item) === 'processing').length,
     completed: items.filter((item) => statusOf(item) === 'completed').length,
     failed: items.filter((item) => item.status === 'failed' || statusOf(item) === 'failed').length,
@@ -155,8 +165,18 @@ function batchCounts(items: ResumeImportItem[]): ResumeImportBatch['counts'] {
   }
 }
 
-function withCounts(batch: Omit<ResumeImportBatch, 'counts'>): ResumeImportBatch {
-  return { ...batch, counts: batchCounts(batch.items) }
+function batchPhase(batch: Omit<ResumeImportBatch, 'counts' | 'phase'>, counts: ResumeImportBatch['counts']): ResumeImportBatchPhase {
+  if (batch.status === 'cancelled') return 'cancelled'
+  if (batch.status === 'uploading' && (counts.pendingUpload > 0 || counts.uploading > 0)) return 'uploading'
+  if (counts.analyzing > 0) return 'analyzing'
+  if (counts.queued > 0) return 'waiting_analysis'
+  if (counts.failed > 0 || counts.removed > 0) return 'completed_with_issues'
+  return 'completed'
+}
+
+function withCounts(batch: Omit<ResumeImportBatch, 'counts' | 'phase'>): ResumeImportBatch {
+  const counts = batchCounts(batch.items)
+  return { ...batch, phase: batchPhase(batch, counts), counts }
 }
 
 export class MemoryResumeImportStore implements ResumeImportStore {
@@ -227,6 +247,8 @@ export class MemoryResumeImportStore implements ResumeImportStore {
     if (patch.incrementAttempts) item.attempts += 1
     item.updatedAt = now()
     batch.updatedAt = item.updatedAt
+    batch.counts = batchCounts(batch.items)
+    batch.phase = batchPhase(batch, batch.counts)
     this.batches.set(batchId, clone(batch))
     return clone(item)
   }
@@ -246,6 +268,7 @@ export class MemoryResumeImportStore implements ResumeImportStore {
       }
     }
     batch.counts = batchCounts(batch.items)
+    batch.phase = batchPhase(batch, batch.counts)
     this.batches.set(batchId, clone(batch))
     return clone(batch)
   }
@@ -257,6 +280,7 @@ export class MemoryResumeImportStore implements ResumeImportStore {
     batch.status = 'completed'
     batch.updatedAt = now()
     batch.counts = batchCounts(batch.items)
+    batch.phase = batchPhase(batch, batch.counts)
     this.batches.set(batchId, clone(batch))
   }
 }

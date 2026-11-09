@@ -114,3 +114,17 @@ export async function revokePlatformUserSessions(id: string, reason: string): Pr
 export async function resetPlatformUserPassword(id: string, reason: string): Promise<{ temporaryPassword: string; revokedSessions: number }> {
   return (await apiClient.postJson<{ temporaryPassword: string; revokedSessions: number }>(`/platform/users/${encodeURIComponent(id)}/reset-password`, { reason })).data
 }
+
+export async function resetPlatformUserAiGenerationQuota(userId: string, organizationId: string, reason: string): Promise<{
+  organizationId: string
+  organizationName: string
+  previousGenerations: number
+  generations: number
+}> {
+  return (await apiClient.postJson<{
+    organizationId: string
+    organizationName: string
+    previousGenerations: number
+    generations: number
+  }>(`/platform/users/${encodeURIComponent(userId)}/workspaces/${encodeURIComponent(organizationId)}/reset-ai-generation-quota`, { reason })).data
+}

@@ -5,6 +5,7 @@ import { authSession, refreshAuthSession } from '../../auth/session'
 import type { ServiceStatus } from '../../auth/api'
 import { listCustomers, updateCustomer, listPlatformAudit, type PlatformCustomer, type PlatformAudit } from '../api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { isPlatformAdminRole } from '../../auth/platform-roles'
 const entitlementCustomer = ref<PlatformCustomer | null>(null)
 const statusPanel = ref<HTMLElement | null>(null), entitlementPanel = ref<HTMLElement | null>(null)
 let panelNavigation = 0
@@ -41,7 +42,7 @@ function rejectSave(message: string, field: HTMLElement | null) {
 }
 const editing = ref<PlatformCustomer | null>(null)
 const draftStatus = ref<ServiceStatus>('enabled'), deadline = ref(''), reason = ref(''), confirmed = ref(false)
-const canWrite = computed(() => authSession.user?.platformRole === 'admin')
+const canWrite = computed(() => isPlatformAdminRole(authSession.user?.platformRole))
 const labels: Record<ServiceStatus, string> = { enabled: '已启用', trial: '试用中', suspended: '已暂停' }
 const time = (value: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '—'
 function statusLabel(customer: PlatformCustomer) {

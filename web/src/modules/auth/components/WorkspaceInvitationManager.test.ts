@@ -8,13 +8,13 @@ vi.mock('../api/invitations',()=>({createInvitation:vi.fn(),listInvitations:vi.f
 vi.mock('../session',()=>({authSession:{user:{id:'self'}}}))
 vi.mock('../utils/invitations', async(importOriginal)=>({...await importOriginal<typeof import('../utils/invitations')>(),copyText:vi.fn()}))
 let app:App,root:HTMLDivElement
-const invitation={id:'i',workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',email:null,membershipRole:'member',businessRole:'interviewer',departmentId:null,departmentName:null,createdAt:'2026-10-09',expiresAt:'2099-01-01',acceptedAt:null,status:'pending',code:'ABCDEF-123456-ABCDEF-123456'} as api.Invitation
+const invitation={id:'i',workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',email:null,membershipRole:'member',businessRole:'recruiter',departmentId:null,departmentName:null,createdAt:'2026-10-09',expiresAt:'2099-01-01',acceptedAt:null,status:'pending',code:'ABCDEF-123456-ABCDEF-123456'} as api.Invitation
 async function flush(){for(let i=0;i<8;i++){await Promise.resolve();await nextTick()}}
 async function mount(role='owner') {
  vi.mocked(api.listInvitations).mockResolvedValue([])
  vi.mocked(api.listWorkspaceMembers).mockResolvedValue([
   {id:'self',name:'自己',email:'self@example.invalid',membershipRole:'owner',businessRole:'recruiter',departmentId:null,departmentName:null,joinedAt:'2026-10-09'},
-  {id:'other',name:'同事',email:'other@example.invalid',membershipRole:'member',businessRole:'interviewer',departmentId:null,departmentName:null,joinedAt:'2026-10-09'},
+  {id:'other',name:'同事',email:'other@example.invalid',membershipRole:'member',businessRole:'recruiter',departmentId:null,departmentName:null,joinedAt:'2026-10-09'},
  ])
  vi.mocked(api.listInvitationDepartments).mockResolvedValue([])
  root=document.createElement('div');document.body.appendChild(root)
@@ -23,21 +23,14 @@ async function mount(role='owner') {
 function button(text:string){return [...root.querySelectorAll('button')].find(b=>b.textContent?.trim()===text)!}
 afterEach(()=>{app?.unmount();root?.remove();vi.resetAllMocks();vi.restoreAllMocks()})
 describe('WorkspaceInvitationManager',()=>{
- it('explains separate enterprise identities and keeps Offer approvers available without changing role codes',async()=>{
+ it('uses one enterprise-user identity and keeps membership settings editable',async()=>{
   await mount()
-  const guide=root.querySelector('[aria-label="企业身份与业务角色说明"]')!
-  expect(guide.tagName).toBe('DETAILS')
-  expect(guide.hasAttribute('open')).toBe(false)
-  expect(root.querySelector('.invite-form')!.compareDocumentPosition(guide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(guide.textContent).toContain('企业管理员身份不代表自动获得录用审批权')
-  expect(guide.textContent).toContain('更改角色不会自动替你审批或发放 Offer')
-  const option=root.querySelector('.invite-form option[value="approver"]')!
-  expect(option.textContent).toBe('录用审批人')
-  const select=option.parentElement as HTMLSelectElement
-  select.value='approver';select.dispatchEvent(new Event('change',{bubbles:true}));await flush()
-  vi.mocked(api.createInvitation).mockResolvedValue({...invitation,businessRole:'approver'})
+  expect(root.textContent).toContain('企业用户')
+  expect(root.querySelector('.invite-form select[aria-label="业务角色"]')).toBeNull()
+  expect(root.querySelector('select[aria-label="同事的所属部门"]')).not.toBeNull()
+  vi.mocked(api.createInvitation).mockResolvedValue({...invitation,businessRole:'recruiter'})
   button('生成邀请').click();await flush()
-  expect(api.createInvitation).toHaveBeenCalledWith('w',expect.objectContaining({businessRole:'approver'}))
+  expect(api.createInvitation).toHaveBeenCalledWith('w',expect.objectContaining({businessRole:'recruiter'}))
  })
  it('creates an invitation and copies the link without claiming automatic sending',async()=>{
   await mount();vi.mocked(api.createInvitation).mockResolvedValue(invitation)
@@ -53,7 +46,7 @@ describe('WorkspaceInvitationManager',()=>{
   expect(root.querySelector('.invite-form option[value=admin]')).toBeNull()
   expect(root.querySelector('option[value=hr_admin]')).toBeNull()
   expect(root.querySelector('select[aria-label="自己的业务角色"]')).toBeNull()
-  expect(root.querySelector('select[aria-label="同事的业务角色"]')).not.toBeNull()
+  expect(root.querySelector('select[aria-label="同事的业务角色"]')).toBeNull()
  })
  it('confirms revocation and immediately disables sharing a revoked invite',async()=>{
   await mount();vi.mocked(api.createInvitation).mockResolvedValue({...invitation})

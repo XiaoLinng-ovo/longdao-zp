@@ -4,7 +4,7 @@ import { EnterpriseAiStore } from '@smartrecruit-pro/enterprise-ai'
 import { LiveInterviewSessionRepository } from './live-session-repository.js'
 import { QuestionSheetRepository } from './question-sheet-repository.js'
 import { loadQuestionSheetGeneratorConfig } from './question-sheet-generator.js'
-import { createInterviewSummaryGenerator, createUnscoredSummary, reliableCandidateTurns } from './interview-summary.js'
+import { assessTranscriptQuality, createInterviewSummaryGenerator, createUnscoredSummary } from './interview-summary.js'
 import { InterviewSummaryRepository } from './interview-summary-repository.js'
 
 export class InterviewSummaryService {
@@ -21,15 +21,24 @@ export class InterviewSummaryService {
     const previousReport = job.previousReport
     let report = previousReport ?? createUnscoredSummary([])
     try {
-      const { segments } = await this.sessions.get(job.sessionId)
+      const { segments, transcriptWarnings = [], transcriptRoleReviewRequired = false } = await this.sessions.get(job.sessionId)
       report = createUnscoredSummary(segments)
+      report.warnings.push(...transcriptWarnings)
+      report.warnings = [...new Set(report.warnings)]
       if (!report.transcript.length) {
         report.summary = '本场尚无已保存的语音转写，无法进行有证据的评分。'
         report.warnings.push('请检查录音是否成功保存，不能用参考面试表代替本场实际内容。')
-      } else if (!reliableCandidateTurns(report.transcript).length) {
-        report.summary = '已保留本场完整转写，但没有可确认归属的候选人发言，暂不评分。'
-        report.warnings.push('请核实说话人和重叠发言后重新生成总结，不要求与参考问题逐题配对。')
       } else {
+        const quality = assessTranscriptQuality(report.transcript, transcriptRoleReviewRequired)
+        if (!quality.usable) {
+          report.reviewRequired = true
+          report.summary = quality.warning ?? '面试转写证据不足，暂不评分。'
+          report.warnings.push(report.summary)
+          report.warnings.push('请核实说话人和重叠发言后重新生成总结，不要求与参考问题逐题配对。')
+          report.warnings = [...new Set(report.warnings)]
+          await this.repository.save(job, report, null)
+          return true
+        }
         const context = await this.jobs.getApplicationJobContext(job.applicationId)
         if (!context) throw new Error('无法读取所属岗位，未使用其他岗位规则评分。')
         const config = loadQuestionSheetGeneratorConfig(await this.resolveAiEnv(job.applicationId))

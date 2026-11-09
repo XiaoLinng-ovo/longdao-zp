@@ -47,3 +47,28 @@ test('feedback lock alone is not a result; rejection persists only to its own in
   assert.equal(result.aiScore, null)
   assert.equal(result.application.status, 'rejected')
 })
+
+test('cancellation keeps both initial and final interview records without rejecting the application', async () => {
+  process.env.NODE_ENV = 'test'
+  const store = new LocalRecruitingStore()
+  const service = new RecruitingService(store)
+  const initial = await service.createInterview({ applicationId: 'application-8821', round: 1, title: '初试', participants: [] })
+
+  await service.completeInterview(initial.id, 'cancelled')
+  await service.completeInterview(initial.id, 'cancelled')
+  let rows = await service.listInterviews(initial.applicationId)
+  const cancelledInitial = rows.find(item => item.id === initial.id)!
+  assert.equal(cancelledInitial.status, 'cancelled')
+  assert.equal(cancelledInitial.outcome, 'cancelled')
+  assert.equal(cancelledInitial.application.status, 'interviewing')
+  assert.equal((await store.read()).workflowEvents.filter(event => event.subjectId === initial.id && event.action === 'conclude').length, 1)
+  await assert.rejects(service.completeInterview(initial.id, 'reject'), (error: any) => error.code === 'INTERVIEW_CANCELLED')
+
+  const final = await service.createInterview({ applicationId: initial.applicationId, round: 2, title: '复试', participants: [{ userId: 'interviewer-1', role: 'interviewer', required: true }] })
+  await service.completeInterview(final.id, 'cancelled')
+  rows = await service.listInterviews(initial.applicationId)
+  const cancelledFinal = rows.find(item => item.id === final.id)!
+  assert.equal(cancelledFinal.status, 'cancelled')
+  assert.equal(cancelledFinal.outcome, 'cancelled')
+  assert.equal(cancelledFinal.application.status, 'interviewing')
+})

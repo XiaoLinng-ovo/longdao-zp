@@ -31,7 +31,8 @@ export class InterviewSummaryRepository {
     const claim = randomUUID()
     const result = await this.pool.query(`UPDATE interview_live_sessions SET summary_status='generating', summary_claim=$1::uuid, updated_at=now()
       WHERE id=(SELECT id FROM interview_live_sessions s WHERE status='completed'
-        AND NOT EXISTS (SELECT 1 FROM interview_audio_transcription_jobs j WHERE j.session_id=s.id AND j.status<>'completed') AND
+        AND NOT EXISTS (SELECT 1 FROM interview_audio_transcription_jobs j WHERE j.session_id=s.id AND j.status<>'completed')
+        AND NOT EXISTS (SELECT 1 FROM interview_transcript_postprocess_jobs p WHERE p.session_id=s.id AND p.status<>'completed') AND
         (summary_status='pending' OR (summary_status='generating' AND updated_at<now()-interval '15 minutes'))
         ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING id, summary_revision, summary_report, (SELECT application_id FROM interviews WHERE id=interview_id) AS application_id`, [claim])
@@ -40,12 +41,13 @@ export class InterviewSummaryRepository {
       previousReport: row.summary_report as InterviewSummaryReport | null } : null
   }
   async save(job: SummaryJob, report: InterviewSummaryReport, error: string | null): Promise<boolean> {
+    const preserveEvidencedReport = error !== null && report.overallScore !== null
     const result = await this.pool.query(`UPDATE interview_live_sessions SET
-      summary_status=CASE WHEN $6::text IS NOT NULL AND summary_report IS NOT NULL THEN 'ready' ELSE $4 END,
-      summary_report=CASE WHEN $6::text IS NOT NULL AND summary_report IS NOT NULL THEN summary_report ELSE $5::jsonb END,
+      summary_status=$4,
+      summary_report=$5::jsonb,
       summary_error=$6, summary_claim=NULL, updated_at=now()
       WHERE id=$1::uuid AND summary_revision=$2 AND summary_claim=$3::uuid`,
-    [job.sessionId, job.revision, job.claim, error ? 'failed' : 'ready', JSON.stringify(report), error?.slice(0, 600) ?? null])
+    [job.sessionId, job.revision, job.claim, error && !preserveEvidencedReport ? 'failed' : 'ready', JSON.stringify(report), error?.slice(0, 600) ?? null])
     return result.rowCount === 1
   }
 }

@@ -47,6 +47,13 @@ const compressibleTypes = new Set([
 
 function forwardedHeaders(req, target, { websocket = false } = {}) {
   const headers = { ...req.headers }
+  const remoteAddress = req.socket.remoteAddress?.trim()
+  if (remoteAddress) {
+    const incoming = Array.isArray(headers['x-forwarded-for'])
+      ? headers['x-forwarded-for'].join(', ')
+      : headers['x-forwarded-for']?.trim()
+    headers['x-forwarded-for'] = incoming ? `${incoming}, ${remoteAddress}` : remoteAddress
+  }
   headers.host = target.host
   headers['x-forwarded-host'] = req.headers.host || ''
   headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http'
@@ -192,6 +199,11 @@ export function createProductionGateway(options = {}) {
   const apiProxyTarget = options.apiTarget ? new URL(options.apiTarget) : apiTarget
   const funasrProxyTarget = options.funasrTarget ? new URL(options.funasrTarget) : funasrTarget
   const server = createServer((req, res) => {
+    if ((req.url || '') === '/health') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' })
+      res.end('ok\n')
+      return
+    }
     if ((req.url || '').startsWith('/api/')) return proxyHttp(req, res, apiProxyTarget)
     return sendStatic(req, res, staticDir).catch((error) => {
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })

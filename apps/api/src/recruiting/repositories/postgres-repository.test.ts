@@ -12,17 +12,26 @@ const applicationRow = {
   job_id: '33333333-3333-4333-8333-333333333333', job_no: 'JOB-108', status: 'new', recruiter_id: null, source: '内推',
   applied_at: '2026-09-10T00:00:00.000Z', rejected_reason: null, withdrawn_at: null, created_at: '2026-09-10T00:00:00.000Z', updated_at: '2026-09-10T00:00:00.000Z',
 }
+const offerTemplateRow = {
+  id: '66666666-6666-4666-8666-666666666666', name: 'Offer Template', filename: 'offer.md', content: 'Hello {{candidateName}}',
+  is_active: true, is_default: true, created_by: null, created_at: '2026-10-01T00:00:00.000Z', updated_at: '2026-10-01T00:00:00.000Z',
+}
 
 class FakeClient implements RepositoryClient {
   readonly calls: Array<{ sql: string; values: unknown[] }> = []
   private readonly responses: Array<unknown>
 
-  constructor(responses: unknown[] = []) {
+  constructor(
+    responses: unknown[] = [],
+    private readonly queryError?: (sql: string, callIndex: number) => Error | undefined,
+  ) {
     this.responses = responses
   }
 
   async query<T extends Record<string, unknown>>(sql: string, values: readonly unknown[] = []): Promise<{ rows: T[] }> {
     this.calls.push({ sql, values: [...values] })
+    const error = this.queryError?.(sql, this.calls.length)
+    if (error) throw error
     return { rows: (this.responses.shift() ?? []) as T[] }
   }
 
@@ -34,9 +43,13 @@ class FakePool implements RepositoryPool {
   readonly client: FakeClient
   private readonly responses: Array<unknown>
 
-  constructor(responses: unknown[] = [], clientResponses: unknown[] = []) {
+  constructor(
+    responses: unknown[] = [],
+    clientResponses: unknown[] = [],
+    private readonly queryError?: (sql: string, callIndex: number) => Error | undefined,
+  ) {
     this.responses = responses
-    this.client = new FakeClient(clientResponses)
+    this.client = new FakeClient(clientResponses, queryError)
   }
 
   async query<T extends Record<string, unknown>>(sql: string, values: readonly unknown[] = []): Promise<{ rows: T[] }> {
@@ -112,21 +125,19 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     })
   }
 
-  it('cancels pending platform approval steps and instance in the same transaction', async () => {
+  it('cancels a historical pending request without resuming obsolete approval processing', async () => {
     const organizationId = '99999999-9999-4999-8999-999999999999'
     const requestId = '44444444-4444-4444-8444-444444444444'
     const instanceId = '55555555-5555-4555-8555-555555555555'
     const row = { id: requestId, request_no: 'REQ-1', title: 'Test', status: 'cancelled', headcount: 1,
       version: 3, created_at: '2026-10-08T00:00:00.000Z', updated_at: '2026-10-08T00:00:00.000Z' }
     const pool = new FakePool([], [[], [{ id: requestId }], [{ id: requestId, status: 'pending_approval', version: 2 }],
-      [{ id: instanceId }], [], [], [row], []])
+      [row], []])
     const repository = new NormalizedRecruitingRepository(pool, { organizationId })
     await repository.requestApprovalAction(requestId, 'cancel', 'legacy-user', 'Test reason')
-    for (const table of ['approval_steps', 'approval_instances']) {
-      const update = pool.client.calls.find(({ sql }) => sql.includes(`UPDATE ${table}`))!
-      assert.match(update.sql, /organization_id = \$2::uuid/)
-      assert.deepEqual(update.values, [instanceId, organizationId])
-    }
+    assert.ok(!pool.client.calls.some(({sql}) => /UPDATE approval_(steps|instances)/.test(sql)))
+    const update = pool.client.calls.find(({sql}) => sql.startsWith('UPDATE recruitment_requests'))!
+    assert.deepEqual(update.values, [requestId, 'cancelled', organizationId])
     assert.equal(pool.client.calls.at(-1)?.sql, 'COMMIT')
   })
 
@@ -180,7 +191,7 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
       created_at: '2026-09-10T00:00:00.000Z',
       updated_at: '2026-09-10T00:00:00.000Z',
     }
-    const pool = new FakePool([], [[], [{ id: applicationId }], [{ id: userId }], [interviewRow], []])
+    const pool = new FakePool([], [[], [{ id: applicationId }], [{ id: applicationId }], [{ id: userId }], [], [interviewRow], []])
     const repository = new NormalizedRecruitingRepository(pool)
 
     const result = await repository.createInterview({
@@ -220,7 +231,7 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
       created_at: '2026-09-10T00:00:00.000Z',
       updated_at: '2026-09-10T00:00:00.000Z',
     }
-    const pool = new FakePool([], [[], [{ id: applicationId }], [interviewRow]])
+    const pool = new FakePool([], [[], [{ id: applicationId }], [{ id: applicationId }], [], [interviewRow]])
     const repository = new NormalizedRecruitingRepository(pool)
 
     const result = await repository.createInterview({ applicationId, round: 2, title: '复试', participants: [] })
@@ -230,10 +241,21 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     assert.equal(result.stage, 'final')
   })
 
+  it('rejects third-round interviews at the repository boundary', async () => {
+    const applicationId = applicationRow.id
+    const pool = new FakePool([], [[], [{ id: applicationId }], [{ id: applicationId }], []])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    await assert.rejects(
+      repository.createInterview({ applicationId, round: 3, title: '第三轮', participants: [] }),
+      (error: any) => error.code === 'REPOSITORY_VALIDATION_ERROR' && /仅支持初试和复试两轮/u.test(error.message),
+    )
+  })
+
   it('rejects a free-text interviewer when no system user matches', async () => {
     const interviewId = '88888888-8888-4888-8888-888888888888'
     const applicationId = applicationRow.id
-    const pool = new FakePool([], [[], [{ id: applicationId }], []])
+    const pool = new FakePool([], [[], [{ id: applicationId }], [{ id: applicationId }], [], []])
     const repository = new NormalizedRecruitingRepository(pool)
 
     await assert.rejects(
@@ -281,24 +303,21 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     assert.ok(pool.client.calls[1]?.sql.startsWith('UPDATE analysis_tasks'))
     assert.ok(pool.client.calls[4]?.sql.startsWith('INSERT INTO analysis_results'))
   })
-  it('persists recruitment request approval submission in normalized approval tables', async () => {
+  it('submits a recruitment request directly without writing approval tables', async () => {
     const requestId = '44444444-4444-4444-8444-444444444444'
     const pool = new FakePool([], [
       [],
       [{ id: requestId }],
       [{ id: requestId, status: 'draft', version: 1 }],
-      [],
-      [],
-      [{ id: requestId, request_no: 'REQ-1001', title: '后端', department_id: null, department_name: null, requested_by: null, headcount: 1, budget_min: null, budget_max: null, reason: '扩编', status: 'pending_approval', version: 2, created_at: '2026-09-10T00:00:00.000Z', updated_at: '2026-09-10T00:00:00.000Z' }],
+      [{ id: requestId, request_no: 'REQ-1001', title: '后端', department_id: null, department_name: null, requested_by: null, headcount: 1, budget_min: null, budget_max: null, reason: '扩编', status: 'approved', version: 2, created_at: '2026-09-10T00:00:00.000Z', updated_at: '2026-09-10T00:00:00.000Z' }],
       [],
     ])
     const repository = new NormalizedRecruitingRepository(pool)
 
     const result = await repository.requestApprovalAction(requestId, 'submit', '77777777-7777-4777-8777-777777777777')
 
-    assert.equal(result.status, 'pending_approval')
-    assert.ok(pool.client.calls.some((call) => call.sql.includes('INSERT INTO approval_instances')))
-    assert.ok(pool.client.calls.some((call) => call.sql.includes('INSERT INTO approval_steps')))
+    assert.equal(result.status, 'approved')
+    assert.ok(!pool.client.calls.some((call) => /INSERT INTO approval_/.test(call.sql)))
     assert.ok(pool.client.calls.some((call) => call.sql.includes('UPDATE recruitment_requests')))
   })
 
@@ -318,12 +337,9 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
     ])
     const repository = new NormalizedRecruitingRepository(pool)
 
-    const result = await repository.requestApprovalAction(requestId, 'reject', '77777777-7777-4777-8777-777777777777', '预算不足')
-
-    assert.equal(result.status, 'rejected')
-    const record = pool.client.calls.find((call) => call.sql.includes('INSERT INTO approval_records'))
-    assert.equal(record?.values.at(-1), '预算不足')
-    assert.ok(pool.client.calls.some((call) => call.sql.includes('UPDATE approval_instances')))
+    await assert.rejects(repository.requestApprovalAction(requestId, 'reject', '77777777-7777-4777-8777-777777777777', '预算不足'), /RECRUITMENT_APPROVAL_DISABLED/)
+    assert.ok(!pool.client.calls.some((call) => /(?:INSERT INTO|UPDATE) approval_/.test(call.sql)))
+    assert.equal(pool.client.calls.at(-1)?.sql, 'ROLLBACK')
   })
 
   it('maps a legacy seed candidate id to a generated UUID and business number', async () => {
@@ -393,6 +409,22 @@ describe('NormalizedRecruitingRepository SQL contract', () => {
 
     assert.equal(result?.id, onboardingRow.id)
     assert.match(pool.calls[0]?.sql ?? '', /r\.offer_id = \$1::uuid/)
+  })
+
+  it('lists all onboarding tasks for the board and parameterizes an onboarding filter for details', async () => {
+    const onboardingId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const pool = new FakePool([[], []])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    await repository.listOnboardingTasks()
+    await repository.listOnboardingTasks(onboardingId)
+
+    assert.match(pool.calls[0]?.sql ?? '', /FROM onboarding_tasks t JOIN onboarding_records r ON r\.id = t\.onboarding_id/)
+    assert.match(pool.calls[0]?.sql ?? '', /ORDER BY t\.category, t\.created_at/)
+    assert.deepEqual(pool.calls[0]?.values, [])
+    assert.match(pool.calls[1]?.sql ?? '', /t\.onboarding_id = \$1::uuid/)
+    assert.deepEqual(pool.calls[1]?.values, [onboardingId])
+    assert.ok(!pool.calls[1]?.sql.includes(onboardingId))
   })
 
   it('resolves legacy candidate/job ids before inserting an application', async () => {
@@ -500,4 +532,161 @@ describe('candidate deletion SQL contract', () => {
       assert.ok(!pool.client.calls.some((call) => call.sql.startsWith('DELETE')))
     })
   }
+})
+
+describe('offer template SQL contract', () => {
+  it('persists and reads Offer invoice details with aligned SQL placeholders', async () => {
+    const id = '88888888-8888-4888-8888-888888888888'
+    const row = {
+      id, offer_id: id, version: 1, position_title: '测试岗位', department_id: candidateRow.id,
+      employment_type: 'full_time', start_date: null, reporting_location: null,
+      invoice_title: '测试公司', tax_number: 'TEST9133', compensation: {}, benefits: [], materials: [],
+      content: '<p>Offer</p>', created_at: '2026-11-07T00:00:00.000Z',
+    }
+    const pool = new FakePool([], [[], [{ id: candidateRow.id }], [row], []])
+    const saved = await new NormalizedRecruitingRepository(pool).createOfferVersion({
+      offerId: id, version: 1, positionTitle: row.position_title, departmentId: candidateRow.id,
+      employmentType: 'full_time', invoiceTitle: '测试公司', taxNumber: 'TEST9133', compensation: {}, content: row.content,
+    })
+    assert.equal(saved.invoiceTitle, '测试公司')
+    assert.equal(saved.taxNumber, 'TEST9133')
+    const insert = pool.client.calls.find(call => call.sql.startsWith('INSERT INTO offer_versions'))!
+    assert.match(insert.sql, /invoice_title, tax_number/u)
+    assert.match(insert.sql, /\$11::jsonb, \$12::jsonb, \$13::jsonb, \$14/u)
+    assert.equal(insert.values.length, 15)
+    assert.deepEqual(insert.values.slice(8, 10), ['测试公司', 'TEST9133'])
+  })
+  it('deactivates the current default template and clears its default flag', async () => {
+    const organizationId = '99999999-9999-4999-8999-999999999999'
+    const pool = new FakePool([], [
+      [],
+      [offerTemplateRow],
+      [{ ...offerTemplateRow, is_active: false, is_default: false }],
+      [],
+    ])
+    const repository = new NormalizedRecruitingRepository(pool, { organizationId })
+
+    const updated = await repository.updateOfferTemplate(offerTemplateRow.id, { isActive: false })
+
+    assert.equal(updated.isActive, false)
+    assert.equal(updated.isDefault, false)
+    const update = pool.client.calls.find((call) => call.sql.startsWith('UPDATE offer_templates SET is_active'))
+    assert.ok(update)
+    assert.match(update.sql, /is_default = \$2/)
+    assert.deepEqual(update.values.slice(0, 2), [false, false])
+    assert.equal(pool.client.calls.at(-1)?.sql, 'COMMIT')
+  })
+})
+
+describe('offer workflow transition SQL contract', () => {
+  const offerId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const versionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const actorId = '77777777-7777-4777-8777-777777777777'
+  const offerRow = {
+    id: offerId,
+    application_id: applicationRow.id,
+    status: 'sent',
+    current_version_id: versionId,
+    approval_status: 'approved',
+    sent_at: '2026-11-01T08:00:00.000Z',
+    responded_at: null,
+    expires_at: null,
+    version: 2,
+    created_at: '2026-11-01T07:00:00.000Z',
+    updated_at: '2026-11-01T08:00:00.000Z',
+  }
+  const sentApplicationRow = { ...applicationRow, status: 'offer_sent' }
+  const transitionInput = {
+    action: 'resend' as const,
+    fromStatus: 'sent' as const,
+    toStatus: 'sent' as const,
+    applicationStatus: 'offer_sent' as const,
+    actorId,
+  }
+
+  it('updates the Offer and application, writes both audit events, and commits atomically', async () => {
+    const pool = new FakePool([], [
+      [],
+      [offerRow],
+      [],
+      [],
+      [offerRow],
+      [sentApplicationRow],
+      [{ id: versionId }],
+      [{ ...offerRow, version: 3 }],
+      [sentApplicationRow],
+      [{ id: actorId }],
+      [],
+      [{ id: actorId }],
+      [],
+      [],
+    ])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    const result = await repository.transitionOffer(offerId, transitionInput)
+
+    assert.equal(result.offer.version, 3)
+    assert.equal(result.offer.sentAt, offerRow.sent_at)
+    assert.equal(result.offer.currentVersionId, versionId)
+    assert.equal(result.application.status, 'offer_sent')
+    const calls = pool.client.calls
+    const offerUpdate = calls.find((call) => call.sql.startsWith('UPDATE offers'))!
+    assert.match(offerUpdate.sql, /sent_at = COALESCE\(sent_at, now\(\)\)/)
+    assert.match(offerUpdate.sql, /version = version \+ 1/)
+    assert.ok(calls.find((call) => call.sql.startsWith('UPDATE applications')))
+    assert.equal(calls.filter((call) => call.sql.includes('INSERT INTO workflow_events')).length, 2)
+    assert.ok(!calls.some((call) => call.sql.startsWith('UPDATE offer_versions')))
+    assert.equal(calls[0]?.sql, 'BEGIN')
+    assert.equal(calls.at(-1)?.sql, 'COMMIT')
+  })
+
+  it('rolls back both status updates when the second audit event cannot be written', async () => {
+    let workflowEventWrites = 0
+    const pool = new FakePool([], [
+      [],
+      [offerRow],
+      [],
+      [],
+      [offerRow],
+      [sentApplicationRow],
+      [{ id: versionId }],
+      [{ ...offerRow, version: 3 }],
+      [sentApplicationRow],
+      [{ id: actorId }],
+      [],
+      [{ id: actorId }],
+      [],
+    ], (sql) => {
+      if (sql.includes('INSERT INTO workflow_events') && ++workflowEventWrites === 2) {
+        return new Error('模拟第二条审计事件写入失败')
+      }
+      return undefined
+    })
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    await assert.rejects(repository.transitionOffer(offerId, transitionInput), /模拟第二条审计事件写入失败/)
+
+    assert.equal(pool.client.calls.at(-1)?.sql, 'ROLLBACK')
+    assert.ok(!pool.client.calls.some((call) => call.sql === 'COMMIT'))
+  })
+
+  it('rolls back when the Offer status changes before the row lock is acquired', async () => {
+    const pool = new FakePool([], [
+      [],
+      [offerRow],
+      [],
+      [],
+      [{ ...offerRow, status: 'declined' }],
+    ])
+    const repository = new NormalizedRecruitingRepository(pool)
+
+    await assert.rejects(
+      repository.transitionOffer(offerId, transitionInput),
+      (error: any) => error.code === 'OFFER_INVALID_TRANSITION',
+    )
+
+    assert.equal(pool.client.calls.at(-1)?.sql, 'ROLLBACK')
+    assert.ok(!pool.client.calls.some((call) => call.sql.startsWith('UPDATE offers')))
+    assert.ok(!pool.client.calls.some((call) => call.sql.includes('INSERT INTO workflow_events')))
+  })
 })

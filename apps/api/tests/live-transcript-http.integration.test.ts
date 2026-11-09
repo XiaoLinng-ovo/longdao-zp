@@ -395,15 +395,16 @@ test('minor preview differences cannot discard offline sentences; alternatives s
   assert.deepEqual(restored.body.data.segments.find((item: LiveSegment) => item.id === row.id).transcriptComparison, row.transcriptComparison)
 })
 
-test('ambiguous recognizer differences preserve both texts without inserting duplicate dialogue', async () => {
+test('ambiguous recognizer differences keep offline words and never insert duplicate dialogue', async () => {
   const text = '我负责平台开发和测试。', stream = '我不负责平台开发。我负责需求整理。'
   upstreamRows = [{ text, speakerId: 'speaker_0', startMs: 0, endMs: 14000 }]
   const response = await send('POST', segmentPath, { ...payload(), streamingTranscript: { text: stream, endMs: 30000, complete: true } })
   assert.equal(response.status, 201)
   assert.equal(response.body.data.length, 1)
-  assert.equal(response.body.data[0].text, stream)
+  assert.equal(response.body.data[0].text, text)
   assert.equal(response.body.data[0].role, 'unknown')
-  assert.equal(response.body.data[0].transcriptComparison.offlineText, text)
+  assert.equal(response.body.data[0].transcriptComparison.streamingText, stream)
+  assert.equal(response.body.data[0].transcriptComparison.selectedSource, 'offline')
 })
 
 test('summary endpoints require authentication, CSRF and an interview within scope', async () => {

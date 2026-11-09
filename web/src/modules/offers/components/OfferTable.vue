@@ -1,45 +1,46 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { OfferAction, OfferRow, OnboardingStatus } from '../api'
-import { OFFER_ACTION_LABEL, OFFER_STATUS_LABEL } from '../api'
+import { OFFER_ACTION_LABEL, OFFER_STATUS_LABEL, offerActionsFor } from '../api'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 
 defineProps<{ rows: OfferRow[]; actingId?: string }>()
 
 const emit = defineEmits<{
   action: [row: OfferRow, action: OfferAction, reason?: string]
+  send: [row: OfferRow]
   open: [row: OfferRow]
   revise: [row: OfferRow]
+  recreate: [row: OfferRow]
 }>()
 
-const REASON_ACTIONS: OfferAction[] = ['decline', 'cancel', 'reject']
+const REASON_ACTIONS: OfferAction[] = ['decline', 'cancel']
 const ONBOARDING_STATUS_LABEL: Record<OnboardingStatus, string> = {
   pending: '待入职',
+  preparing: '入职准备中',
   scheduled: '已排期',
   completed: '已归档',
+  no_show: '未到岗',
   cancelled: '已取消',
 }
 const pending = ref<{ row: OfferRow; action: OfferAction } | null>(null)
 const reason = ref('')
 
 function actionsFor(row: OfferRow): OfferAction[] {
-  switch (row.status) {
-    case 'draft': return ['submit-approval', 'cancel']
-    case 'pending_approval': return ['approve', 'reject', 'cancel']
-    case 'approved': return ['send', 'cancel']
-    case 'sent': return ['accept', 'decline', 'expire', 'cancel']
-    case 'accepted': return row.onboardingStatus ? [] : ['archive-onboarding']
-    default: return []
-  }
+  return offerActionsFor(row.status, row.onboardingStatus)
 }
 
 function tone(action: OfferAction): string {
-  if (action === 'decline' || action === 'cancel' || action === 'reject') return 'btn-danger'
-  if (action === 'approve' || action === 'send' || action === 'submit-approval') return 'btn-primary'
+  if (action === 'decline' || action === 'cancel') return 'btn-danger'
+  if (action === 'send' || action === 'resend') return 'btn-primary'
   return 'btn-ghost'
 }
 
 function run(row: OfferRow, action: OfferAction) {
+  if (action === 'send' || action === 'resend') {
+    emit('send', row)
+    return
+  }
   if (REASON_ACTIONS.includes(action)) {
     reason.value = ''
     pending.value = { row, action }
@@ -65,8 +66,6 @@ function submitReason() {
           <th>候选人</th>
           <th>岗位</th>
           <th>状态</th>
-          <th>审批</th>
-          <th>审批人</th>
           <th>更新时间</th>
           <th>操作</th>
         </tr>
@@ -76,12 +75,11 @@ function submitReason() {
           <td><a class="row-link" href="#" @click.prevent="emit('open', row)">{{ row.candidate }}</a></td>
           <td>{{ row.job }}</td>
           <td><StatusTag :status="row.status" /></td>
-          <td><StatusTag :status="row.approvalStatus" /></td>
-          <td>{{ row.approver }}</td>
           <td>{{ row.updatedAt }}</td>
           <td>
             <div class="inline-actions">
               <button class="btn btn-ghost" type="button" @click="emit('open', row)">详情</button>
+              <button v-if="row.status === 'cancelled'" class="btn btn-ghost" type="button" @click="emit('recreate', row)">重新创建</button>
               <button v-if="row.status === 'draft'" class="btn btn-ghost" type="button" @click="emit('revise', row)">修订</button>
               <button
                 v-for="action in actionsFor(row)"
@@ -94,12 +92,12 @@ function submitReason() {
               >
                 {{ OFFER_ACTION_LABEL[action] }}
               </button>
-              <span v-if="!actionsFor(row).length" class="list-muted">{{ row.onboardingStatus ? ONBOARDING_STATUS_LABEL[row.onboardingStatus] : OFFER_STATUS_LABEL[row.status] }}</span>
+              <span v-if="!actionsFor(row).length || (row.status === 'accepted' && row.onboardingStatus)" class="list-muted">{{ row.onboardingStatus ? ONBOARDING_STATUS_LABEL[row.onboardingStatus] : OFFER_STATUS_LABEL[row.status] }}</span>
             </div>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td class="table-empty" colspan="7">暂无 Offer 记录</td>
+          <td class="table-empty" colspan="5">暂无 Offer 记录</td>
         </tr>
       </tbody>
     </table>

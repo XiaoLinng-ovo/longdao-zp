@@ -31,25 +31,8 @@ services:
       retries: 20
     networks: [smartrecruit]
 
-  minio:
-    image: quay.io/minio/minio:latest
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-smartrecruit}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
-    command: server /data --console-address ":9001"
-    ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-    networks: [smartrecruit]
-
   clamav:
+    profiles: ["virus-scan"]
     image: clamav/clamav:stable
     ports:
       - "${CLAMAV_PORT:-3310}:3310"
@@ -91,20 +74,32 @@ services:
       PGUSER: ${POSTGRES_USER:-smartrecruit}
       PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
       PGDATABASE: ${POSTGRES_DB:-smartrecruit}
-      S3_ENDPOINT: http://minio:9000
-      S3_REGION: us-east-1
-      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-smartrecruit}
-      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
-      S3_QUARANTINE_BUCKET: resume-quarantine
-      S3_FORCE_PATH_STYLE: "true"
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
       OCR_SERVICE_URL: http://ocr:8090
-      RESUME_VIRUS_SCAN_ENABLED: "false"
+      RESUME_VIRUS_SCAN_ENABLED: ${RESUME_VIRUS_SCAN_ENABLED:-false}
       ALLOWED_ORIGINS: http://127.0.0.1:5174,http://localhost:5174
+      ENV_FILE_PATH: /config/runtime.env
+      AUTH_OTP_HMAC_SECRET: ${AUTH_OTP_HMAC_SECRET:?Set AUTH_OTP_HMAC_SECRET in .env}
+      AUTH_MFA_ENCRYPTION_KEY: ${AUTH_MFA_ENCRYPTION_KEY:?Set AUTH_MFA_ENCRYPTION_KEY in .env}
+      AUTH_MFA_REQUIRED: ${AUTH_MFA_REQUIRED:-false}
+      AUTH_MFA_EXEMPT_EMAILS: ${AUTH_MFA_EXEMPT_EMAILS:-admin@smartrecruit.local}
+      AUTH_TRUSTED_PROXY_IPS: ${AUTH_TRUSTED_PROXY_IPS:-172.16.0.0/12}
+      TURNSTILE_ENABLED: ${TURNSTILE_ENABLED:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     ports:
       - "${API_PORT:-3100}:3100"
+    volumes:
+      - resume_data:/data/object-storage
+      - ../.env:/config/runtime.env
     depends_on:
       postgres: { condition: service_healthy }
-      minio: { condition: service_healthy }
       ocr: { condition: service_healthy }
     networks: [smartrecruit]
 
@@ -123,16 +118,15 @@ services:
       WORKER_DB_POLL: "true"
       WORKER_HEALTH_HOST: 0.0.0.0
       WORKER_HEALTH_PORT: 4001
-      S3_ENDPOINT: http://minio:9000
-      S3_REGION: us-east-1
-      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-smartrecruit}
-      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-development}
-      S3_QUARANTINE_BUCKET: resume-quarantine
-      S3_FORCE_PATH_STYLE: "true"
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
+      CLAMAV_HOST: ${CLAMAV_HOST:-}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+      CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-30000}
     depends_on:
       postgres: { condition: service_healthy }
-      minio: { condition: service_healthy }
       api: { condition: service_started }
+    volumes:
+      - resume_data:/data/object-storage
     networks: [smartrecruit]
 
   web:
@@ -152,6 +146,6 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
+  resume_data:
   clamav_data:
   paddle_models:

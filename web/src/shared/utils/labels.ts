@@ -6,6 +6,7 @@
 export const STATUS_LABEL: Record<string, string> = {
   active: '进行中', pending: '待处理', approved: '已通过', rejected: '已拒绝', draft: '草稿',
   queued: '排队中', processing: '分析中', failed: '失败',
+  removed: '分析任务已删除',
   scheduled: '已安排', completed: '已完成', sent: '已发送', accepted: '已接受', declined: '已拒绝',
   published: '已发布', paused: '已暂停', configured: '已配置', disabled: '未配置', pending_approval: '待审批',
   withdrawn: '已撤回', closed: '已关闭', cancelled: '已取消', ready: '待发布', converted: '已转岗位',
@@ -26,7 +27,7 @@ export const ACTION_LABEL: Record<string, string> = {
   publish: '发布', pause: '暂停', resume: '恢复', close: '关闭', cancel: '取消',
   send: '发送', accept: '接受', decline: '拒绝', expire: '过期',
   archive_onboarding: '入职归档', schedule: '安排入职', complete: '完成入职',
-  feedback_submitted: '提交反馈', feedback_locked: '锁定反馈', conclude: '面试结论',
+  feedback_submitted: '提交反馈', feedback_locked: '锁定反馈', conclude: '面试结论', correct_conclusion: '更正面试结论',
   'admin.user.update': '修改用户', 'admin.role.update': '修改角色',
   'admin.department.create': '新建部门', 'admin.department.update': '修改部门', 'admin.department.delete': '删除部门',
   'admin.settings.update': '修改系统设置', 'admin.dingtalk_settings.update': '修改钉钉配置',

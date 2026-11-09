@@ -91,10 +91,39 @@ afterEach(() => {
 })
 
 describe('InterviewListPage', () => {
+  it('shows a reschedule action for a cancelled interview', async () => {
+    mockedLoadInterviews.mockResolvedValue([finalInterview({ status: 'cancelled' })])
+    mockedLoadApplications.mockResolvedValue({ candidates: [], jobs: [], applications: [], interviewers: [] })
+    await mountPage()
+    expect(button('重新安排')).toBeTruthy()
+  })
+
+  it('creates a replacement schedule for a cancelled final interview', async () => {
+    const interviewerId = '77777777-7777-4777-8777-777777777777'
+    mockedLoadInterviews.mockResolvedValue([finalInterview({ status: 'cancelled', title: '技术复试', type: 'technical', interviewerIds: [interviewerId] })])
+    mockedLoadApplications.mockResolvedValue({
+      candidates: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王五' }],
+      jobs: [{ id: 'job-1', code: 'JOB-1', title: '后端工程师' }],
+      applications: [{ id: 'app-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'interviewing' }],
+      interviewers: [{ id: interviewerId, displayName: '林晓' }],
+    })
+    mockedCreateInterview.mockResolvedValue({} as never)
+    await mountPage()
+    button('重新安排').click()
+    await flush()
+    expect(root!.querySelector('.dialog h3')?.textContent).toBe('重新安排复试')
+    await fillSchedule()
+    button('确认重新安排').click()
+    await flush()
+    expect(mockedCreateInterview).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', round: 2, title: '技术复试' }))
+    expect(mockedUpdateSchedule).not.toHaveBeenCalled()
+  })
+
   it.each([
-    ['initial', '1 轮', 'reject', ['continue', 'reject']],
-    ['final', '2 轮', 'offer', ['offer', 'reject']],
-    ['final', '2 轮', 'reject', ['offer', 'reject']],
+    ['initial', '1 轮', 'cancelled', ['continue', 'reject', 'cancelled']],
+    ['final', '2 轮', 'offer', ['offer', 'reject', 'cancelled']],
+    ['final', '2 轮', 'reject', ['offer', 'reject', 'cancelled']],
+    ['final', '2 轮', 'cancelled', ['offer', 'reject', 'cancelled']],
   ] as const)('completes %s with %s and only stage-appropriate outcomes', async (stage, round, outcome, options) => {
     mockedLoadInterviews.mockResolvedValue([{ ...finalInterview(), stage, round, scheduledAt: '10/29 10:00', scheduledStartAt: '2026-10-29T02:00:00Z', aiScore: 82.5 }])
     vi.mocked(completeInterview).mockResolvedValue({})
@@ -108,6 +137,32 @@ describe('InterviewListPage', () => {
     expect(completeInterview).toHaveBeenCalledWith('final-1', outcome)
     expect(root!.querySelector('[role="dialog"]')).toBeNull()
     expect(submitFeedback).not.toHaveBeenCalled()
+  })
+
+  it('keeps the interview list visible while synchronizing after completion', async () => {
+    const scheduled = { ...finalInterview(), stage: 'initial' as const, round: '1 轮', scheduledAt: '10/29 10:00' }
+    const completed = { ...scheduled, status: 'completed', outcome: 'continue' as const, feedbackStatus: 'completed' as const }
+    let resolveSync!: (rows: InterviewView[]) => void
+    mockedLoadInterviews
+      .mockResolvedValueOnce([scheduled])
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSync = resolve }))
+    vi.mocked(completeInterview).mockResolvedValue({})
+
+    await mountPage()
+    button('完成').click()
+    await flush()
+    button('确认完成').click()
+    await flush()
+
+    expect(completeInterview).toHaveBeenCalledWith('final-1', 'continue')
+    expect(root!.querySelector('.loading-note')).toBeNull()
+    expect(root!.querySelector('.interview-filters')).toBeTruthy()
+    expect(root!.querySelector('.table-wrap')).toBeTruthy()
+    expect(root!.textContent).toContain('初试通过')
+
+    resolveSync([completed])
+    await flush()
+    expect(mockedLoadInterviews).toHaveBeenCalledTimes(2)
   })
 
   it('prevents duplicate completion and keeps failures in the dialog for retry', async () => {
@@ -390,7 +445,7 @@ describe('InterviewListPage', () => {
     button('完成').click()
     await flush()
     expect(root.querySelector('.dialog h3')?.textContent).toBe('完成初试')
-    expect([...root.querySelectorAll('#conclude-outcome option')].map(option => option.textContent)).toEqual(['下一轮', '未通过'])
+    expect([...root.querySelectorAll('#conclude-outcome option')].map(option => option.textContent)).toEqual(['下一轮', '未通过', '取消面试'])
     button('确认完成').click()
     await flush()
     expect(completeInterview).toHaveBeenCalledWith('interview-1', 'continue')

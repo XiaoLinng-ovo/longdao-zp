@@ -82,11 +82,32 @@ describe('dashboard actionable todos', () => {
     interview.status = 'cancelled'
     assert.equal(sheetTodos(state, [review, newerReview]).length, 0)
   })
-  it('requires every required interviewer to lock their feedback', () => {
+  it('creates one completion todo only for scheduled interviews with a start time', () => {
     const { state, interview } = fixture()
-    interview.participants = [{ userId: 'a', role: 'interviewer', required: true }, { userId: 'b', role: 'interviewer', required: true }]
-    state.interviewFeedback.push({ id: 'f', interviewId: interview.id, interviewerId: 'a', status: 'locked', ratings: {}, strengths: [], concerns: [] })
-    assert.ok(buildDashboardTodos(state).some(row => row.id === 'feedback-interview-1'))
+    interview.status = 'scheduled'
+    interview.scheduledStartAt = '2026-10-02T00:00:00Z'
+    let todos = buildDashboardTodos(state)
+    const completion = todos.filter(row => row.id.startsWith('complete-'))
+    assert.deepEqual(completion.map(row => row.id), ['complete-interview-1'])
+    assert.equal(completion[0]!.title, '面试待完成')
+    assert.equal(completion[0]!.actionLabel, '去完成')
+    assert.equal(completion[0]!.path, '/interviews/interview-1')
+    assert.ok(!todos.some(row => row.id.startsWith('feedback-') || row.id.startsWith('conclude-')))
+
+    interview.status = 'completed'
+    todos = buildDashboardTodos(state)
+    assert.ok(!todos.some(row => row.id === 'complete-interview-1'))
+
+    const withoutStart = { ...interview, status: 'scheduled' as const }
+    delete withoutStart.scheduledStartAt
+    state.interviews = state.interviews.map(row => row.id === interview.id ? withoutStart : row)
+    todos = buildDashboardTodos(state)
+    assert.ok(!todos.some(row => row.id === 'complete-interview-1'))
+
+    const cancelled = { ...interview, status: 'cancelled' as const, scheduledStartAt: '2026-10-02T00:00:00Z' }
+    state.interviews = state.interviews.map(row => row.id === interview.id ? cancelled : row)
+    todos = buildDashboardTodos(state)
+    assert.ok(!todos.some(row => row.id === 'complete-interview-1'))
   })
   it('excludes converted requests using either stored conversion IDs or linked jobs', () => {
     const state = createSeedState()
@@ -102,6 +123,7 @@ describe('dashboard actionable todos', () => {
     state.offers.push({ id: 'offer', code: 'OFF-1', applicationId: 'application-8814', status: 'pending_approval', approval: { status: 'pending', approver: '' }, version: 1, createdAt: time, updatedAt: time })
     state.onboarding.push({ id: 'onboard', applicationId: 'application-8821', offerId: 'accepted-offer', status: 'scheduled', createdAt: time, updatedAt: time })
     assert.deepEqual([...new Set(buildDashboardTodos(state).map(row => row.category))].sort(), ['interview', 'job', 'offer', 'onboarding', 'requisition', 'resume'])
+    assert.equal(buildDashboardTodos(state).find(row => row.id === 'offer-offer')?.title, 'Offer 待发送')
     assert.ok(buildDashboardTodos(state).some(row => row.id === 'schedule-application-8814'))
     state.applications[1]!.status = 'offer_approval'; state.offers = []
     assert.ok(buildDashboardTodos(state).some(row => row.id === 'create-offer-application-8814'))

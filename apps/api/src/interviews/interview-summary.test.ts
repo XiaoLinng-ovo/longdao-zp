@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { buildActualDialogue, createUnscoredSummary, createInterviewSummaryGenerator, parseInterviewSummary } from './interview-summary.js'
+import { assessTranscriptQuality, buildActualDialogue, createUnscoredSummary, createInterviewSummaryGenerator, parseInterviewSummary } from './interview-summary.js'
 import type { LiveSegment } from './live-session-repository.js'
 import { InterviewSummaryService, startInterviewSummaryPoll } from './interview-summary-service.js'
 
@@ -24,6 +24,43 @@ const config = { baseUrl: 'https://model.invalid/v1', apiKey: 'secret', model: '
 const reply = (body: unknown) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(body) } }] }), { headers: { 'content-type': 'application/json' } })
 
 describe('actual interview dialogue', () => {
+  it('blocks high-confidence mixed speech when source-role review is pending', () => {
+    assert.equal(assessTranscriptQuality(base().transcript, true).usable, false)
+    assert.equal(assessTranscriptQuality(base().transcript, false).usable, true)
+  })
+
+  it('blocks many short unknown segments even when a long candidate answer dominates by characters', () => {
+    const rows = [segment('answer', 'candidate', '我完成了项目开发和上线验收，并负责后续维护。'.repeat(10), 0),
+      ...Array.from({ length: 3 }, (_, i) => segment(`unknown-${i}`, 'unknown', '嗯。', 2000 + i * 2000))]
+    assert.equal(assessTranscriptQuality(buildActualDialogue(rows).transcript).usable, false)
+  })
+
+  it('counts original segments rather than merged turns when checking unknown share', () => {
+    const rows = [...Array.from({ length: 8 }, (_, i) => segment(`answer-${i}`, 'candidate', '我完成了项目开发和上线验收。', i * 2000)),
+      ...Array.from({ length: 3 }, (_, i) => segment(`unknown-${i}`, 'unknown', '嗯。', 20_000 + i * 2000))]
+    const dialogue = buildActualDialogue(rows)
+    assert.equal(dialogue.transcript.length, 4)
+    assert.equal(assessTranscriptQuality(dialogue.transcript).usable, true)
+  })
+
+  it('blocks scoring when uncertain candidate-like speech outweighs reliable evidence', () => {
+    const result = assessTranscriptQuality(buildActualDialogue([
+      segment('q', 'interviewer', '项目？', 0),
+      segment('a', 'candidate', '我负责开发。', 2000),
+      segment('mixed', 'unknown', '我负责开发和测试并且完成了上线交付工作。这里还有很多无法确认的内容，包括项目目标、技术方案、上线结果和后续维护情况。', 4000),
+    ]).transcript)
+    assert.equal(result.usable, false)
+    assert.match(result.warning!, /暂不评分/)
+  })
+
+  it('allows a short uncertain fragment when reliable candidate evidence is larger', () => {
+    const result = assessTranscriptQuality(buildActualDialogue([
+      segment('a', 'candidate', '我负责开发和测试并且完成了项目上线。', 0),
+      segment('mixed', 'unknown', '嗯。', 2000),
+    ]).transcript)
+    assert.equal(result.usable, true)
+  })
+
   it('orders by audio timestamps, merges answer chunks and never attaches the school answer to the project', () => {
     const input = segments().reverse()
     const result = buildActualDialogue(input)
@@ -141,7 +178,10 @@ describe('evidence grounded semantic summary', () => {
   })
   it('sends actual dialogue and job context, instructing semantic evaluation without inferred competence or reference coverage penalties', async () => {
     let sent: any
-    const fetcher: typeof fetch = async (_url, init) => { sent = JSON.parse(String(init?.body)); return reply(output()) }
+    const fetcher: typeof fetch = async (_url, init) => {
+      sent = JSON.parse(String(init?.body))
+      return reply(String(sent.messages[0].content).includes('"turnKinds"') ? { turnKinds: 'aall' } : output())
+    }
     const report = await createInterviewSummaryGenerator(config, fetcher).generate(base(), { jobTitle: '人事', requirements: ['招聘'], skills: [] })
     assert.equal(report.overallScore, 75)
     assert.match(sent.messages[0].content, /允许语义等价/)
@@ -149,12 +189,42 @@ describe('evidence grounded semantic summary', () => {
     assert.match(sent.messages[0].content, /严禁/)
     const input = JSON.parse(sent.messages[1].content)
     assert.deepEqual(input.pairs, [
-      { id: 'p1', questionTurnIds: ['t1'], answerTurnIds: ['t2'] },
-      { id: 'p2', questionTurnIds: ['t3'], answerTurnIds: ['t4'] },
+      { id: 'p1', questionTurnIds: ['t1'], answerTurnIds: ['t2'], kind: 'assessment' },
+      { id: 'p2', questionTurnIds: ['t3'], answerTurnIds: ['t4'], kind: 'logistics' },
     ])
     assert.deepEqual(input.transcript.map((row: any) => row.text), base().transcript.map(row => row.text))
     assert.deepEqual(input.evidenceTurnIds, ['t2', 't4'])
-    assert.deepEqual(Object.keys(input).sort(), ['evidenceTurnIds', 'job', 'pairs', 'transcript'])
+    assert.deepEqual(Object.keys(input).sort(), ['evidenceTurnIds', 'job', 'pairs', 'transcript', 'warnings'])
+  })
+  it('passes transcript coverage warnings to evaluation and forbids treating missing recording as an unanswered question', async () => {
+    const report = base()
+    report.warnings.push('原始录音只覆盖到本场第 5 分 19 秒，距面试结束还有约 17 分钟没有原音频证据；该部分不会被推测补写。')
+    const requests: any[] = []
+    await createInterviewSummaryGenerator(config, async (_url, init) => {
+      const request = JSON.parse(String(init?.body))
+      requests.push(request)
+      if (String(request.messages[0].content).includes('"turnKinds"')) return reply({ turnKinds: 'aall' })
+      return reply(output())
+    }).generate(report, { jobTitle: '人事', requirements: ['招聘'], skills: [] })
+
+    for (const request of requests.slice(1)) {
+      assert.deepEqual(JSON.parse(request.messages[1].content).warnings, report.warnings)
+    }
+    assert.match(requests[1].messages[0].content, /不能据此推断候选人未回答、拒绝回答、面试中止或能力不足/u)
+    assert.match(requests[1].messages[0].content, /不得据此扣分、生成负面风险或降低推荐结论/u)
+    assert.match(requests[1].messages[0].content, /所有总结、评价、优势、风险、推荐和待核实文本必须使用简体中文/u)
+  })
+  it('disables extended reasoning for DeepSeek so the JSON summary reaches final content', async () => {
+    let sent: any
+    const fetcher: typeof fetch = async (_url, init) => {
+      sent = JSON.parse(String(init?.body))
+      return reply(String(sent.messages[0].content).includes('"turnKinds"') ? { turnKinds: 'aall' } : output())
+    }
+    await createInterviewSummaryGenerator({ ...config, model: 'deepseek-v4-flash' }, fetcher)
+      .generate(base(), { jobTitle: '人事', requirements: ['招聘'], skills: [] })
+    assert.deepEqual(sent.thinking, { type: 'disabled' })
+    assert.equal(sent.max_completion_tokens, 8192)
+    assert.deepEqual(sent.response_format, { type: 'json_object' })
   })
   it('rejects oversized input without truncating and never calls the model', async () => {
     const report = base(); report.transcript[0]!.text = 'a'.repeat(160001)
@@ -165,10 +235,47 @@ describe('evidence grounded semantic summary', () => {
 
 describe('summary request resilience and compact classifications', () => {
   const job = { jobTitle: '人事', requirements: [], skills: [] }
-  const compact = () => ({ ...output(), turns: undefined, pairs: undefined,
+  const classification = () => ({ turnKinds: 'aall', pairKinds: 'al' })
+  const legacyClassification = () => ({
     turnKinds: { assessment: ['t1', 't2'], logistics: ['t3', 't4'], unreviewed: [] },
     pairKinds: { assessment: ['p1'], logistics: ['p2'], unreviewed: [] },
+  })
+  const compact = () => ({ ...output(), ...legacyClassification(), turns: undefined, pairs: undefined,
+    recommendation: null,
     dimensions: output().dimensions.map(row => ({ ...row, evidence: row.evidence.map(item => ({ turnId: 't2', quote: item.quote })) })),
+  })
+  it('classifies first, then evaluates only after restoring every turn kind', async () => {
+    const requests: any[] = []
+    const result = await createInterviewSummaryGenerator(config, async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)))
+      return reply(requests.length === 1 ? classification() : compact())
+    }).generate(base(), job)
+    assert.equal(requests.length, 5)
+    assert.match(requests[0].messages[0].content, /只分类/)
+    assert.match(requests[1].messages[0].content, /本步只生成整场总结/)
+    assert.match(requests[2].messages[0].content, /本步只生成已实际考察的岗位相关维度/)
+    assert.match(requests[3].messages[0].content, /本步只生成已有原文依据的优势和风险/)
+    assert.match(requests[4].messages[0].content, /本步只生成人工参考推荐和待核实事项/)
+    assert.equal(JSON.parse(requests[0].messages[1].content).transcript[0].kind, undefined)
+    const evaluationInput = JSON.parse(requests[1].messages[1].content)
+    assert.deepEqual(evaluationInput.transcript.map((row: any) => row.kind), ['assessment', 'assessment', 'logistics', 'logistics'])
+    assert.deepEqual(evaluationInput.pairs.map((row: any) => row.kind), ['assessment', 'logistics'])
+    assert.equal(result.overallScore, 75)
+  })
+  it('splits a classification batch after repeated truncated codes instead of failing the interview', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async (_url, init) => {
+      calls++
+      const request = JSON.parse(String(init?.body))
+      if (String(request.messages[0].content).includes('只分类')) {
+        const source = JSON.parse(request.messages[1].content) as { transcript: Array<{ text: string }> }
+        if (source.transcript.length > 2) return reply({ turnKinds: 'a' })
+        return reply({ turnKinds: source.transcript[0]!.text.includes('毕业') ? 'll' : 'aa' })
+      }
+      return reply(compact())
+    }).generate(base(), job)
+    assert.equal(calls, 8)
+    assert.equal(result.overallScore, 75)
   })
   it('restores compact references to original IDs and retains the full report', async () => {
     const result = await createInterviewSummaryGenerator(config, async () => reply(compact())).generate(base(), job)
@@ -176,6 +283,21 @@ describe('summary request resilience and compact classifications', () => {
     assert.deepEqual(result.dimensions[0]!.evidence, [{ turnId: 'project-a', quote: '独立完成需求访谈和接口开发' }])
     assert.deepEqual(result.transcript.map(row => row.id), base().transcript.map(row => row.id))
     assert.deepEqual(result.pairs.map(row => row.id), base().pairs.map(row => row.id))
+  })
+  it('restores compact evidence references in staged responses without classification fields', async () => {
+    let calls = 0
+    const value = compact()
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls === 1) return reply(classification())
+      if (calls === 2) return reply({ summary: value.summary })
+      if (calls === 3) return reply({ dimensions: value.dimensions })
+      if (calls === 4) return reply({ strengths: [], concerns: [] })
+      return reply({ unassessed: value.unassessed, recommendation: null })
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.overallScore, 75)
+    assert.deepEqual(result.dimensions[0]!.evidence, [{ turnId: 'project-a', quote: '独立完成需求访谈和接口开发' }])
   })
   for (const scenario of ['missing', 'duplicate', 'invented-id', 'invented-quote', 'wrong-speaker', 'missing-group']) {
     it('rejects invalid compact evidence or incomplete classification: ' + scenario, async () => {
@@ -203,27 +325,50 @@ describe('summary request resilience and compact classifications', () => {
         }
         return reply(compact())
       }, async ms => { assert.equal(ms, 1000); waits++ }).generate(base(), job)
-      assert.equal(attempts, 2); assert.equal(waits, 1); assert.equal(result.overallScore, 75)
-      assert.notEqual(signals[0], signals[1])
+      assert.equal(attempts, 6); assert.equal(waits, 1); assert.equal(result.overallScore, 75)
+      assert.notEqual(signals[0], signals[1]); assert.notEqual(signals[1], signals[2])
     })
   }
+  it('recovers when the first two requests return HTTP 502', async () => {
+    let attempts = 0
+    const waits: number[] = []
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      attempts++
+      if (attempts <= 2) return new Response('temporarily unavailable', { status: 502 })
+      return reply(attempts === 3 ? classification() : compact())
+    }, async ms => { waits.push(ms) }).generate(base(), job)
+    assert.equal(result.overallScore, 75)
+    assert.equal(attempts, 7)
+    assert.deepEqual(waits, [1000, 2000])
+  })
   it('retries once when the model response fails evidence validation', async () => {
     let attempts = 0
     const invalid = compact()
     invalid.dimensions[0]!.evidence = []
     const result = await createInterviewSummaryGenerator(config, async () => {
       attempts++
-      return reply(attempts === 1 ? invalid : compact())
+      return reply(attempts === 1 ? classification() : attempts === 2 ? invalid : compact())
     }).generate(base(), job)
-    assert.equal(attempts, 2)
+    assert.equal(attempts, 5)
     assert.equal(result.overallScore, 75)
   })
-  it('bounds repeated timeouts to two attempts with a useful error', async () => {
+  it('bounds repeated timeouts to four attempts with a useful error', async () => {
     let attempts = 0
+    const waits: number[] = []
     await assert.rejects(createInterviewSummaryGenerator(config, async () => {
       attempts++; throw new DOMException('expired', 'TimeoutError')
-    }, async () => {}).generate(base(), job), /超时（1秒）.*完整转写已保留/)
-    assert.equal(attempts, 2)
+    }, async ms => { waits.push(ms) }).generate(base(), job), /超时（1秒）.*完整转写已保留/)
+    assert.equal(attempts, 4)
+    assert.deepEqual(waits, [1000, 2000, 4000])
+  })
+  it('returns a clear HTTP error after four consecutive transient failures', async () => {
+    let attempts = 0
+    const waits: number[] = []
+    await assert.rejects(createInterviewSummaryGenerator(config, async () => {
+      attempts++; return new Response('temporarily unavailable', { status: 502 })
+    }, async ms => { waits.push(ms) }).generate(base(), job), /HTTP 502/)
+    assert.equal(attempts, 4)
+    assert.deepEqual(waits, [1000, 2000, 4000])
   })
   for (const status of [400, 401, 403]) {
     it('does not retry permanent configuration/authorization HTTP ' + status, async () => {
@@ -239,15 +384,134 @@ describe('summary request resilience and compact classifications', () => {
       choices: [{ finish_reason: 'length', message: { content: JSON.stringify(compact()) } }],
     }))).generate(base(), job), /长度限制/)
   })
+  it('recovers the final complete JSON from reasoning when only the message body is truncated', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls > 1) return reply(compact())
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"turnKinds":"aall","pair',
+        reasoning_content: `逐段核对完毕。\n最终输出：${JSON.stringify(classification())}`,
+      } }] }))
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.overallScore, 75)
+    assert.deepEqual(result.transcript.map(row => row.kind), ['assessment', 'assessment', 'logistics', 'logistics'])
+  })
+  it('recovers when a complete JSON value is missing only its outer closing brace', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls !== 3) return reply(calls === 1 ? classification() : compact())
+      const complete = JSON.stringify({ dimensions: compact().dimensions })
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: complete.slice(0, -1),
+      } }] }))
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.overallScore, 75)
+  })
+  it('does not recover a JSON string truncated in the middle', async () => {
+    let calls = 0
+    await assert.rejects(createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls === 1) return reply(classification())
+      if (calls === 2) return reply(compact())
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"dimensions":[{"name":"项目执行',
+      } }] }))
+    }).generate(base(), job), /JSON结束前中断/)
+    assert.equal(calls, 4)
+  })
+  it('recovers a complete turn classification from a truncated classification body', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls > 1) return reply(compact())
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"turnKinds":"aall","pair',
+      } }] }))
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.overallScore, 75)
+    assert.deepEqual(result.pairs.map(row => row.kind), ['assessment', 'logistics'])
+  })
+  it('recovers a complete compact classification missing its closing quote and brace', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls > 1) return reply(compact())
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"turnKinds":"aall',
+      } }] }))
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.overallScore, 75)
+    assert.deepEqual(result.transcript.map(row => row.kind), ['assessment', 'assessment', 'logistics', 'logistics'])
+  })
+  it('keeps complete summary sentences when only the summary field is truncated', async () => {
+    let calls = 0
+    const complete = '候选人自述独立完成需求分析、项目开发、回归测试和上线交付，相关经历与岗位方向基本匹配。'
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls === 1) return reply({ turnKinds: 'aall' })
+      if (calls === 2) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: `{"summary":"${complete}但项目成果和个人贡献边界仍需要`,
+        reasoning_content: JSON.stringify({ summary: '中文整场总结' }),
+      } }] }))
+      return reply(compact())
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.summary, complete)
+    assert.equal(result.overallScore, 75)
+  })
+  it('recovers complete pending-check items when the recommendation list ends mid-string', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls === 1) return reply(classification())
+      if (calls === 2) return reply({ summary: output().summary })
+      if (calls === 3) return reply({ dimensions: compact().dimensions })
+      if (calls === 4) return reply({ strengths: [], concerns: [] })
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"recommendation":{"outcome":"hold","text":"现有证据仅覆盖开场记录，建议补充岗位相关技术评估后再决定。","evidence":[]},"unassessed":["团队管理能力未考察","项目成果需要核实","后续技术细节未',
+      } }] }))
+    }).generate(base(), job)
+    assert.equal(calls, 5)
+    assert.equal(result.recommendation?.outcome, 'hold')
+    assert.deepEqual(result.unassessed, ['团队管理能力未考察', '项目成果需要核实'])
+  })
+  it('rejects an unrelated recovery object and retries the recommendation stage', async () => {
+    let calls = 0
+    const result = await createInterviewSummaryGenerator(config, async () => {
+      calls++
+      if (calls === 1) return reply(classification())
+      if (calls >= 2 && calls <= 4) return reply(compact())
+      if (calls === 5) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+        content: '{"recommendation":',
+        reasoning_content: '{}',
+      } }] }))
+      return reply({ recommendation: null, unassessed: [] })
+    }).generate(base(), job)
+    assert.equal(calls, 6)
+    assert.equal(result.overallScore, 75)
+  })
 })
 
 describe('summary background processing', () => {
-  function fixture(rows = segments(), fetcher: typeof fetch = async () => reply(output()), failRead = false, previousReport: ReturnType<typeof base> | null = null) {
+  function fixture(rows = segments(), fetcher: typeof fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    if (String(request.messages[0].content).includes('"turnKinds"')) {
+      const source = JSON.parse(request.messages[1].content) as { transcript: unknown[] }
+      return reply({ turnKinds: 'a'.repeat(source.transcript.length) })
+    }
+    return reply(output())
+  }, failRead = false, previousReport: ReturnType<typeof base> | null = null, transcriptWarnings: string[] = [], transcriptRoleReviewRequired = false) {
     const saved: Array<{ report: ReturnType<typeof base>; error: string | null }> = []
     let resolved = 0
     const job = { sessionId: 'session', applicationId: 'app', revision: 3, claim: 'claim', previousReport }
     const repository = { claim: async () => job, save: async (_job: unknown, report: ReturnType<typeof base>, error: string | null) => { saved.push({ report, error }); return true }, latest: async () => null, request: async () => { throw new Error('unused') } }
-    const service = new InterviewSummaryService(repository, { get: async () => { if (failRead) throw new Error('读取转写暂时失败'); return { session: {} as never, segments: rows } } },
+    const service = new InterviewSummaryService(repository, { get: async () => { if (failRead) throw new Error('读取转写暂时失败'); return { session: {} as never, segments: rows, transcriptWarnings, transcriptRoleReviewRequired } } },
       { getApplicationJobContext: async () => ({ candidateName: '测试候选人', jobTitle: '人事', requirements: [], skills: [] }) },
       async appId => { assert.equal(appId, 'app'); resolved++; return { OPENAI_BASE_URL: config.baseUrl, OPENAI_API_KEY: config.apiKey, OPENAI_MODEL: config.model } }, fetcher)
     return { service, saved, get resolved() { return resolved } }
@@ -256,6 +520,37 @@ describe('summary background processing', () => {
     const f = fixture(); assert.equal(await f.service.processPending(), true)
     assert.equal(f.resolved, 1); assert.equal(f.saved[0]!.report.overallScore, 75); assert.equal(f.saved[0]!.error, null)
   })
+  it('saves an explicitly review-required report without model calls or previous scores', async () => {
+    let calls = 0
+    const previous = { ...base(), overallScore: 86 }
+    const f = fixture(segments(), async () => { calls++; throw new Error('must not call model') }, false, previous, ['混合音轨角色未确认。'], true)
+    await f.service.processPending()
+    assert.equal(calls, 0)
+    assert.equal(f.resolved, 0)
+    assert.equal(f.saved[0]!.error, null)
+    assert.equal(f.saved[0]!.report.overallScore, null)
+    assert.equal(f.saved[0]!.report.reviewRequired, true)
+    assert.deepEqual(f.saved[0]!.report.dimensions, [])
+    assert.equal(f.saved[0]!.report.recommendation, null)
+    assert.match(f.saved[0]!.report.summary, /暂不评分/u)
+    assert.deepEqual(f.saved[0]!.report.transcript, base().transcript)
+  })
+
+  it('carries corrected transcript warnings into the model input and saved report', async () => {
+    const warning = '原始录音只覆盖到本场第 5 分 19 秒，距面试结束还有约 17 分钟没有原音频证据。'
+    const inputs: any[] = []
+    const f = fixture(segments(), async (_url, init) => {
+      const request = JSON.parse(String(init?.body))
+      inputs.push(JSON.parse(request.messages[1].content))
+      return reply(String(request.messages[0].content).includes('"turnKinds"') ? { turnKinds: 'aall' } : output())
+    }, false, null, [warning])
+
+    await f.service.processPending()
+
+    assert.ok(f.saved[0]!.report.warnings.includes(warning))
+    assert.ok(inputs.length > 1 && inputs.slice(1).every(input => input.warnings.includes(warning)))
+    assert.equal(f.saved[0]!.error, null)
+  })
   it('releases a claimed task as failed when reading the transcript fails', async () => {
     const f = fixture([], undefined, true)
     assert.equal(await f.service.processPending(), true)
@@ -263,16 +558,22 @@ describe('summary background processing', () => {
   })
   it('allows a five-minute attempt for long interviews and retains every turn', async () => {
     const rows = Array.from({ length: 120 }, (_, i) => segment('turn-' + i, 'candidate', '完整发言' + i, i * 10000))
-    let duration = 0
+    let duration = 0, calls = 0
     const f = fixture(rows, async (_url, init) => {
+      calls++
       duration = Math.round(((init!.signal as AbortSignal & { testTimeout?: number }).testTimeout ?? 0))
-      return reply({ summary: '证据待核实。', pairs: [], turns: rows.map(row => ({ id: row.id, kind: 'unreviewed' })), dimensions: [], strengths: [], concerns: [], unassessed: [] })
+      const body = JSON.parse(String(init?.body))
+      const source = JSON.parse(body.messages[1].content)
+      if (String(body.messages[0].content).includes('"turnKinds"')) {
+        return reply({ turnKinds: 'u'.repeat(source.transcript.length) })
+      }
+      return reply({ summary: '候选人相关项目经历仍需结合原始材料进一步核实。', dimensions: [], strengths: [], concerns: [], unassessed: [], recommendation: null })
     })
     // Inspect the deadline without waiting for an actual five-minute abort.
     const timeout = AbortSignal.timeout
     AbortSignal.timeout = ms => Object.assign(timeout(ms), { testTimeout: ms })
     try { await f.service.processPending() } finally { AbortSignal.timeout = timeout }
-    assert.equal(duration, 300000); assert.equal(f.saved[0]!.report.transcript.length, 120)
+    assert.equal(duration, 300000); assert.equal(calls, 24); assert.equal(f.saved[0]!.report.transcript.length, 120)
   })
   it('preserves every transcript turn and actual question after model failure', async () => {
     const f = fixture(segments(), async () => new Response('upstream down', { status: 503 }))
@@ -292,9 +593,13 @@ describe('summary background processing', () => {
   })
   it('evaluates candidate-only substantive speech instead of requiring a paired question', async () => {
     const rows = [segment('intro', 'candidate', '我独立完成项目开发。', 0)]
-    const f = fixture(rows, async () => reply({ summary: '自述项目开发。', pairs: [], turns: [{ id: 'intro', kind: 'assessment' }],
-      dimensions: [{ name: '项目开发', score: 82, text: '有实际发言证据。', evidence: [{ turnId: 'intro', quote: '独立完成项目开发' }] }],
-      strengths: [], concerns: [], unassessed: [] }))
+    const f = fixture(rows, async (_url, init) => {
+      const request = JSON.parse(String(init?.body))
+      if (String(request.messages[0].content).includes('"turnKinds"')) return reply({ turnKinds: 'a' })
+      return reply({ summary: '候选人自述独立完成项目开发，具体个人贡献仍需补充核验。', pairs: [],
+        dimensions: [{ name: '项目开发', score: 82, text: '有实际发言证据。', evidence: [{ turnId: 'intro', quote: '独立完成项目开发' }] }],
+        strengths: [], concerns: [], unassessed: [] })
+    })
     await f.service.processPending()
     assert.equal(f.resolved, 1)
     assert.equal(f.saved[0]!.report.overallScore, 82)

@@ -43,14 +43,14 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   async save(record: IdempotencyRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO idempotency_records
-         (actor_user_id, route, idempotency_key, request_hash, response_status, response_body)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         (actor_user_id, route, idempotency_key, request_hash, response_status, response_body, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid)
        ON CONFLICT (actor_user_id, route, idempotency_key)
        DO UPDATE SET request_hash = EXCLUDED.request_hash,
                      response_status = EXCLUDED.response_status,
                      response_body = EXCLUDED.response_body,
                      created_at = now()`,
-      [record.actorId, record.route, record.key, record.fingerprint, record.status, JSON.stringify(record.data ?? null)]
+      [record.actorId, record.route, record.key, record.fingerprint, record.status, JSON.stringify(record.data ?? null), record.organizationId ?? null]
     );
   }
 

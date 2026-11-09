@@ -13,7 +13,7 @@ import { reconcileTranscript } from './transcript-checkpoint.js'
 import { SessionVoiceprintTracker } from './voiceprint-tracker.js'
 
 export class LiveAudioTranscriptionService {
-  constructor(private readonly repository: Pick<LiveAudioTranscriptionRepository, 'claim' | 'complete' | 'retry' | 'progress'>,
+  constructor(private readonly repository: Pick<LiveAudioTranscriptionRepository, 'claim' | 'complete' | 'retry' | 'progress' | 'relabelFromEvidence'>,
     private readonly sessions: Pick<LiveInterviewSessionRepository, 'get'>,
     private readonly storage: { read: (key: string) => Promise<Buffer> },
     private readonly voices = new SessionVoiceprintTracker(),
@@ -39,8 +39,12 @@ export class LiveAudioTranscriptionService {
       const duration = job.endMs - job.offsetMs
       recognized = recognized.filter(row => row.startMs >= 0 && row.startMs <= duration)
         .map(row => ({ ...row, endMs: Math.min(duration, row.endMs) }))
-      const identified = this.voices.identify(job.sessionId, reconcileTranscript(recognized, job.checkpoint, job.offsetMs), job.source?.id)
-      const transcribed = scopeSpeakersToChunk(identified, job.offsetMs)
+      // Resolve acoustic identities before text reconciliation can collapse a conflicting
+      // chunk into a single unknown recovery row. The comparison retains the original
+      // identified acoustic segments for later review even when streaming text wins.
+      const identified = this.voices.identify(job.sessionId, recognized, job.source?.id)
+      const reconciled = reconcileTranscript(identified, job.checkpoint, job.offsetMs)
+      const transcribed = scopeSpeakersToChunk(reconciled, job.offsetMs)
         .map(row => ({ ...row, startMs: row.startMs + job.offsetMs, endMs: row.endMs + job.offsetMs }))
       const latest = await this.sessions.get(job.sessionId)
       const known: ConfirmedSpeakerRoles = {}, inferred: ConfirmedSpeakerRoles = {}
@@ -54,7 +58,18 @@ export class LiveAudioTranscriptionService {
         confidence: item.confidence, text: item.text, startMs: item.startMs, endMs: item.endMs, audioObjectKey: job.objectKey,
         ...(item.audioSource ? { audioSource: item.audioSource } : {}),
         ...(item.transcriptComparison ? { transcriptComparison: item.transcriptComparison } : {}) })))
-      console.info('[live-audio-transcription] finished', { ...context, completed, durationMs: Date.now() - startedAt,
+      // A chunk only carries a few seconds of context, so its sentences often
+      // land as unknown first. Once a voice has consistent role evidence, backfill
+      // its earlier unknown turns so the transcript does not stay half-anonymous.
+      let relabelled = 0
+      if (completed) {
+        try { relabelled = await this.repository.relabelFromEvidence(job.sessionId) }
+        catch (error) {
+          console.warn('[live-audio-transcription] relabel skipped', { ...context,
+            error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      console.info('[live-audio-transcription] finished', { ...context, completed, relabelled, durationMs: Date.now() - startedAt,
         audioBytes: audio.byteLength, segmentCount: mapped.length })
       if (latest.session.status === 'completed' && !(await this.repository.progress(job.sessionId)).pendingCount) this.voices.forget(job.sessionId)
     } catch (error) {

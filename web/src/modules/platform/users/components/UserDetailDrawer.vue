@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, KeyRound, LogOut, PencilLine, ShieldOff, X } from '@lucide/vue'
+import { Check, KeyRound, LogOut, PencilLine, RotateCcw, ShieldOff, X } from '@lucide/vue'
 import { updatePlatformWorkspaceAiAccess, type PlatformUserDetail } from '../api'
 import { describeApiFailure } from '../../../../shared/utils/errorMessage'
 import { authSession } from '../../../auth/session'
@@ -14,7 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  action: [kind: 'status' | 'revoke' | 'reset' | 'profile']
+  action: [kind: 'status' | 'revoke' | 'reset' | 'profile' | 'resetAiQuota', workspaceId?: string]
   'update:detail': [detail: PlatformUserDetail, workspaceId: string]
 }>()
 
@@ -132,7 +132,7 @@ async function saveAiAccess(workspaceId: string) {
               <span class="role-pill" :class="{ owner: workspace.membershipRole === 'owner' }">{{ roleLabels[workspace.membershipRole] }}</span>
             </div>
             <dl>
-              <div><dt>业务角色</dt><dd>{{ workspace.businessRole }}</dd></div>
+              <div><dt>账号类型</dt><dd>{{ workspace.businessRole }}</dd></div>
               <div><dt>部门</dt><dd>{{ workspace.departmentName || '未分配' }}</dd></div>
               <div><dt>加入时间</dt><dd>{{ time(workspace.joinedAt) }}</dd></div>
             </dl>
@@ -143,6 +143,9 @@ async function saveAiAccess(workspaceId: string) {
                 :checked="aiEdits[workspace.id]?.value ?? workspace.usePlatformAi"
                 :disabled="!canWrite || workspace.platformAiAccessReady === false || aiEdits[workspace.id]?.saving || (!workspace.usePlatformAi && authSession.user?.workspaceId === workspace.id)"
                 @change="beginAiEdit(workspace.id, aiEdits[workspace.id]?.value ?? workspace.usePlatformAi)" />
+              <button v-if="workspace.serviceStatus === 'trial'" class="quota-reset-button" type="button" :disabled="!canWrite" title="重置该企业的试用 AI 生成次数" @click="emit('action', 'resetAiQuota', workspace.id)">
+                <RotateCcw :size="12" />重置次数
+              </button>
             </div>
             <p v-if="workspace.usePlatformAi && !aiEdits[workspace.id]" class="ai-source">模型来源：{{ workspace.platformAiSourceOrganizationName || '来源企业不可用' }}</p>
             <form v-if="aiEdits[workspace.id]" class="ai-edit-form" @submit.prevent="saveAiAccess(workspace.id)">
@@ -246,6 +249,8 @@ async function saveAiAccess(workspaceId: string) {
 .workspace-item dd { margin: 3px 0 0; color: #41564e; font-size: 9.5px; }
 .ai-access-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding-top: 9px; border-top: 1px solid #e8eeeb; color: #687b73; font-size: 9.5px; }
 .ai-access-row > label { margin-right: auto; }
+.quota-reset-button { display: inline-flex; align-items: center; gap: 4px; min-height: 27px; padding: 0 8px; border: 1px solid #e3cfc0; border-radius: 5px; background: #fffaf6; color: #9a5f2f; font: inherit; font-size: 9px; cursor: pointer; white-space: nowrap; }
+.quota-reset-button:disabled { opacity: .55; cursor: not-allowed; }
 .ai-access-state { color: #197053; font-weight: 700; }
 .ai-access-row:has(.ai-switch:not(:checked)) .ai-access-state { color: #798781; }
 .ai-error { color: #a8464e; }

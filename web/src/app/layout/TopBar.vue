@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { Building2, ChevronRight, UserRound } from '@lucide/vue'
 import { authSession, logoutCurrentUser, switchAccount } from '../../modules/auth/session'
+import { isPlatformAdminRole } from '../../modules/auth/platform-roles'
 
 import { listSavedAccounts, type SavedAccount } from '../../modules/auth/api'
 import { describeApiFailure } from '../../shared/utils/errorMessage'
 import WorkspaceSwitcher from './WorkspaceSwitcher.vue'
-import { businessRoleLabels } from '../../modules/auth/utils/invitations'
+import { businessRoleLabels, membershipLabels } from '../../modules/auth/utils/invitations'
 
 defineProps<{ title: string; crumb: string }>()
 
@@ -23,6 +25,19 @@ const accountDepartment = computed(() => {
   const departmentId = authSession.user?.departmentId?.trim()
   return departmentId || '未分配部门'
 })
+const platformRoleLabel = computed(() => {
+  if (isPlatformAdminRole(authSession.user?.platformRole)) return '平台管理员'
+  return '平台只读运营'
+})
+const accountWorkspace = computed(() => {
+  const user = authSession.user
+  if (!user) return undefined
+  return (authSession.workspaces ?? []).find((workspace) => workspace.id === user.workspaceId)
+})
+const accountWorkspaceName = computed(() => accountWorkspace.value?.name || authSession.user?.workspaceName || '尚未选择企业空间')
+const accountWorkspaceKind = computed(() => accountWorkspace.value?.kind || authSession.user?.workspaceKind)
+const accountWorkspaceKindLabel = computed(() => accountWorkspaceKind.value === 'production' ? '正式' : accountWorkspaceKind.value === 'test' ? '测试' : '待选择')
+const accountWorkspaceRole = computed(() => accountWorkspace.value?.role ? membershipLabels[accountWorkspace.value.role] : '')
 
 function toggleAccountMenu() {
   if (!authSession.user) return
@@ -137,6 +152,15 @@ onBeforeUnmount(() => {
           </section>
           <div class="account-card-divider"></div>
           <div class="account-details">
+            <div class="account-workspace-row">
+              <span class="account-detail-icon" aria-hidden="true"><Building2 :size="15" /></span>
+              <span>
+                <small>当前企业空间</small>
+                <b>{{ accountWorkspaceName }}</b>
+                <em v-if="accountWorkspaceRole">{{ accountWorkspaceRole }}</em>
+              </span>
+              <i class="account-workspace-kind" :class="{ 'is-production': accountWorkspaceKind === 'production' }">{{ accountWorkspaceKindLabel }}</i>
+            </div>
             <div class="account-detail-row">
               <span class="account-detail-icon" aria-hidden="true">✉</span>
               <span><small>登录邮箱</small><b>{{ authSession.user.email }}</b></span>
@@ -147,10 +171,15 @@ onBeforeUnmount(() => {
             </div>
             <div class="account-detail-row">
               <span class="account-detail-icon" aria-hidden="true">✦</span>
-              <span><small>企业业务角色</small><b>{{ accountRole }}</b></span>
-              <span v-if="authSession.user?.platformRole"><small>平台运营身份（独立授权）</small><b>{{ authSession.user.platformRole === 'admin' ? '平台管理员' : '平台只读运营' }}</b></span>
+              <span><small>账号类型</small><b>{{ accountRole }}</b></span>
+              <span v-if="authSession.user?.platformRole"><small>平台运营身份（独立授权）</small><b>{{ platformRoleLabel }}</b></span>
             </div>
           </div>
+          <router-link class="account-profile-entry" to="/profile" @click="accountMenuOpen = false">
+            <span class="account-profile-icon" aria-hidden="true"><UserRound :size="17" /></span>
+            <span><b>用户信息</b><small>查看并编辑个人资料</small></span>
+            <ChevronRight :size="16" aria-hidden="true" />
+          </router-link>
           <div class="account-card-footer">
             <span class="account-session-hint">账号已安全登录</span>
             <button class="account-logout" type="button" @click="logout">退出登录</button>
@@ -235,11 +264,26 @@ onBeforeUnmount(() => {
 .account-card-divider { height: 1px; background: #e8f1f4; }
 .account-details { display: grid; gap: 2px; padding: 10px 14px; }
 .account-detail-row { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 7px 4px; border-radius: 10px; }
+.account-workspace-row { display: flex; align-items: center; gap: 10px; min-height: 49px; padding: 7px 4px; border-radius: 10px; background: #f7fbfb; }
 .account-detail-row:hover { background: #f5fafb; }
 .account-detail-icon { display: grid; place-items: center; flex: 0 0 27px; width: 27px; height: 27px; border-radius: 8px; background: #edf7f7; color: #4a9a9a; font-size: 13px; }
-.account-detail-row > span:last-child { display: grid; min-width: 0; gap: 3px; }
+.account-detail-row > span:last-child, .account-workspace-row > span:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
 .account-detail-row small { color: #8ba2b0; font-size: 10.5px; }
 .account-detail-row b { overflow: hidden; color: #36556b; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.account-workspace-row > span:nth-child(2) { flex: 1; }
+.account-workspace-row small { color: #8ba2b0; font-size: 10.5px; }
+.account-workspace-row b { overflow: hidden; color: #2f5167; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.account-workspace-row em { color: #849aa7; font-size: 9.5px; font-style: normal; }
+.account-workspace-kind { flex: 0 0 auto; border-radius: 5px; padding: 3px 7px; background: #e8f3fa; color: #4b88a4; font-size: 9.5px; font-style: normal; font-weight: 700; }
+.account-workspace-kind.is-production { background: #e4f6ed; color: #338d68; }
+.account-profile-entry { display: flex; align-items: center; gap: 10px; margin: 1px 14px 12px; padding: 10px 11px; border: 1px solid #d7e9ed; border-radius: 9px; background: #f8fcfc; color: #35576c; text-decoration: none; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+.account-profile-entry:hover { border-color: #b8dce1; background: #eef9f8; transform: translateY(-1px); }
+.account-profile-entry:focus-visible { outline: 2px solid #63afc8; outline-offset: 2px; }
+.account-profile-icon { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; border-radius: 8px; background: #e6f4f1; color: #348d86; }
+.account-profile-entry > span:nth-child(2) { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.account-profile-entry b { font-size: 12px; }
+.account-profile-entry small { color: #8ba0ad; font-size: 10px; }
+.account-profile-entry > svg { color: #8aa3b1; }
 .account-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px 14px; border-top: 1px solid #edf3f5; background: #fbfdfd; }
 .account-session-hint { color: #9aadb8; font-size: 10.5px; }
 .account-logout { border: 1px solid #dceaf0; border-radius: 9px; padding: 7px 11px; background: #fff; color: #4a7182; font-size: 11.5px; transition: background .15s ease, border-color .15s ease, color .15s ease, transform .15s ease; }

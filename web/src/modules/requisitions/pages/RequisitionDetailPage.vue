@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { actionRequisition, getRequisition, getRequisitionApproval, loadDepartments, updateRequisition, type ApiDepartment, type ApiRequisition, type ApprovalDetails, type RequisitionAction } from '../api'
-import { REQ_ACTION_HINT, REQ_ACTION_LABEL, REQ_REASON_REQUIRED, conversionHint, describeApproval, requisitionActionsForApproval, requisitionStatusLabel, validateRequisitionForm } from '../workflow'
+import { actionRequisition, getRequisition, loadDepartments, updateRequisition, type ApiDepartment, type ApiRequisition, type RequisitionAction } from '../api'
+import { REQ_ACTION_HINT, REQ_ACTION_LABEL, REQ_REASON_REQUIRED, conversionHint, requisitionActionsFor, requisitionStatusLabel, validateRequisitionForm } from '../workflow'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { actionLabel, employmentTypeLabel, statusLabel, workModeLabel } from '../../../shared/utils/labels'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
@@ -19,27 +19,12 @@ const loading = ref(true)
 const error = ref('')
 const feedback = ref('')
 const acting = ref('')
-const approvalDetails = ref<ApprovalDetails | null>(null)
-const loadingApproval = ref(false)
-const approvalCurrent = computed(() => approvalDetails.value?.current ?? null)
-const approvalSteps = computed(() => approvalDetails.value?.steps ?? [])
-const approvalRecords = computed(() => approvalDetails.value?.records ?? [])
 
 const pendingAction = ref<RequisitionAction | null>(null)
 const reason = ref('')
 
-const actions = computed<RequisitionAction[]>(() => request.value ? requisitionActionsForApproval(request.value.status, {
-  provider: approvalDetails.value?.current?.provider,
-  status: approvalDetails.value?.current?.status,
-  externalInstanceId: approvalDetails.value?.current?.externalInstanceId,
-}) : [])
-const dingtalkApprovalActive = computed(() => Boolean(request.value
-  && request.value.status === 'pending_approval'
-  && approvalDetails.value?.current?.provider === 'dingtalk'
-  && approvalDetails.value.current.status === 'pending'
-  && approvalDetails.value.current.externalInstanceId))
+const actions = computed<RequisitionAction[]>(() => request.value ? requisitionActionsFor(request.value.status) : [])
 const actionHint = computed(() => (pendingAction.value ? REQ_ACTION_HINT[pendingAction.value] : ''))
-const approvalInfo = computed(() => describeApproval(request.value))
 const conversionMessage = computed(() => conversionHint(request.value))
 const requesterLabel = computed(() => {
   const current = request.value
@@ -121,28 +106,6 @@ async function loadAuditEvents(requestId: string) {
   }
 }
 
-async function loadApprovalDetails(requestId: string) {
-  loadingApproval.value = true
-  try {
-    approvalDetails.value = await getRequisitionApproval(requestId)
-  } catch {
-    approvalDetails.value = null
-  } finally {
-    loadingApproval.value = false
-  }
-}
-
-function approvalRecordActionLabel(action: ApprovalDetails['records'][number]['action']): string {
-  if (action === 'approve') return '审批通过'
-  if (action === 'reject') return '驳回'
-  return '节点进度'
-}
-
-function approvalStatusLabel(status: string): string {
-  if (status === 'pending') return '审批中'
-  return requisitionStatusLabel(status)
-}
-
 async function loadAssociatedJobs(requestId: string) {
   associatedJobs.value = []
   if (!requestId) return
@@ -161,7 +124,7 @@ async function refresh() {
     request.value = await getRequisition(id.value)
     departments.value = await loadDepartments()
     if (request.value.departmentId && !departments.value.some((item) => item.code === request.value?.departmentId)) departments.value.push({ id: `legacy-${request.value.departmentId}`, code: request.value.departmentId, name: request.value.department, isActive: false })
-    await Promise.all([loadAssociatedJobs(request.value.id), loadAuditEvents(request.value.id), loadApprovalDetails(request.value.id)])
+    await Promise.all([loadAssociatedJobs(request.value.id), loadAuditEvents(request.value.id)])
   } catch (cause) {
     error.value = describeApiFailure(cause, '读取招聘需求失败').message
   } finally {
@@ -188,7 +151,7 @@ async function runAction(action: RequisitionAction, suppliedReason?: string) {
   clearFlags()
   try {
     request.value = await actionRequisition(request.value.id, action, value || undefined)
-    await Promise.all([loadAssociatedJobs(request.value.id), loadAuditEvents(request.value.id), loadApprovalDetails(request.value.id)])
+    await Promise.all([loadAssociatedJobs(request.value.id), loadAuditEvents(request.value.id)])
     feedback.value = `${REQ_ACTION_LABEL[action]}成功，当前状态 ${requisitionStatusLabel(request.value.status)}`
   } catch (cause) {
     error.value = describeApiFailure(cause, '需求操作失败').message
@@ -235,19 +198,11 @@ onMounted(refresh)
       <div class="detail-item"><span>用工类型</span><strong>{{ employmentTypeLabel(request.employmentType) }}</strong></div>
       <div class="detail-item"><span>工作模式</span><strong>{{ workModeLabel(request.workMode) }}</strong></div>
       <div class="detail-item"><span>工作地点</span><strong>{{ request.location || '未设置' }}</strong></div>
-      <div class="detail-item"><span>审批人</span><strong>{{ approvalInfo.approver }}</strong></div>
-      <div class="detail-item"><span>审批状态</span><StatusTag :status="approvalInfo.status" /></div>
+      <div class="detail-item"><span>负责人</span><strong>{{ requesterLabel || '未指定' }}</strong></div>
       <div class="detail-item"><span>更新日期</span><strong>{{ request.updatedAt.slice(0, 10) }}</strong></div>
       <div class="detail-item" style="grid-column: 1 / -1"><span>招聘理由</span><strong>{{ request.justification }}</strong></div>
       <div v-if="conversionMessage" class="detail-item hint" style="grid-column: 1 / -1"><span>转化提示</span><strong>{{ conversionMessage }}</strong></div>
       <div v-if="requesterLabel" class="detail-item"><span>当前操作账户</span><strong>{{ requesterLabel }}</strong></div>
-    </div>
-
-    <div v-if="approvalInfo.history.length" class="error-note" style="margin-top:14px">
-      <div v-for="(item, index) in approvalInfo.history" :key="index">
-        <div>{{ item.actedAt ? `${item.actedAt.slice(0, 10)} ` : '' }}{{ statusLabel(item.status) }} · {{ item.approver || '系统' }}</div>
-        <div v-if="item.comment">{{ item.comment }}</div>
-      </div>
     </div>
 
     <div class="section-title" style="margin-top:18px">可执行动作</div>
@@ -257,7 +212,7 @@ onMounted(refresh)
         :key="action"
         type="button"
         class="btn"
-        :class="action === 'reject' || action === 'close' || action === 'cancel' ? 'btn-danger' : (action === 'approve' || action === 'submit' || action === 'resubmit' ? 'btn-primary' : 'btn-ghost')"
+        :class="action === 'close' || action === 'cancel' ? 'btn-danger' : (action === 'submit' || action === 'resubmit' ? 'btn-primary' : 'btn-ghost')"
         :disabled="acting === action"
         @click="confirm(action)"
       >
@@ -265,35 +220,9 @@ onMounted(refresh)
       </button>
       <button v-if="request.status === 'approved' && (!request.convertedJobIds || !request.convertedJobIds.length)" class="btn btn-primary" type="button" :disabled="!!acting" @click="openConvert">新建关联岗位</button>
       <button v-if="request.status === 'approved' && request.convertedJobIds && request.convertedJobIds.length" class="btn btn-primary" type="button" :disabled="!!acting" @click="confirm('convert')">转换为岗位</button>
-      <span v-if="dingtalkApprovalActive" class="hint">请在钉钉中完成审批，平台暂不提供通过、驳回或撤回操作。</span>
-      <span v-else-if="!actions.length" class="hint">当前状态无可执行动作</span>
+      <span v-if="!actions.length" class="hint">当前状态无可执行动作</span>
     </div>
     <div v-if="pendingAction" class="hint">{{ actionHint }}</div>
-
-    <section v-if="loadingApproval || approvalDetails?.current" class="section" style="margin-top:18px">
-      <div class="section-title">钉钉审批详情</div>
-      <div v-if="loadingApproval" class="loading-note">正在读取钉钉审批...</div>
-      <template v-else-if="approvalCurrent">
-        <div class="detail-grid">
-          <div class="detail-item"><span>审批来源</span><strong>{{ approvalCurrent.provider === 'dingtalk' ? '钉钉' : approvalCurrent.provider || '平台' }}</strong></div>
-          <div v-if="approvalCurrent.externalInstanceId" class="detail-item"><span>审批实例</span><strong>{{ approvalCurrent.externalInstanceId }}</strong></div>
-          <div class="detail-item"><span>审批状态</span><strong>{{ approvalStatusLabel(approvalCurrent.status) }}</strong></div>
-          <div v-if="approvalCurrent.completedAt" class="detail-item"><span>完成时间</span><strong>{{ approvalCurrent.completedAt }}</strong></div>
-        </div>
-        <div v-if="approvalSteps.length" class="table-wrap" style="margin-top:14px">
-          <table>
-            <thead><tr><th>节点</th><th>审批角色</th><th>状态</th><th>处理时间</th></tr></thead>
-            <tbody><tr v-for="step in approvalSteps" :key="step.id"><td>{{ step.nodeName || step.name }}</td><td>{{ step.approverRole }}</td><td>{{ approvalStatusLabel(step.status) }}</td><td>{{ step.actedAt || '-' }}</td></tr></tbody>
-          </table>
-        </div>
-        <div v-if="approvalRecords.length" class="table-wrap" style="margin-top:14px">
-          <table>
-            <thead><tr><th>时间</th><th>动作</th><th>审批人</th><th>说明</th></tr></thead>
-            <tbody><tr v-for="record in approvalRecords" :key="record.id"><td>{{ record.createdAt }}</td><td>{{ approvalRecordActionLabel(record.action) }}</td><td>{{ record.approver || record.actorId || '系统' }}</td><td>{{ record.comment || '-' }}</td></tr></tbody>
-          </table>
-        </div>
-      </template>
-    </section>
 
     <section class="section" style="margin-top:18px">
       <div class="section-title">流程审计</div>

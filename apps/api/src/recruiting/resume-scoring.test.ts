@@ -80,12 +80,26 @@ test('拒绝所有新增人工评分，并把缺失或无效 AI 分与真实 0 �
   }
 })
 
-test('低分可淘汰并加入人才库，保留 AI 评分；高分不加入淘汰人才库', () => {
-  const low = applyResumeReview('r1', { assessment: { score: 27 } }, 'human_review', { decision: 'eliminated', talentPool: true }, 'u1')
-  assert.equal(low.nextStatus, 'rejected')
+test('淘汰时按 AI 评分自动决定是否加入人才库，80 分属于高分', () => {
+  for (const score of [80, 80.01, 100]) {
+    const eliminated = applyResumeReview('r1', { assessment: { score } }, 'human_review', { decision: 'eliminated', talentPool: false }, 'u1')
+    assert.equal(eliminated.nextStatus, 'rejected')
+    assert.equal(eliminated.summary.talentPool, true)
+    assert.equal(eliminated.summary.finalScore, score)
+    assert.match((eliminated.report.humanDecision as { reason: string }).reason, /AI 建议通过，人工确认淘汰/)
+  }
+  for (const score of [0, 27, 79.99]) {
+    const eliminated = applyResumeReview('r1', { assessment: { score }, talentPool: { included: true } }, 'human_review', { decision: 'eliminated', talentPool: true }, 'u1')
+    assert.equal(eliminated.nextStatus, 'rejected')
+    assert.equal(eliminated.summary.talentPool, false)
+    assert.equal(eliminated.summary.finalScore, score)
+    assert.match((eliminated.report.humanDecision as { reason: string }).reason, /AI 评分低于 80/)
+  }
+})
+
+test('独立的人才库操作仍只允许低分候选人手工加入', () => {
+  const low = applyResumeReview('r1', { assessment: { score: 27 } }, 'human_review', { talentPool: true }, 'u1')
   assert.equal(low.summary.talentPool, true)
-  assert.equal(low.summary.finalScore, 27)
-  assert.match((low.report.humanDecision as { reason: string }).reason, /AI 评分低于 80/)
   assert.throws(() => applyResumeReview('r1', report, 'human_review', { talentPool: true }, 'u1'), RecruitingWorkflowError)
 })
 

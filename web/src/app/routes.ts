@@ -10,11 +10,14 @@ export interface RouteMeta {
   hideInNav?: boolean
   hideShell?: boolean
   adminOnly?: boolean
+  systemAdminOnly?: boolean
   workspaceAdminOnly?: boolean
   platformOnly?: boolean
   platformAdminOnly?: boolean
+
   billingOnly?: boolean
   requiresRecruitmentRequests?: boolean
+  requiresRecruitmentReports?: boolean
   roles?: AuthRole[]
 }
 
@@ -36,7 +39,7 @@ export const appRoutes: AppRouteRecord[] = [
     name: 'requisitions',
     component: () => import('../modules/requisitions/pages/RequisitionListPage.vue'),
     meta: {
-      title: '需求管理 · 审批', navLabel: '需求管理', icon: '①', group: '招聘需求', crumb: '招聘需求 / 审批管理',
+      title: '需求管理', navLabel: '需求管理', icon: '①', group: '招聘需求', crumb: '招聘需求 / 需求管理',
       requiresRecruitmentRequests: true,
     },
   },
@@ -110,7 +113,7 @@ export const appRoutes: AppRouteRecord[] = [
     name: 'offers',
     component: () => import('../modules/offers/pages/OfferListPage.vue'),
     meta: {
-      title: '录用审批与 Offer', navLabel: '录用审批与 Offer', icon: '⑥', group: '录用', crumb: '录用 / 定薪审批与 Offer',
+      title: 'Offer 管理', navLabel: 'Offer 管理', icon: '⑥', group: '录用', crumb: '录用 / Offer 管理',
     },
   },
   {
@@ -142,6 +145,25 @@ export const appRoutes: AppRouteRecord[] = [
     },
   },
   {
+    path: '/forgot-password',
+    name: 'forgot-password',
+    component: () => import('../modules/auth/pages/ForgotPasswordPage.vue'),
+    meta: {
+      title: '找回密码', navLabel: '找回密码', icon: '🔒', group: '系统', crumb: '系统 / 找回密码',
+      hideInNav: true,
+      hideShell: true,
+    },
+  },
+  {
+    path: '/profile',
+    name: 'profile',
+    component: () => import('../modules/auth/pages/ProfilePage.vue'),
+    meta: {
+      title: '用户信息', navLabel: '用户信息', icon: '◎', group: '系统', crumb: '账户中心 / 用户信息',
+      hideInNav: true,
+    },
+  },
+  {
     path: '/workspaces',
     name: 'workspaces',
     component: () => import('../modules/auth/pages/WorkspacePage.vue'),
@@ -165,6 +187,7 @@ export const appRoutes: AppRouteRecord[] = [
     component: () => import('../modules/reports/pages/ReportOverviewPage.vue'),
     meta: {
       title: '招聘数据看板', navLabel: '招聘数据看板', icon: '▦', group: '洞察', crumb: '洞察 / 数据看板',
+      requiresRecruitmentReports: true,
     },
   },
   {
@@ -228,16 +251,15 @@ export const appRoutes: AppRouteRecord[] = [
     name: 'administration',
     component: () => import('../modules/administration/pages/AdministrationPage.vue'),
     meta: {
-      title: '平台系统配置', navLabel: '平台系统配置', icon: '⚙', group: '平台运营', crumb: '平台运营 / 系统配置', platformOnly: true, platformAdminOnly: true,
+      title: '系统配置', navLabel: '系统配置', icon: '⚙', group: '系统', crumb: '系统 / 配置与审计', systemAdminOnly: true,
     },
   },
   {
-    path: '/enterprise/approval-settings',
-    name: 'enterprise-approval-settings',
-    component: () => import('../modules/administration/pages/EnterpriseApprovalSettingsPage.vue'),
+    path: '/enterprise/departments',
+    name: 'enterprise-departments',
+    component: () => import('../modules/administration/pages/EnterpriseDepartmentsPage.vue'),
     meta: {
-      title: '需求审批设置', navLabel: '需求审批设置', icon: '✓', group: '系统', crumb: '系统 / 需求审批设置', workspaceAdminOnly: true,
-      requiresRecruitmentRequests: true,
+      title: '部门管理', navLabel: '部门管理', icon: '⌘', group: '企业管理', crumb: '企业管理 / 部门管理',
     },
   },
   {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../../../shared/api'
-import { getOffer, listOfferContextRows, listOffers, loadApplicationsForOffer, offerAction, offerStatusCode, updateOffer } from './index'
+import { getOffer, listOfferContextRows, listOffers, loadApplicationsForOffer, offerAction, offerActionsFor, offerStatusCode, renderOfferTemplate, updateOffer } from './index'
 
 vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn(), patchJson: vi.fn(), postJson: vi.fn() } }))
 const getJson = vi.mocked(apiClient.getJson)
@@ -13,11 +13,21 @@ describe('Offer API', () => {
     expect((await loadApplicationsForOffer(true)).map(item => item.id)).toEqual(['passed'])
     expect((await loadApplicationsForOffer()).map(item => item.id)).toEqual(['all'])
   })
-  it('映射列表行并提取审批状态', async () => {
+  it('渲染 Offer 模板时替换已知变量并清空缺失变量', () => {
+    expect(renderOfferTemplate('候选人：{{ candidateName }}；岗位：{{jobTitle}}；日期：{{startDate}}', { candidateName: '王思远', jobTitle: '后端工程师' }))
+      .toBe('候选人：王思远；岗位：后端工程师；日期：')
+  })
+  it('支持中文模板变量', () => {
+    expect(renderOfferTemplate('办理入职手续需提供的材料：\n{{入职材料}}', { '入职材料': '1. 身份证；\n2. 招商银行工资卡；' }))
+      .toBe('办理入职手续需提供的材料：\n1. 身份证；\n2. 招商银行工资卡；')
+  })
+  it('映射列表行时不暴露历史审批字段', async () => {
     getJson.mockResolvedValue({ ok: true, requestId: 'test', data: [{ id: 'offer-1', code: 'OFF-1', applicationId: 'app-1', status: 'draft', approval: { status: 'pending', approver: '待审批' }, version: 1, updatedAt: '2026-09-11T00:00:00Z' }] } as never)
     const rows = await listOffers()
     expect(getJson).toHaveBeenCalledWith('/offers')
-    expect(rows[0]).toMatchObject({ entityId: 'offer-1', status: 'draft', approvalStatus: 'pending', approver: '待审批' })
+    expect(rows[0]).toMatchObject({ entityId: 'offer-1', status: 'draft' })
+    expect(rows[0]).not.toHaveProperty('approvalStatus')
+    expect(rows[0]).not.toHaveProperty('approver')
   })
 
   it('上下文列表补齐候选人和岗位名称', async () => {
@@ -53,6 +63,15 @@ describe('Offer API', () => {
     patchJson.mockResolvedValue({ ok: true, requestId: 'test', data: { status: 'draft', version: 2 } } as never)
     await updateOffer('offer-1', { content: '新版' })
     expect(patchJson).toHaveBeenCalledWith('/offers/offer-1', { content: '新版' })
+  })
+
+  it('only exposes actions valid for the current Offer and onboarding state', () => {
+    expect(offerActionsFor('sent')).toEqual(['resend', 'accept', 'decline', 'expire', 'cancel'])
+    expect(offerActionsFor('accepted')).toEqual(['archive-onboarding'])
+    expect(offerActionsFor('accepted', 'pending')).toEqual([])
+    expect(offerActionsFor('declined')).toEqual([])
+    expect(offerActionsFor('cancelled')).toEqual(['resend'])
+    expect(offerActionsFor('expired')).toEqual([])
   })
 })
 

@@ -3,6 +3,16 @@ export type InterviewRole = 'interviewer' | 'candidate' | 'unknown'
 export interface TranscriptComparison {
   streamingText: string
   offlineText: string
+  /** Acoustic evidence retained when text reconciliation selects another source. */
+  offlineSegments?: Array<{
+    id: string
+    speakerId: string
+    text: string
+    startMs: number
+    endMs: number
+    speakerVerified?: boolean
+    speakerMixed?: boolean
+  }>
   streamingComplete: boolean
   selectedSource: 'streaming' | 'offline'
   startMs: number
@@ -30,8 +40,32 @@ export interface RoleMapping extends SpeakerSegment {
 
 export type ConfirmedSpeakerRoles = Record<string, Exclude<InterviewRole, 'unknown'>>
 
-const QUESTION_PATTERNS = [/请.{0,12}(介绍|说明|讲|谈|分享)/u, /你.{0,20}(如何|怎么|为什么|是否|负责|经历|使用|结果)/u, /[？?]$/u, /(吗|呢)[，。！!？?]?$/u]
-const ANSWER_PATTERNS = [/^(我|我们|当时|之前|在.{0,12}(公司|项目))/u, /我.{0,12}(当时|之前|负责|参与|使用|实现|解决)/u, /(负责|参与|使用|实现|解决|经验)/u]
+const QUESTION_PATTERNS = [
+  /请.{0,12}(?:介绍|说明|讲讲|谈谈|分享)/u,
+  /你.{0,20}(?:如何|怎么|为什么|是否|有没有|负责|做过|经历|使用|结果|这边|那边|觉得|认为|期望|打算)/u,
+  // ASR 常常把一句话切成多段，问号不一定落在结尾。
+  /[？?]/u,
+  /(?:吗|呢)[，。！!？?]?$/u,
+  /(?:能不能|可不可以|方不方便|要不要|是否方便)/u,
+]
+// 候选人证据必须带第一人称的具体经历。原先的「含负责/使用/经验即候选人」
+// 会把面试官介绍岗位(「我们公司使用 Java」)误判成候选人，宁缺勿错。
+const ANSWER_PATTERNS = [
+  /我(?:之前|当时|以前|原来).{0,12}(?:在|做|负责|参与|待)/u,
+  /我(?:负责|参与|做过|使用过|实现过|解决过|搭建|开发过|主导|独立完成)/u,
+  /我.{0,6}(?:毕业于|大学|学院|专业)/u,
+  /我(?:有|已经|大概).{0,6}(?:\d+|[一二三四五六七八九十]+)\s*年.{0,8}(?:经验|工作)/u,
+  /我(?:这次|本次)?(?:面试|应聘|投递|求职)/u,
+  // 口语化自述：ASR 会说「我之前去的那些公司」「自己做的项目」。
+  // 全部要求第一人称紧邻，因此不会命中面试官的「我们公司使用…」。
+  /我(?:之前|以前|原来|当时|上一家|上个).{0,10}(?:公司|团队|项目|部门|岗位|工作)/u,
+  /我(?:自己|个人).{0,6}(?:做|写|开|搞|学|研究|搭|弄)/u,
+  /我(?:做过|干过|搞过|写过|用过|上手过|接触过|参与过|负责过|维护过)/u,
+  /我(?:目前|现在).{0,10}(?:在|做|负责|就职|工作|从事|带)/u,
+  /我(?:学|是学|主修).{0,8}(?:专业|的)/u,
+  /我(?:想|希望|打算|期望).{0,10}(?:加入|应聘|来|到|学)/u,
+  /我.{0,6}(?:发表|发布)(?:了)?.{0,6}(?:论文|文章|专利)/u,
+]
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text.trim()))

@@ -62,8 +62,8 @@ test('workspace context is checked before replay; missing/stale headers cannot e
   const changedRole = await request({ ...headers, 'x-workspace-id': 'company-b' })
   assert.equal((await changedRole.json()).error.code, 'IDEMPOTENCY_KEY_REUSED')
 })
-test('all live/file/report APIs fail closed without an active workspace; bearer cannot select tenant via header', async () => {
-  for (const path of ['/api/v1/interview-live-sessions/id/end', '/api/v1/resumes/id/download', '/api/v1/reports/funnel', '/api/v1/interviewer-options']) {
+test('all live/file/report/template APIs fail closed without an active workspace; bearer cannot select tenant via header', async () => {
+  for (const path of ['/api/v1/interview-live-sessions/id/end', '/api/v1/resumes/id/download', '/api/v1/reports/funnel', '/api/v1/interviewer-options', '/api/v1/offer-templates']) {
     assert.equal(isWorkspaceScopedPath(path), true)
     workspace = undefined
     const empty = await request({ authorization: 'Bearer test' }, path)

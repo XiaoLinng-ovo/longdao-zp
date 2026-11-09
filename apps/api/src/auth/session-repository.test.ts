@@ -33,8 +33,8 @@ describe('PostgresSessionRepository', () => {
     const repository = new PostgresSessionRepository(pool)
     const session = await repository.findSessionByToken('secret')
     assert.equal(session?.sessionId, row.id)
-    assert.match(pool.calls[0]!.sql, /token_hash = \$1/i)
-    assert.match(pool.calls[0]!.sql, /u\.is_active = true/i)
+    assert.match(pool.calls[0]!.sql, /token_hash\s*=\s*\$1/i)
+    assert.match(pool.calls[0]!.sql, /u\.is_active\s*=\s*true/i)
     assert.match(pool.calls[1]!.sql, /UPDATE sessions SET last_seen_at/i)
   })
 
@@ -55,7 +55,7 @@ it('loads a user by email and verifies a database password hash', async () => {
   const pool = new FakePool([[{ id: user.id, display_name: user.name, email: user.email, password_hash: passwordHash, department_id: user.departmentId, role: user.role }]])
   const repository = new PostgresSessionRepository(pool)
   const found = await repository.findUserByEmailPassword(user.email, 'secret')
-  assert.deepEqual(found, user)
+  assert.deepEqual(found, { ...user, role: 'recruiter' })
   assert.match(pool.calls[0]!.sql, /FROM users/i)
 })
 

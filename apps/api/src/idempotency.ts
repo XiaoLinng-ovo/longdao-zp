@@ -35,6 +35,8 @@ export interface IdempotencyRecord {
   route: string;
   /** 操作人用户 UUID；匿名请求为 null。 */
   actorId: string | null;
+  /** 所属企业（工作空间）UUID；无法确定时为 null。不得依赖表默认值，否则所有企业记录都会落到历史工作空间。 */
+  organizationId?: string | null;
   status: number;
   data: unknown;
   createdAt: string;
@@ -218,6 +220,7 @@ export function createIdempotencyMiddleware(options: IdempotencyOptions = {}): M
           fingerprint,
           route: `${method} ${context.url.pathname}`,
           actorId: context.auth?.user.id ?? null,
+          organizationId: context.auth?.user.workspaceId ?? null,
           status: captured.status,
           data: captured.body.data,
           createdAt,

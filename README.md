@@ -16,13 +16,13 @@
 | --- | --- | --- | --- |
 | Node.js | `>=20.16 <21` 或 `>=22.3` | 运行 API / Worker、构建前端 | <https://nodejs.org/>（选 LTS 版） |
 | pnpm | 9 及以上 | 安装依赖、执行脚本 | `corepack enable pnpm`，或 `npm install -g pnpm` |
-| Docker Desktop | 最新稳定版 | 提供 PostgreSQL 与 MinIO（简历对象存储） | <https://www.docker.com/products/docker-desktop/> |
+| Docker Desktop | 最新稳定版 | 提供容器运行环境、PostgreSQL 和持久化简历存储 | <https://www.docker.com/products/docker-desktop/> |
 | Git | 任意 | 拉取 / 推送代码 | <https://git-scm.com/> |
 
 按需安装（不装也能跑通主流程）：
 
 - **OCR 服务（PP-StructureV3）**：只有扫描版 PDF、图片简历需要。`deploy/docker-compose.yml` 已内置 `ocr` 服务，首次启动会下载 Paddle 模型，体积较大、耗时较长。
-- **ClamAV**：只有把 `RESUME_VIRUS_SCAN_ENABLED` 设为 `true`、需要简历病毒隔离时才用，默认关闭。
+- **ClamAV**：只有把 `RESUME_VIRUS_SCAN_ENABLED` 设为 `true`、需要简历病毒隔离时才用，默认关闭；Compose 中通过 `virus-scan` profile 按需启动。
 - **大模型服务**：只有启用 AI 简历分析时才需要，准备一个 OpenAI 兼容服务的 Base URL 与 API Key（DeepSeek、通义千问、OpenAI 等均可）。密钥只保存在服务端。
 
 如果只用 Docker 部署，本机可以不装 Node 与 pnpm，见下方「Docker 部署」。
@@ -34,7 +34,7 @@
 ```powershell
 pnpm install
 Copy-Item .env.example .env
-docker compose -f deploy/docker-compose.yml up -d postgres minio
+docker compose -f deploy/docker-compose.yml up -d postgres
 pnpm run start:dev
 ```
 
@@ -61,13 +61,19 @@ Windows 源码环境可以直接双击仓库根目录的 `一键启动.bat`，�
 
 ## Docker 部署
 
-生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、MinIO、API、Worker 和 Web 组成（API/Worker 用 `deploy/Dockerfile.api` 构建，Web 用 `deploy/Dockerfile.web`）：
+生产部署统一使用 `deploy/docker-compose.yml`，由 PostgreSQL、Redis、OCR、API、Worker 和 Web 组成（API/Worker 用 `deploy/Dockerfile.api` 构建，Web 用 `deploy/Dockerfile.web`）。简历和面试音频默认保存在 API 与 Worker 共享的 Docker 持久卷中：
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-默认通过 `http://127.0.0.1:5174` 访问 Web，API 在 `http://127.0.0.1:3100`。对外暴露时建议在前面配置 Nginx/Caddy 的 HTTPS 反向代理，并用 `ALLOWED_ORIGINS` 显式声明允许的前端来源。ClamAV/OCR 服务可按需启动；当前默认简历主流程不依赖 ClamAV。
+默认通过 `http://127.0.0.1:5174` 访问 Web，API 在 `http://127.0.0.1:3100`。对外暴露时建议在前面配置 Nginx/Caddy 的 HTTPS 反向代理，并用 `ALLOWED_ORIGINS` 显式声明允许的前端来源。当前默认简历主流程不依赖 ClamAV；OCR 用于扫描版 PDF 与图片简历，首次启动会下载模型。
+
+ClamAV 默认不随主服务启动。需要启用简历病毒扫描时，先设置 `RESUME_VIRUS_SCAN_ENABLED=true` 和 `CLAMAV_HOST=clamav`，再执行：
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile virus-scan up -d clamav
+```
 
 ## 简历上传与病毒扫描说明
 
@@ -88,13 +94,13 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 ### 简历对象存储（必需）
 
-- `S3_ENDPOINT`：MinIO 地址，本地为 `http://127.0.0.1:19000`
+- `S3_ENDPOINT`：可选的 S3 兼容存储地址，例如 MinIO
 - `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`：访问密钥，本地默认 `smartrecruit` / `change-me-in-development`
 - `S3_QUARANTINE_BUCKET`：存放简历的桶，默认 `resume-quarantine`，首次使用时自动创建
 - `S3_REGION`（默认 `us-east-1`）、`S3_FORCE_PATH_STYLE`（默认 `true`）
 - 不配置 `S3_ENDPOINT` 时回退到本地目录，可用 `RECRUITING_QUARANTINE_ROOT` 指定路径
 
-> 简历上传依赖对象存储可用。只启动 API 而没启动 MinIO 时，上传会失败并提示「简历存储不可用」。
+> 简历上传依赖对象存储可用。Docker 默认使用共享的 `resume_data` 持久卷；配置 `S3_ENDPOINT` 后才会改用外部 S3 兼容存储。
 
 ### 服务与安全
 
@@ -155,7 +161,7 @@ OPENAI_TIMEOUT_MS=30000
 ## 常见问题
 
 - 页面仍显示旧的 `quarantined`：确认访问的是当前 API（默认 `3100`），只读核对数据库迁移台账与文件扫描状态；不要通过生产重启或开发种子尝试修复数据。
-- 上传简历失败并提示对象存储不可用：确认 MinIO 容器在运行（`docker compose -f deploy/docker-compose.yml up -d minio`）且 `S3_ENDPOINT` 指向的地址可达；`.\start-local.ps1` 会在启动 API 前自动完成这步检查。
+- 上传简历失败并提示对象存储不可用：检查 API 与 Worker 是否都挂载了 `resume_data` 卷；若配置了 `S3_ENDPOINT`，确认该 S3 兼容服务地址、密钥和桶可达。
 - 简历库没有数据：确认 API 与前端使用同一个 PostgreSQL 数据库，且 Web 的 `/api` 代理指向实际 API；不要只启动 Web。
 - API 返回 502：通常是代理目标的 API 没有启动或端口不一致。检查 `http://127.0.0.1:3100/api/v1/health`，再检查 Web 的 `VITE_API_PROXY_TARGET`。
 - 面试分段转写失败：先检查 `http://127.0.0.1:3100/api/v1/ready` 中 `externalServices.funasr` 和 `externalServices.fasterWhisper`；后备服务未配置时，FunASR 仍是唯一分段转写来源。

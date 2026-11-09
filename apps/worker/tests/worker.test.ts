@@ -6,7 +6,7 @@ import { createResumeAnalysisHandler, type ResumeAnalysisResult } from '../src/h
 import { InMemoryIdempotencyStore, createTaskExecutor } from '../src/runner.js'
 import { beginTaskAttempt, createTask, hasAttemptsRemaining, TaskExhaustedError, TaskValidationError } from '../src/task.js'
 import { HealthStateStore, createHealthServer } from '../src/health.js'
-import { startWorker } from '../src/worker.js'
+import { isTenantSchemaRoutingEnabled, startWorker } from '../src/worker.js'
 
 const basePayload = {
   applicationId: 'app-1',
@@ -153,6 +153,12 @@ void describe('worker task runtime', () => {
     assert.equal(result.retryable, false)
     assert.equal(result.failure?.code, 'UNSUPPORTED_TASK_TYPE')
   })
+})
+
+it('enables tenant schema routing only when explicitly switched on', () => {
+  assert.equal(isTenantSchemaRoutingEnabled({}), false)
+  assert.equal(isTenantSchemaRoutingEnabled({ TENANT_SCHEMA_ROUTING: 'off' }), false)
+  assert.equal(isTenantSchemaRoutingEnabled({ TENANT_SCHEMA_ROUTING: ' ON ' }), true)
 })
 
 void describe('worker health', () => {

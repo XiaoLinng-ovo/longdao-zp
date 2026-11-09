@@ -4,6 +4,7 @@ export const administrationModules = [
   { key: 'departments', label: '部门管理' },
   { key: 'settings', label: '系统设置' },
   { key: 'ai', label: 'AI 模型配置' },
+  { key: 'smtp', label: '邮件 SMTP 配置' },
   { key: 'dingtalk', label: '钉钉集成配置' },
   { key: 'channels', label: '渠道集成配置' },
   { key: 'failed-tasks', label: '失败分析任务' },

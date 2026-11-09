@@ -5,7 +5,7 @@ import {
   Activity, Archive, Blocks, BriefcaseBusiness, Building2, ChartColumn,
   ChevronRight, ClipboardCheck, ClipboardList, CreditCard, FileCheck2,
   FileClock, FileSearch, History, LayoutDashboard, MessageSquare,
-  Network, Plug, Settings2, ShieldCheck, SlidersHorizontal, Sparkles,
+  Mail, Network, Plug, ScanEye, Settings2, ShieldCheck, SlidersHorizontal, Sparkles,
   UserPlus, Users, Wallet,
 } from '@lucide/vue'
 import { getNavigationItemsForRole } from '../navigation'
@@ -15,7 +15,7 @@ import { platformAdministrationModules } from '../../modules/administration/modu
 const route = useRoute()
 const visibleNavigationItems = computed(() => {
   const workspaceRole = authSession.workspaces.find((workspace) => workspace.id === authSession.user?.workspaceId)?.role
-  return getNavigationItemsForRole(authSession.user?.role, workspaceRole, authSession.user?.platformRole)
+  return getNavigationItemsForRole(authSession.user?.role, workspaceRole, authSession.user?.platformRole, authSession.user?.isSystemAdmin === true)
 })
 const groups = computed(() => [...new Set(visibleNavigationItems.value.map((item) => item.group))])
 const administrationExpanded = ref(route.path === '/administration')
@@ -36,8 +36,10 @@ const navigationIcons: Record<string, Component> = {
   '/enterprise/billing-sandbox': CreditCard,
   '/enterprise/payments': Wallet,
   '/enterprise/approval-settings': ClipboardCheck,
+  '/enterprise/departments': Network,
   '/platform/payments': CreditCard,
   '/platform/customers': Building2,
+  '/platform/users': Users,
   '/administration': Settings2,
 }
 
@@ -46,6 +48,7 @@ const administrationIcons: Record<string, Component> = {
   'account-creation': UserPlus,
   departments: Network,
   settings: SlidersHorizontal,
+  smtp: Mail,
   dingtalk: Plug,
   channels: Blocks,
   'audit-logs': History,

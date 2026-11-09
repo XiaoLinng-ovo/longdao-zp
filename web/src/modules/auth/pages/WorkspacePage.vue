@@ -95,7 +95,7 @@ onMounted(load)
           <router-link v-if="authSession.user?.platformRole" to="/platform/customers">进入平台企业客户管理 →</router-link>
           <span class="workspace-kicker">SMART RECRUIT · WORKSPACES</span>
           <h1>企业工作空间</h1>
-          <p>新企业默认试用 14 天，现有企业保持启用。创建自己的企业，或粘贴管理员发来的邀请码加入。企业成员关系与业务角色分别管理，加入后可以切换工作空间。</p>
+          <p>新企业默认试用 14 天，现有企业保持启用。创建自己的企业，或粘贴管理员发来的邀请码加入。企业成员关系与账号类型分别管理，加入后可以切换工作空间。</p>
         </div>
         <router-link v-if="activeWorkspace" class="workspace-logout" to="/">
           <span aria-hidden="true">←</span>返回招聘工作台
@@ -163,7 +163,6 @@ onMounted(load)
       </div>
       <EnterpriseEntitlements v-if="entitlementWorkspace" :key="entitlementWorkspace.id" :organization-id="entitlementWorkspace.id" :name="entitlementWorkspace.name" />
       <WorkspaceInvitationManager v-if="managingWorkspace" :key="managingWorkspace.id" :workspace="managingWorkspace" />
-      <footer>当前账号：{{ authSession.user?.email }} · 企业之间的数据和成员关系独立管理。</footer>
     </section>
   </main>
 </template>
@@ -239,7 +238,6 @@ onMounted(load)
 .workspace-action:hover { border-color: #b9d9df; background: #f7fcfd; }
 .workspace-action.danger { color: #b76a72; }
 .workspace-empty { margin-top: 13px; padding: 38px 30px; border: 1px dashed #cfdee4; border-radius: 16px; background: rgba(249, 253, 254, .68); color: #8ca1ac; text-align: center; font-size: 12px; }
-.workspace-card footer { margin-top: 25px; color: #9aadb6; font-size: 10.5px; }
 @media (max-width: 860px) { .workspace-create { align-items: stretch; flex-direction: column; gap: 18px; } .workspace-create-form { width: 100%; } .workspace-create input { flex: 1; width: auto; } }
 @media (max-width: 680px) { .workspace-shell { padding: 24px 12px; } .workspace-card { padding: 29px 18px 24px; border-radius: 22px; } .workspace-header { flex-direction: column; gap: 16px; } .workspace-logout { align-self: flex-start; } .workspace-create-form { align-items: stretch; flex-wrap: wrap; } .workspace-create input { flex: 1 1 100%; } .workspace-create select { flex: 1; width: auto; } .workspace-create-btn { flex: 1; } .workspace-list-title { align-items: flex-start; flex-direction: column; gap: 7px; } .workspace-row { align-items: flex-start; flex-wrap: wrap; } .workspace-info { flex-basis: calc(100% - 58px); } .workspace-row-actions { width: 100%; margin-left: 56px; justify-content: flex-start; flex-wrap: wrap; } .workspace-empty { padding: 31px 17px; } }
 </style>

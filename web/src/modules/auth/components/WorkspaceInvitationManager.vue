@@ -2,7 +2,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { createInvitation, listInvitations, listWorkspaceMembers, listInvitationDepartments, revokeInvitation, updateWorkspaceMember, type Invitation, type InvitationInput, type WorkspaceMember } from '../api/invitations'
 import { authSession } from '../session'
-import { businessRoleLabels, membershipLabels, copyText, invitationLink, invitationText } from '../utils/invitations'
+import { membershipLabels, copyText, invitationLink, invitationText } from '../utils/invitations'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import type { WorkspaceSummary } from '../api'
 const props = defineProps<{ workspace: WorkspaceSummary }>()
@@ -14,7 +14,6 @@ const memberForms = ref<Record<string, InvitationInput>>({})
 const busy = ref(false), loading = ref(false), error = ref(''), notice = ref('')
 const created = ref<Invitation | null>(null)
 const localOnly = ['localhost','127.0.0.1','[::1]','::1'].includes(window.location.hostname)
-const owner = computed(() => props.workspace.role === 'owner')
 const statuses = { pending:'待加入', accepted:'已加入', expired:'已过期', revoked:'已撤销' }
 let generation = 0
 let expiryTimer: ReturnType<typeof setInterval> | undefined
@@ -32,7 +31,7 @@ async function load() {
     const [i,m,d] = await Promise.all([listInvitations(props.workspace.id),listWorkspaceMembers(props.workspace.id),listInvitationDepartments()])
     if (current !== generation) return
     invitations.value = i; members.value = m; departments.value = d
-    memberForms.value = Object.fromEntries(m.map(member => [member.id,{membershipRole:member.membershipRole === 'admin' ? 'admin' : 'member',businessRole:(['recruiter','hiring_manager','approver','interviewer'].includes(member.businessRole) ? member.businessRole : 'recruiter') as InvitationInput['businessRole'],departmentId:member.departmentId}]))
+    memberForms.value = Object.fromEntries(m.map(member => [member.id,{membershipRole:'member',businessRole:'recruiter',departmentId:member.departmentId}]))
   } catch (cause) { if(current === generation) error.value = describeApiFailure(cause,'读取成员邀请失败').message }
   finally { if(current === generation) loading.value = false }
 }
@@ -41,7 +40,7 @@ watch(() => props.workspace.id, () => {
   memberForms.value = {}
   void load()
 }, { immediate:true })
-function editable(member: WorkspaceMember) { return member.id !== authSession.user?.id && member.membershipRole !== 'owner' && (owner.value || member.membershipRole !== 'admin') }
+function editable(member: WorkspaceMember) { return member.id !== authSession.user?.id && member.membershipRole !== 'owner' }
 async function create() {
   if (busy.value) return
   busy.value = true; error.value = ''; notice.value = ''
@@ -87,8 +86,8 @@ async function save(member: WorkspaceMember) {
     const saved = {...memberForms.value[member.id]!}
     await updateWorkspaceMember(props.workspace.id,member.id,saved)
     if (current !== generation) return
-    member.membershipRole = saved.membershipRole; member.businessRole = saved.businessRole; member.departmentId = saved.departmentId ?? null
-    notice.value='成员权限已保存，将在该成员后续请求中生效；不影响其他企业的角色。'
+    member.membershipRole = saved.membershipRole; member.businessRole = 'recruiter'; member.departmentId = saved.departmentId ?? null
+    notice.value='成员设置已保存，将在该成员后续请求中生效；部门仅用于组织管理。'
   } catch (cause) { error.value=describeApiFailure(cause,'保存成员权限失败').message }
   finally { busy.value=false }
 }
@@ -102,31 +101,19 @@ async function save(member: WorkspaceMember) {
 
       <form class="invite-form" @submit.prevent="create">
         <label>接收邮箱（可选）<input v-model="form.email" type="email" maxlength="254" placeholder="填写后仅该邮箱可加入" /></label>
-        <label>企业身份<select v-model="form.membershipRole"><option value="member">普通成员</option><option v-if="owner" value="admin">企业管理员</option></select></label>
-        <label>业务角色<select v-model="form.businessRole"><option v-for="role in ['recruiter','hiring_manager','approver','interviewer']" :key="role" :value="role">{{ businessRoleLabels[role] }}</option></select></label>
-        <label>所属部门<select v-model="form.departmentId"><option :value="null">{{ form.businessRole === 'hiring_manager' ? '请选择部门（必填）' : '未指定部门' }}</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></label>
+        <label>企业身份<select v-model="form.membershipRole"><option value="member">普通用户</option></select></label>
+        <label>所属部门<select v-model="form.departmentId"><option :value="null">未指定部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select></label>
         <label>有效期<select v-model="form.expiresInDays"><option v-for="days in [1,3,7,30]" :key="days" :value="days">{{ days }} 天</option></select></label>
         <button class="primary" type="submit" :disabled="busy">{{ busy ? '处理中…' : '生成邀请' }}</button>
       </form>
-      <p class="tip">不填写邮箱的邀请可由任何获得邀请码的人使用，请仅发给可信同事。这里的企业管理员不是平台系统管理员，不会获得全局系统配置权限。</p>
+      <p class="tip">企业成员统一使用企业用户身份；企业管理员仅负责当前企业的成员和空间设置，不会获得平台运营权限。</p>
       <p v-if="localOnly" class="tip">当前是本机地址，邀请链接只能在本机打开。同事需通过平台的局域网或公网地址登录，再输入邀请码；要直接分享可访问的链接，请从该地址打开平台后复制。</p>
       <div v-if="created" class="created"><strong>新邀请码</strong><code>{{ created.code }}</code><button type="button" @click="copy(created.code ?? '')">复制邀请码</button><button type="button" @click="copy(invitationLink(created.code ?? ''))">复制邀请链接</button><button type="button" @click="copy(invitationText(created))">复制邀请内容</button><button type="button" @click="share(created)">分享 / 发送邀请</button><button type="button" @click="email(created)">邮件邀请（本机）</button><p>邮箱密码登录 → 验证邀请 → 确认加入。有效期至 {{ new Date(created.expiresAt).toLocaleString('zh-CN') }}。</p></div>
       <h3>邀请记录 <small>{{ invitations.length }} 条（最多展示最近 200 条）</small></h3>
       <p v-if="!invitations.length">还没有邀请，先生成一个发给同事。</p>
-      <div class="table-scroll"><table v-if="invitations.length"><thead><tr><th>接收人 / 邀请码</th><th>权限</th><th>有效期 / 状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in invitations" :key="item.id"><td>{{ item.email || '不限接收邮箱' }}<code>{{ item.code }}</code></td><td>{{ membershipLabels[item.membershipRole] }}<br />{{ businessRoleLabels[item.businessRole] }} {{ item.departmentName ? '· '+item.departmentName : '' }}</td><td>{{ new Date(item.expiresAt).toLocaleString('zh-CN') }}<br /><span class="status" :class="item.status">{{ statuses[item.status] }}</span></td><td><div v-if="item.status === 'pending'" class="actions"><button type="button" @click="copy(item.code ?? '')">复制码</button><button type="button" @click="copy(invitationLink(item.code ?? ''))">复制链接</button><button type="button" @click="share(item)">发送邀请</button><button type="button" @click="email(item)">邮件</button><button type="button" :disabled="busy" @click="revoke(item)">撤销</button></div><span v-else>—</span></td></tr></tbody></table></div>
+      <div class="table-scroll"><table v-if="invitations.length"><thead><tr><th>接收人 / 邀请码</th><th>企业身份</th><th>所属部门</th><th>有效期 / 状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in invitations" :key="item.id"><td>{{ item.email || '不限接收邮箱' }}<code>{{ item.code }}</code></td><td>{{ membershipLabels[item.membershipRole] }}<br />企业用户</td><td>{{ item.departmentName || '未指定' }}</td><td>{{ new Date(item.expiresAt).toLocaleString('zh-CN') }}<br /><span class="status" :class="item.status">{{ statuses[item.status] }}</span></td><td><div v-if="item.status === 'pending'" class="actions"><button type="button" @click="copy(item.code ?? '')">复制码</button><button type="button" @click="copy(invitationLink(item.code ?? ''))">复制链接</button><button type="button" @click="share(item)">发送邀请</button><button type="button" @click="email(item)">邮件</button><button type="button" :disabled="busy" @click="revoke(item)">撤销</button></div><span v-else>—</span></td></tr></tbody></table></div>
       <h3>企业成员 <small>{{ members.length }} 人</small></h3>
-      <div class="table-scroll"><table><thead><tr><th>成员</th><th>企业身份</th><th>业务角色</th><th>所属部门</th><th>操作</th></tr></thead><tbody><tr v-for="member in members" :key="member.id"><td>{{ member.name }}<small>{{ member.email }}</small></td><td><select v-if="editable(member)" :aria-label="member.name + '的企业身份'" v-model="memberForms[member.id]!.membershipRole"><option value="member">普通成员</option><option v-if="owner" value="admin">企业管理员</option></select><span v-else>{{ membershipLabels[member.membershipRole] }}</span></td><td><select v-if="editable(member)" :aria-label="member.name + '的业务角色'" v-model="memberForms[member.id]!.businessRole"><option v-for="role in ['recruiter','hiring_manager','approver','interviewer']" :key="role" :value="role">{{ businessRoleLabels[role] }}</option></select><span v-else>{{ businessRoleLabels[member.businessRole] || member.businessRole }}</span></td><td><select v-if="editable(member)" :aria-label="member.name + '的所属部门'" v-model="memberForms[member.id]!.departmentId"><option :value="null">未指定部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select><span v-else>{{ member.departmentName || '未指定' }}</span></td><td><button v-if="editable(member)" type="button" :disabled="busy" @click="save(member)">保存权限</button><span v-else>{{ member.id === authSession.user?.id ? '当前账号' : '—' }}</span></td></tr></tbody></table></div>
-      <details class="role-guide" aria-label="企业身份与业务角色说明">
-        <summary>企业身份与业务角色说明</summary>
-        <p>企业身份用于管理空间与成员；业务角色用于区分招聘工作。企业管理员身份不代表自动获得录用审批权。</p>
-        <ul>
-          <li><b>招聘专员：</b>日常岗位、简历与面试工作。</li>
-          <li><b>部门负责人：</b>负责部门招聘，需指定所属部门。</li>
-          <li><b>录用审批人：</b>用于录用、薪资与 Offer 审批；具体操作仍受任务分配和后端权限校验约束。</li>
-          <li><b>面试官：</b>参与面试并提交反馈。</li>
-        </ul>
-        <p>不同企业的成员身份独立设置；更改角色不会自动替你审批或发放 Offer。</p>
-      </details>
+      <div class="table-scroll"><table><thead><tr><th>成员</th><th>企业身份</th><th>所属部门</th><th>操作</th></tr></thead><tbody><tr v-for="member in members" :key="member.id"><td>{{ member.name }}<small>{{ member.email }}</small></td><td><span>{{ membershipLabels[member.membershipRole] }}</span><br /><small>普通用户</small></td><td><select v-if="editable(member)" :aria-label="member.name + '的所属部门'" v-model="memberForms[member.id]!.departmentId"><option :value="null">未指定部门</option><option v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</option></select><span v-else>{{ member.departmentName || '未指定' }}</span></td><td><button v-if="editable(member)" type="button" :disabled="busy" @click="save(member)">保存设置</button><span v-else>{{ member.id === authSession.user?.id ? '当前账号' : '—' }}</span></td></tr></tbody></table></div>
     </template>
   </section>
 </template>

@@ -25,6 +25,7 @@ function harness(options: { job?: AudioTranscriptionJob | null; status?: string;
     complete: async (claimed, segments) => { completed.push({ job: claimed, segments }); return true },
     retry: async (_claimed, error) => { retried.push(error) },
     progress: async () => ({ pendingCount: options.pending ?? 0, retryingCount: 0 }),
+    relabelFromEvidence: async () => 0,
   }, { get: async () => ({ session: { ...session, status: options.status ?? 'active' }, segments: options.segments ?? [] }) }, {
     read: async key => { assert.equal(key, job.objectKey); if (options.readError) throw options.readError; return Buffer.from('audio') },
   }, voices, async (audio, contentType) => {

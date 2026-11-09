@@ -32,7 +32,7 @@ function row(status = 'interviewing'): Candidate {
   }
 }
 async function mount(candidate: Candidate | Candidate[] = row(), role = 'recruiter') {
-  authSession.user = { id: 'u1', name: '测试用户', email: 'test@example.invalid', role: role as 'recruiter', departmentId: 'd1' }
+  authSession.user = { id: 'u1', name: '企业用户', email: 'test@example.invalid', role: role as 'recruiter', departmentId: 'd1', ...(role === 'viewer' ? {} : { workspaceId: 'workspace-1' }) }
   vi.mocked(loadCandidates).mockResolvedValue(Array.isArray(candidate) ? candidate : [candidate])
   vi.mocked(loadJobs).mockResolvedValue([])
   vi.mocked(loadCandidateTags).mockResolvedValue([])

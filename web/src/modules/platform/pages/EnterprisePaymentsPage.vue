@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import QRCode from "qrcode";
 import { Check, CalendarDays, UsersRound, BriefcaseBusiness } from "@lucide/vue";
 import { authSession, refreshAuthSession } from "../../auth/session";
+import { isPlatformAdminRole } from "../../auth/platform-roles";
 import {
   getCheckout,
   getPaymentOrder,
@@ -230,7 +231,7 @@ onBeforeUnmount(() => {
           <h2>选择适合团队的套餐</h2>
           <p v-if="!report.products.length" class="empty">
             暂无在售套餐，请联系平台管理员。
-            <RouterLink v-if="authSession.user?.platformRole === 'admin'" to="/platform/payments">配置正式套餐</RouterLink>
+            <RouterLink v-if="isPlatformAdminRole(authSession.user?.platformRole)" to="/platform/payments">配置正式套餐</RouterLink>
           </p>
           <div class="products">
             <button

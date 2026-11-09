@@ -264,8 +264,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
     const context = getWorkspaceContext()
     const pathname = new URL(url, 'http://api.local').pathname
-    const globalAdmin = /^\/api\/v1\/admin(?:\/|$)/.test(pathname) && !/^\/api\/v1\/admin\/(billing-sandbox|ai-usage|ai-settings|ai-connection-test|ai-skills|analysis-tasks|recruitment-approval-settings)(?:\/|$)/.test(pathname)
-    const workspaceScoped = !globalAdmin && /^\/api\/v1\/(departments|recruitment-requests|jobs|candidates|candidate-tags|resumes|resume-import-batches|analysis-tasks|analysis-results|applications|interviews|interviewer-options|interview-live-sessions|interview-live-segments|offers|onboarding|dashboard|reports|workflow-events|admin|ai-skills|trial-usage)(?:\/|$)/.test(pathname)
+    const globalAdmin = /^\/api\/v1\/admin(?:\/|$)/.test(pathname) && !/^\/api\/v1\/admin\/(billing-sandbox|ai-usage|ai-settings|ai-connection-test|ai-skills|analysis-tasks)(?:\/|$)/.test(pathname)
+    const workspaceScoped = !globalAdmin && /^\/api\/v1\/(departments|recruitment-requests|jobs|candidates|candidate-tags|resumes|resume-import-batches|analysis-tasks|analysis-results|applications|interviews|interviewer-options|interview-live-sessions|interview-live-segments|offers|offer-templates|onboarding|dashboard|reports|workflow-events|admin|ai-skills|trial-usage)(?:\/|$)/.test(pathname)
     const billingScoped = /^\/api\/v1\/payments\/workspaces\//.test(pathname)
     const contextScoped = workspaceScoped || billingScoped || globalAdmin || /^\/api\/v1\/platform(?:\/|$)/.test(pathname)
     const isWrite = WRITE_METHODS.has((method ?? 'GET').toUpperCase())

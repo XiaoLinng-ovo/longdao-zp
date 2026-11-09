@@ -13,23 +13,14 @@ export function requireReason(reason: unknown): string {
 }
 
 export function transitionRequest(request: RecruitmentRequestRecord, action: string, reason?: unknown): void {
-  const require = ['reject', 'withdraw', 'close', 'cancel'].includes(action)
+  if (action === 'approve' || action === 'reject') throw new RecruitingWorkflowError('RECRUITMENT_APPROVAL_DISABLED', '招聘需求已取消审批，请直接提交需求')
+  const require = ['withdraw', 'close', 'cancel'].includes(action)
   const normalizedReason = require ? requireReason(reason) : ''
   const from = request.status
   if (action === 'submit' || action === 'resubmit') {
-    if (from !== 'draft' && from !== 'rejected') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许提交`)
-    request.status = 'pending_approval'
-    request.approval.status = 'pending'
-  } else if (action === 'approve') {
-    if (from !== 'pending_approval') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许审批`)
+    if (!['draft', 'rejected', 'pending_approval'].includes(from)) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许提交`)
     request.status = 'approved'
     request.approval.status = 'approved'
-    request.approval.actedAt = new Date().toISOString()
-  } else if (action === 'reject') {
-    if (from !== 'pending_approval') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许驳回`)
-    request.status = 'rejected'
-    request.approval.status = 'rejected'
-    request.approval.comment = normalizedReason
     request.approval.actedAt = new Date().toISOString()
   } else if (action === 'withdraw') {
     if (!['draft', 'pending_approval', 'approved'].includes(from)) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许撤回`)
@@ -41,7 +32,7 @@ export function transitionRequest(request: RecruitmentRequestRecord, action: str
     if (!['draft', 'pending_approval', 'rejected'].includes(from)) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_INVALID_TRANSITION', `需求状态 ${from} 不允许取消`)
     request.status = 'cancelled'
   } else if (action === 'convert') {
-    if (from !== 'approved' || request.convertedJobIds.length === 0) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_CONVERTIBLE', '需求必须审批通过且已创建岗位')
+    if (from !== 'approved' || request.convertedJobIds.length === 0) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_CONVERTIBLE', '需求必须已生效且已创建岗位')
     request.status = 'converted'
   } else {
     throw new RecruitingWorkflowError('UNKNOWN_WORKFLOW_ACTION', `不支持的需求动作：${action}`, 400)
@@ -52,7 +43,7 @@ export function transitionRequest(request: RecruitmentRequestRecord, action: str
 
 export function assertJobPublishable(job: JobRecord, request?: RecruitmentRequestRecord): void {
   if (job.recruitmentRequestId && !request) throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_REQUIRED', '历史关联的招聘需求不存在，请修复关联', 409)
-  if (request && request.status !== 'approved' && request.status !== 'converted') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_APPROVED', '只有审批通过的需求才能发布岗位')
+  if (request && request.status !== 'approved' && request.status !== 'converted') throw new RecruitingWorkflowError('RECRUITMENT_REQUEST_NOT_APPROVED', '只有已生效的需求才能发布岗位')
   if (!job.spec?.confirmed || !job.jd?.confirmed) throw new RecruitingWorkflowError('JOB_DOCUMENT_NOT_CONFIRMED', '岗位说明书和 JD 必须确认后才能发布')
 }
 

@@ -41,6 +41,11 @@ test('serves SPA routes and protects static paths', async () => {
   const gateway = createProductionGateway({ staticDir })
   const port = await listen(gateway)
 
+  const health = await getText(port, '/health')
+  assert.equal(health.status, 200)
+  assert.equal(health.body.toString(), 'ok\n')
+  assert.match(health.headers['content-type'], /text\/plain/)
+
   const route = await getText(port, '/candidates', { accept: 'text/html' })
   assert.equal(route.status, 200)
   assert.match(route.headers['content-type'], /text\/html/)
@@ -63,7 +68,12 @@ test('serves SPA routes and protects static paths', async () => {
 test('proxies API requests without changing the request path', async () => {
   const api = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ method: req.method, url: req.url, origin: req.headers.origin || null }))
+    res.end(JSON.stringify({
+      method: req.method,
+      url: req.url,
+      origin: req.headers.origin || null,
+      forwardedFor: req.headers['x-forwarded-for'] || null,
+    }))
   })
   const apiPort = await listen(api)
   const gateway = createProductionGateway({ apiTarget: `http://127.0.0.1:${apiPort}` })
@@ -75,7 +85,13 @@ test('proxies API requests without changing the request path', async () => {
     method: 'GET',
     url: '/api/v1/health?check=1',
     origin: 'https://example.test',
+    forwardedFor: '127.0.0.1',
   })
+
+  const chained = await getText(gatewayPort, '/api/v1/health?check=2', {
+    'x-forwarded-for': '198.51.100.7',
+  })
+  assert.equal(JSON.parse(chained.body.toString()).forwardedFor, '198.51.100.7, 127.0.0.1')
 })
 
 test('compresses API JSON for slow remote clients without changing cookies or payload', async () => {

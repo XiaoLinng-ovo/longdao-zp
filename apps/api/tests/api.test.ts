@@ -2,6 +2,7 @@ import { COMMON_CAPABILITY_DIMENSIONS } from '../src/interviews/question-generat
 import { EnterpriseAiStore } from '@smartrecruit-pro/enterprise-ai';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { createServer as createSmtpServer, type Server as SmtpServer } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -15,16 +16,20 @@ let testDirectory: string;
 let authHeader: Record<string, string> = {};
 let csrfToken: string | undefined = undefined;
 let csrfCookieHeader: string | undefined = undefined;
+let smtpServer: SmtpServer;
+const receivedSmtpMessages: string[] = [];
 const previousAuthPath = process.env.AUTH_STORE_PATH;
 const previousQuarantineRoot = process.env.RECRUITING_QUARANTINE_ROOT;
 const previousNodeEnv = process.env.NODE_ENV;
 const previousDingTalkToken = process.env.DINGTALK_INTEGRATION_TOKEN;
 const previousPlatformBaseUrl = process.env.PLATFORM_BASE_URL;
+const previousEnvFilePath = process.env.ENV_FILE_PATH;
+const previousSmtp = Object.fromEntries(['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM'].map(key => [key, process.env[key]]));
 
 function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl);
-    const requestInstance = request(url, { method: 'GET', headers: { ...authHeader, ...headers } }, (response) => {
+    const requestInstance = request(url, { method: 'GET', headers: { origin: baseUrl, ...authHeader, ...headers } }, (response) => {
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer) => chunks.push(chunk));
       response.on('end', () => {
@@ -48,7 +53,7 @@ function requestJson(method: string, path: string, payload?: unknown, headers: R
     const csrfHeaders = isWrite && csrfToken && csrfCookieHeader ? { 'x-csrf-token': csrfToken, cookie: csrfCookieHeader } : {}
     const requestInstance = request(url, {
       method,
-      headers: { ...authHeader, ...csrfHeaders, ...headers, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
+      headers: { origin: baseUrl, ...authHeader, ...csrfHeaders, ...headers, ...(payload === undefined ? {} : { 'content-type': 'application/json' }) },
     }, (response) => {
       const chunks: Buffer[] = []
       response.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -80,15 +85,81 @@ async function login(): Promise<void> {
 
 async function passFinalInterview(applicationId: string): Promise<void> {
   const interviews = (await get('/api/v1/interviews?applicationId=' + applicationId)).body.data
-  let final = interviews.find((item: any) => item.round === 2)
+  const currentInterviewerCanConclude = (item: any) => item.round === 2
+    && item.participants.some((participant: any) => participant.userId === 'user-interviewer' && participant.role === 'interviewer')
+  let final = interviews.find(currentInterviewerCanConclude)
   if (!final) {
     const created = await requestJson('POST', '/api/v1/interviews', { applicationId, round: 2, title: '复试', participants: [{ userId: 'user-interviewer', role: 'interviewer' }] })
     assert.equal(created.status, 201, JSON.stringify(created.body))
     final = created.body.data
   }
-  assert.equal((await requestJson('POST', `/api/v1/interviews/${final.id}/feedback`, { interviewerId: 'user-interviewer', overallScore: 90, recommendation: 'yes' })).status, 200)
-  assert.equal((await requestJson('POST', `/api/v1/interviews/${final.id}/lock-feedback`, { interviewerId: 'user-interviewer' })).status, 200)
+  const requiredInterviewers = final.participants.filter((participant: any) => participant.required !== false && (participant.role ?? 'interviewer') === 'interviewer')
+  for (const interviewer of requiredInterviewers) {
+    assert.equal((await requestJson('POST', `/api/v1/interviews/${final.id}/feedback`, { interviewerId: interviewer.userId, overallScore: 90, recommendation: 'yes' })).status, 200)
+    assert.equal((await requestJson('POST', `/api/v1/interviews/${final.id}/lock-feedback`, { interviewerId: interviewer.userId })).status, 200)
+  }
   assert.equal((await requestJson('POST', `/api/v1/interviews/${final.id}/conclude`, { outcome: 'offer' })).status, 200)
+}
+
+async function sendOfferEmail(offerId: string, input: { to?: string; subject?: string; markdown?: string; html?: string } = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: any }> {
+  return requestJson('POST', `/api/v1/offers/${offerId}/send-email`, {
+    to: 'offer-recipient@example.test',
+    subject: 'Offer 通知',
+    markdown: '欢迎加入。',
+    ...input,
+  })
+}
+
+async function resolveRequiredOnboardingRequirements(onboardingId: string): Promise<void> {
+  const tasks = await get(`/api/v1/onboarding/${onboardingId}/tasks`)
+  assert.equal(tasks.status, 200, JSON.stringify(tasks.body))
+  for (const task of tasks.body.data) {
+    if (!task.isRequired || ['completed', 'not_required'].includes(task.status)) continue
+    const updated = await requestJson('PATCH', `/api/v1/onboarding/${onboardingId}/tasks/${task.id}`, { status: 'completed' })
+    assert.equal(updated.status, 200, JSON.stringify(updated.body))
+  }
+
+  await loginAs('admin@smartrecruit.local', 'admin123')
+  const materials = await get(`/api/v1/onboarding/${onboardingId}/materials`)
+  assert.equal(materials.status, 200, JSON.stringify(materials.body))
+  for (const material of materials.body.data) {
+    if (!material.isRequired || ['verified', 'waived'].includes(material.status)) continue
+    const updated = await requestJson('PATCH', `/api/v1/onboarding/${onboardingId}/materials/${material.id}`, { status: 'verified' })
+    assert.equal(updated.status, 200, JSON.stringify(updated.body))
+  }
+  await login()
+}
+
+function createTestSmtpServer(): SmtpServer {
+  return createSmtpServer(socket => {
+    let buffer = ''
+    let receivingMessage = false
+    socket.write('220 localhost ESMTP\r\n')
+    socket.on('data', chunk => {
+      buffer += chunk.toString('utf8')
+      while (buffer.length) {
+        if (receivingMessage) {
+          const end = buffer.indexOf('\r\n.\r\n')
+          if (end < 0) return
+          receivedSmtpMessages.push(buffer.slice(0, end))
+          buffer = buffer.slice(end + 5)
+          receivingMessage = false
+          socket.write('250 queued\r\n')
+          continue
+        }
+        const end = buffer.indexOf('\r\n')
+        if (end < 0) return
+        const command = buffer.slice(0, end).toUpperCase()
+        buffer = buffer.slice(end + 2)
+        if (command.startsWith('EHLO') || command.startsWith('HELO')) socket.write('250-localhost\r\n250-AUTH PLAIN LOGIN\r\n250 OK\r\n')
+        else if (command.startsWith('AUTH')) socket.write('235 authenticated\r\n')
+        else if (command.startsWith('MAIL FROM') || command.startsWith('RCPT TO')) socket.write('250 OK\r\n')
+        else if (command === 'DATA') { receivingMessage = true; socket.write('354 End data with <CR><LF>.<CR><LF>\r\n') }
+        else if (command === 'QUIT') { socket.end('221 bye\r\n'); return }
+        else socket.write('250 OK\r\n')
+      }
+    })
+  })
 }
 
 before(async () => {
@@ -98,6 +169,15 @@ before(async () => {
   testDirectory = await mkdtemp(join(tmpdir(), 'recruiting-api-test-'));
   process.env.AUTH_STORE_PATH = join(testDirectory, 'auth-sessions.json');
   process.env.RECRUITING_QUARANTINE_ROOT = join(testDirectory, 'resumes');
+  process.env.ENV_FILE_PATH = join(testDirectory, 'smtp.env');
+  smtpServer = createTestSmtpServer()
+  await new Promise<void>((resolve) => smtpServer.listen(0, '127.0.0.1', resolve))
+  const smtpAddress = smtpServer.address()
+  assert.ok(smtpAddress && typeof smtpAddress !== 'string')
+  Object.assign(process.env, {
+    SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpAddress.port), SMTP_SECURE: 'false',
+    SMTP_USER: 'test-user', SMTP_PASSWORD: 'test-password', SMTP_FROM: '招聘团队 <recruiting@example.test>',
+  })
   const { createHttpServer } = await import('../src/server.js');
   server = createHttpServer(loadConfig({ NODE_ENV: 'test', PORT: '0' }));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -108,11 +188,14 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  await new Promise<void>((resolve, reject) => smtpServer.close((error) => (error ? reject(error) : resolve())));
   if (previousAuthPath === undefined) delete process.env.AUTH_STORE_PATH; else process.env.AUTH_STORE_PATH = previousAuthPath;
   if (previousQuarantineRoot === undefined) delete process.env.RECRUITING_QUARANTINE_ROOT; else process.env.RECRUITING_QUARANTINE_ROOT = previousQuarantineRoot;
   if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
   if (previousDingTalkToken === undefined) delete process.env.DINGTALK_INTEGRATION_TOKEN; else process.env.DINGTALK_INTEGRATION_TOKEN = previousDingTalkToken;
   if (previousPlatformBaseUrl === undefined) delete process.env.PLATFORM_BASE_URL; else process.env.PLATFORM_BASE_URL = previousPlatformBaseUrl;
+  if (previousEnvFilePath === undefined) delete process.env.ENV_FILE_PATH; else process.env.ENV_FILE_PATH = previousEnvFilePath;
+  for (const [key, value] of Object.entries(previousSmtp)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   await rm(testDirectory, { recursive: true, force: true });
 });
 
@@ -305,9 +388,43 @@ describe('Phase 1 API', { concurrency: false }, () => {
   });
 
   it('returns readiness data', async () => {
-    const response = await get('/api/v1/ready');
-    assert.equal(response.status, 200);
-    assert.equal(response.body.data.status, 'ready');
+    const keys = ['FUNASR_BASE_URL', 'FASTER_WHISPER_BASE_URL', 'OCR_SERVICE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL'];
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    for (const key of keys) delete process.env[key];
+    try {
+      const response = await get('/api/v1/ready');
+      assert.equal(response.status, 200);
+      assert.deepEqual(Object.keys(response.body.data.checks.externalServices).sort(), ['fasterWhisper', 'funasr', 'llm', 'ocr']);
+      assert.equal(response.body.data.checks.externalServices.funasr, 'unavailable');
+      assert.equal(response.body.data.checks.externalServices.fasterWhisper, 'not_configured');
+      assert.equal(response.body.data.checks.externalServices.ocr, 'unavailable');
+      // 语音与 OCR 均不可用时不能再对外宣称 ready，否则前端会把降级环境当正常环境使用。
+      assert.equal(response.body.data.status, 'degraded');
+      assert.ok(response.body.data.degradedReasons.some((reason: string) => reason.includes('语音转写')));
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key] as string;
+      }
+    }
+  });
+
+  it('reports configured external services without degrading', async () => {
+    const keys = ['OCR_SERVICE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL'];
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.OCR_SERVICE_URL = 'http://127.0.0.1:9/ocr';
+    process.env.OPENAI_BASE_URL = 'https://model.example.test/v1';
+    process.env.OPENAI_API_KEY = 'test-key';
+    process.env.OPENAI_MODEL = 'test-model';
+    try {
+      const response = await get('/api/v1/ready');
+      assert.equal(response.status, 200);
+      assert.equal(response.body.data.checks.externalServices.llm, 'ok');
+      assert.equal(response.body.data.checks.externalServices.ocr, 'ok');
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key] as string;
+      }
+    }
   });
 
   it('returns a standardized 401 response for the unauthenticated me endpoint', async () => {
@@ -559,7 +676,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
     t.mock.method(EnterpriseAiStore.prototype, 'runtimeEnv', async () => ({ OPENAI_BASE_URL: 'https://tenant-model.example.test/v1', OPENAI_API_KEY: 'tenant-only-key', OPENAI_MODEL: 'tenant-only-model' }));
     const interview = (await get('/api/v1/interviews')).body.data[0]; assert.ok(interview);
     const before = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === interview.applicationId);
-    const baseQuestion = { category: 'experience', difficulty: 'medium', rationale: '能力考核', groundedIn: ['岗位能力要求'], scoringRubric: [{ criterion: '能力证据', points: 10 }] };
+    const baseQuestion = { sourceEngine: 'llm' as const, category: 'experience', difficulty: 'medium', rationale: '能力考核', groundedIn: ['Java Spring Boot PostgreSQL'], scoringRubric: [{ criterion: '能力证据', points: 10 }] };
     const questions = [
       ...Array.from({ length: 10 }, (_, i) => ({ ...baseQuestion, group: 'ai', question: `简历证据核实 ${i + 1}` })),
       ...(['hr', 'department'] as const).flatMap(group => COMMON_CAPABILITY_DIMENSIONS[group].map(dimension => ({ ...baseQuestion, group, dimension: dimension.id, question: `${group}情境考核 ${dimension.id}`, scoringRubric: [{ criterion: dimension.focus, points: dimension.points }] }))),
@@ -571,20 +688,22 @@ describe('Phase 1 API', { concurrency: false }, () => {
       globalThis.fetch = async (_url, init) => {
         assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer tenant-only-key');
         const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
-        assert.equal(input.questionCount, 10); assert.equal(input.includeCommonQuestions, true);
+        assert.equal(input.questionCount, 5); assert.equal(input.includeCommonQuestions, true);
         requestGroups.push(input.requestedGroup);
         if (input.requestedGroup === 'hr' && !rateLimitedHr) {
           rateLimitedHr = true;
           return new Response('busy', { status: 429, headers: { 'Retry-After': '0' } });
         }
-        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: questions.filter(question => question.group === input.requestedGroup) }) } }] }), { status: 200 });
+        const offset = Number(input.batchOffset ?? 0)
+        const groupQuestions = questions.filter(question => question.group === input.requestedGroup)
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: groupQuestions.slice(offset, offset + input.questionCount) }) } }] }), { status: 200 });
       };
       const path = `/api/v1/interviews/${interview.id}/questions`;
       assert.equal((await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: 'true' })).status, 400);
       const response = await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: true });
       assert.equal(response.status, 200, JSON.stringify(response.body));
       assert.equal(response.body.data.engine, 'llm'); assert.deepEqual(response.body.data.questions, questions);
-      assert.deepEqual(requestGroups, ['ai', 'hr', 'hr', 'department']);
+      assert.deepEqual(requestGroups, ['ai', 'ai', 'hr', 'hr', 'department']);
       const saved = await get(path); assert.equal(saved.status, 200); assert.deepEqual(saved.body.data.questions, questions); assert.ok(saved.body.data.updatedAt);
       globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"questions":[]}' } }] }), { status: 200 });
       const fallback = await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: true });
@@ -602,8 +721,8 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const interview = created.body.data;
     const questions = [
-      ...Array.from({ length: 10 }, (_, i) => ({ group: 'ai', question: '复试简历核实 ' + i, category: 'experience', difficulty: 'hard', rationale: '核实证据', groundedIn: ['简历证据'], scoringRubric: [{ criterion: '证据', points: 10 }] })),
-      ...(['hr', 'department', 'boss'] as const).flatMap(group => COMMON_CAPABILITY_DIMENSIONS[group].map(dimension => ({ group, dimension: dimension.id, question: group + '复试考核 ' + dimension.id, category: 'job_specific', difficulty: 'hard', rationale: dimension.focus, groundedIn: ['岗位要求'], scoringRubric: [{ criterion: dimension.focus, points: dimension.points }] }))),
+      ...Array.from({ length: 10 }, (_, i) => ({ sourceEngine: 'llm' as const, group: 'ai', question: '复试简历核实 ' + i, category: 'experience', difficulty: 'hard', rationale: '核实证据', groundedIn: ['Java Spring Boot PostgreSQL'], scoringRubric: [{ criterion: '证据', points: 10 }] })),
+      ...(['hr', 'department', 'boss'] as const).flatMap(group => COMMON_CAPABILITY_DIMENSIONS[group].map(dimension => ({ sourceEngine: 'llm' as const, group, dimension: dimension.id, question: group + '复试考核 ' + dimension.id, category: 'job_specific', difficulty: 'hard', rationale: dimension.focus, groundedIn: ['Java Spring Boot PostgreSQL'], scoringRubric: [{ criterion: dimension.focus, points: dimension.points }] }))),
     ];
     const originalFetch = globalThis.fetch;
     try {
@@ -611,7 +730,9 @@ describe('Phase 1 API', { concurrency: false }, () => {
         const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
         assert.equal(input.stage, 'final');
         if (input.requestedGroup === 'boss') assert.equal(input.capabilityDimensions.boss.length, 5);
-        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: questions.filter(question => question.group === input.requestedGroup) }) } }] }), { status: 200 });
+        const offset = Number(input.batchOffset ?? 0)
+        const groupQuestions = questions.filter(question => question.group === input.requestedGroup)
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ questions: groupQuestions.slice(offset, offset + input.questionCount) }) } }] }), { status: 200 });
       };
       const path = '/api/v1/interviews/' + interview.id + '/questions';
       const result = await requestJson('POST', path, { questionCount: 10, includeCommonQuestions: true, stage: 'initial' });
@@ -748,24 +869,211 @@ describe('Phase 1 API', { concurrency: false }, () => {
     if (previous.model === undefined) delete process.env.OPENAI_MODEL; else process.env.OPENAI_MODEL = previous.model
   })
 
-  it('completes the offer approval, response, and onboarding archive flow', async () => {
+  it('sends offers directly after email delivery, then completes onboarding archive', async () => {
     const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'offer_approval')
     assert.ok(application)
     await passFinalInterview(application.id)
     const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '测试工程师', departmentId: '数据平台', employmentType: 'full_time', baseSalary: { amount: 20000, currency: 'CNY' }, content: '欢迎加入' })
     assert.equal(created.status, 201)
     const id = created.body.data.id
-    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})).body.data.status, 'pending_approval')
-    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/approve`, {})).body.data.status, 'approved')
-    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/send`, {})).body.data.status, 'sent')
-    assert.equal((await requestJson('POST', `/api/v1/offers/${id}/accept`, {})).body.data.status, 'accepted')
+    assert.equal('approval' in created.body.data, false)
+    const listed = await get('/api/v1/offers')
+    assert.equal('approval' in listed.body.data.find((item: any) => item.id === id), false)
+    const detailBeforeSend = await get(`/api/v1/offers/${id}`)
+    assert.equal('approval' in detailBeforeSend.body.data, false)
+    for (const action of ['submit-approval', 'approve', 'reject']) {
+      const response = await requestJson('POST', `/api/v1/offers/${id}/${action}`, action === 'reject' ? { reason: '不再使用审批流程' } : {})
+      assert.equal(response.status, 409)
+      assert.equal(response.body.error.code, 'OFFER_APPROVAL_DISABLED')
+    }
+    const sent = await sendOfferEmail(id)
+    assert.equal(sent.status, 200, JSON.stringify(sent.body))
+    assert.equal(sent.body.data.status, 'sent')
+    assert.equal('approval' in sent.body.data, false)
+    const sentDetail = await get(`/api/v1/offers/${id}`)
+    assert.equal(sentDetail.body.data.sentAt, sent.body.data.sentAt)
+    assert.ok(sentDetail.body.data.currentVersionId)
+    const applicationAfterSend = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === application.id)
+    assert.equal(applicationAfterSend.status, 'offer_sent')
+    const accepted = await requestJson('POST', `/api/v1/offers/${id}/accept`, {})
+    assert.equal(accepted.body.data.status, 'accepted')
+    assert.equal('approval' in accepted.body.data, false)
+    const applicationAfterAccept = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === application.id)
+    assert.equal(applicationAfterAccept.status, 'offer_accepted')
+    const beforeAcceptedResendMessages = receivedSmtpMessages.length
+    const acceptedResend = await sendOfferEmail(id, { subject: '已接受 Offer 补发', markdown: '补发已接受的 Offer。' })
+    assert.equal(acceptedResend.status, 409, JSON.stringify(acceptedResend.body))
+    assert.equal(acceptedResend.body.error.code, 'OFFER_EMAIL_NOT_READY')
+    assert.equal(receivedSmtpMessages.length, beforeAcceptedResendMessages)
     const archived = await requestJson('POST', `/api/v1/offers/${id}/archive-onboarding`, { reason: '入职资料已归档' })
     assert.equal(archived.body.data.status, 'pending')
-    assert.equal((await get(`/api/v1/offers/${id}`)).body.data.onboarding.status, 'pending')
-    assert.equal((await requestJson('POST', `/api/v1/onboarding/${archived.body.data.id}/complete`, {})).body.data.status, 'completed')
+    const onboardingId = archived.body.data.id
+    const defaultTasks = await get(`/api/v1/onboarding/${onboardingId}/tasks`)
+    assert.equal(defaultTasks.status, 200, JSON.stringify(defaultTasks.body))
+    assert.deepEqual([...new Set(defaultTasks.body.data.map((task: any) => task.category))].sort(), ['admin', 'candidate', 'hr', 'it', 'manager', 'training'])
+
+    const arrangement = await requestJson('PATCH', `/api/v1/onboarding/${onboardingId}`, {
+      plannedStartDate: '2026-11-03',
+      plannedStartTime: '09:30',
+      reportingMode: 'onsite',
+      reportingLocation: 'A 座 12 层',
+      reportingContactName: '刘敏',
+      reportingContactPhone: '13800000000',
+      hrOwnerName: '王 HR',
+      hiringManagerName: '陈经理',
+      riskNotes: '需在首日开通生产环境只读权限',
+    })
+    assert.equal(arrangement.status, 200, JSON.stringify(arrangement.body))
+    assert.equal(arrangement.body.data.reportingLocation, 'A 座 12 层')
+    assert.equal(arrangement.body.data.reportingMode, 'onsite')
+
+    const prepared = await requestJson('POST', `/api/v1/onboarding/${onboardingId}/prepare`, {})
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
+    assert.equal(prepared.body.data.status, 'preparing')
+    const scheduled = await requestJson('POST', `/api/v1/onboarding/${onboardingId}/schedule`, {})
+    assert.equal(scheduled.status, 200, JSON.stringify(scheduled.body))
+    assert.equal(scheduled.body.data.status, 'scheduled')
+
+    const addedTask = await requestJson('POST', `/api/v1/onboarding/${onboardingId}/tasks`, { title: '开通 VPN 权限', category: 'it', ownerName: 'IT 服务台', dueDate: '2026-11-02' })
+    assert.equal(addedTask.status, 201, JSON.stringify(addedTask.body))
+    const blockedWithoutReason = await requestJson('PATCH', `/api/v1/onboarding/${onboardingId}/tasks/${addedTask.body.data.id}`, { status: 'blocked' })
+    assert.equal(blockedWithoutReason.status, 400)
+    const blockedTask = await requestJson('PATCH', `/api/v1/onboarding/${onboardingId}/tasks/${addedTask.body.data.id}`, { status: 'blocked', blockedReason: '等待网络审批' })
+    assert.equal(blockedTask.status, 200, JSON.stringify(blockedTask.body))
+    assert.equal(blockedTask.body.data.blockedReason, '等待网络审批')
+
+    const beforeArchivedResendMessages = receivedSmtpMessages.length
+    const archivedResend = await sendOfferEmail(id, { subject: '归档后 Offer 补发', markdown: '补发归档后的 Offer。' })
+    assert.equal(archivedResend.status, 409, JSON.stringify(archivedResend.body))
+    assert.equal(archivedResend.body.error.code, 'OFFER_EMAIL_NOT_READY')
+    assert.equal(receivedSmtpMessages.length, beforeArchivedResendMessages)
+    assert.equal((await get(`/api/v1/offers/${id}`)).body.data.onboarding.status, 'scheduled')
+    const prematureCompletion = await requestJson('POST', `/api/v1/onboarding/${onboardingId}/complete`, {})
+    assert.equal(prematureCompletion.status, 409, JSON.stringify(prematureCompletion.body))
+    assert.equal(prematureCompletion.body.error.code, 'ONBOARDING_COMPLETION_BLOCKED')
+    await resolveRequiredOnboardingRequirements(onboardingId)
+    const completed = await requestJson('POST', `/api/v1/onboarding/${onboardingId}/complete`, {})
+    assert.equal(completed.status, 200, JSON.stringify(completed.body))
+    assert.equal(completed.body.data.status, 'completed')
   })
 
-  it('supports offer rejection, draft revision, and expiry', async () => {
+  it('allows resending cancelled offers while rejecting declined and expired offers', async () => {
+    await login()
+    for (const status of ['declined', 'cancelled', 'expired'] as const) {
+      const candidate = await requestJson('POST', '/api/v1/candidates', { fullName: `可补发 Offer 候选人-${status}` })
+      assert.equal(candidate.status, 201, JSON.stringify(candidate.body))
+      const application = await requestJson('POST', '/api/v1/applications', { candidateId: candidate.body.data.id, jobId: 'job-108' })
+      assert.equal(application.status, 201, JSON.stringify(application.body))
+      await passFinalInterview(application.body.data.id)
+      const created = await requestJson('POST', '/api/v1/offers', {
+        applicationId: application.body.data.id,
+        positionTitle: `Offer 补发-${status}`,
+        departmentId: '技术中心',
+        employmentType: 'full_time',
+        baseSalary: { amount: 20000, currency: 'CNY' },
+        content: 'Offer 补发测试',
+      })
+      assert.equal(created.status, 201, JSON.stringify(created.body))
+      const offerId = created.body.data.id
+      assert.equal((await sendOfferEmail(offerId)).body.data.status, 'sent')
+      const terminal = status === 'expired'
+        ? await requestJson('POST', `/api/v1/offers/${offerId}/expire`, {})
+        : await requestJson('POST', `/api/v1/offers/${offerId}/${status === 'declined' ? 'decline' : 'cancel'}`, { reason: `测试${status}` })
+      assert.equal(terminal.status, 200, JSON.stringify(terminal.body))
+      assert.equal(terminal.body.data.status, status)
+      const currentApplication = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === application.body.data.id)
+      assert.equal(currentApplication.status, `offer_${status}`)
+
+      if (status === 'cancelled') {
+        for (const action of ['resend-cancelled', 'resend_cancelled']) {
+          const directResend = await requestJson('POST', `/api/v1/offers/${offerId}/${action}`, {})
+          assert.equal(directResend.status, 409, JSON.stringify(directResend.body))
+          assert.equal(directResend.body.error.code, 'OFFER_EMAIL_REQUIRED')
+        }
+        assert.equal((await get(`/api/v1/offers/${offerId}`)).body.data.status, 'cancelled')
+      }
+
+      const beforeResendMessages = receivedSmtpMessages.length
+      const resent = await sendOfferEmail(offerId, { subject: `${status} Offer 补发`, markdown: '补发终态 Offer。' })
+      if (status === 'cancelled') {
+        assert.equal(resent.status, 200, JSON.stringify(resent.body))
+        assert.equal(resent.body.data.status, 'sent')
+        assert.equal(receivedSmtpMessages.length, beforeResendMessages + 1)
+      } else {
+        assert.equal(resent.status, 409, JSON.stringify(resent.body))
+        assert.equal(resent.body.error.code, 'OFFER_EMAIL_NOT_READY')
+        assert.equal(receivedSmtpMessages.length, beforeResendMessages)
+      }
+    }
+  })
+
+  it('delivers a complete Offer template body and resolves its template variables', async () => {
+    await login()
+    const candidate = await requestJson('POST', '/api/v1/candidates', {
+      fullName: 'Offer Template Test Candidate',
+      email: 'offer-template-candidate@example.test',
+    })
+    assert.equal(candidate.status, 201, JSON.stringify(candidate.body))
+    const application = await requestJson('POST', '/api/v1/applications', {
+      candidateId: candidate.body.data.id,
+      jobId: 'job-108',
+    })
+    assert.equal(application.status, 201, JSON.stringify(application.body))
+    await passFinalInterview(application.body.data.id)
+    const created = await requestJson('POST', '/api/v1/offers', {
+      applicationId: application.body.data.id,
+      positionTitle: '模板验证工程师',
+      departmentId: '数据平台',
+      employmentType: 'full_time',
+      startDate: '2026-11-15',
+      reportingLocation: '滨江区江陵路88号A座1201',
+      invoiceTitle: '测试<科技>有限公司',
+      taxNumber: 'TEST9133',
+      templateFields: { reportingTime: '09:30', supervisorName: '王经理', supervisorTitle: '研发总监', probationDuration: '3个月', probationSalaryMonths: '3', formalSalaryStartMonth: '4', payday: '15' },
+      baseSalary: { amount: 18000, currency: 'CNY' },
+      probationSalary: { amount: 15000, currency: 'CNY' },
+      benefits: ['五险一金', '带薪年假'],
+      materials: ['id_card', 'bank_card:招商银行', 'other:无犯罪记录证明'],
+      content: '保存的完整 Offer 模板',
+    })
+    assert.equal(created.status, 201, JSON.stringify(created.body))
+
+    const messageCount = receivedSmtpMessages.length
+    const unresolved = await sendOfferEmail(created.body.data.id, { html: '<p>{{未配置字段}}</p>' })
+    assert.equal(unresolved.status, 400, JSON.stringify(unresolved.body))
+    assert.equal(unresolved.body.error.code, 'OFFER_TEMPLATE_UNRESOLVED')
+    assert.equal(receivedSmtpMessages.length, messageCount)
+    await requestJson('PATCH', `/api/v1/offers/${created.body.data.id}`, { templateFields: { supervisorName: '' } })
+    const empty = await sendOfferEmail(created.body.data.id, { html: '<p>{{直属上级姓名}}</p>' })
+    assert.equal(empty.status, 400, JSON.stringify(empty.body))
+    assert.equal(empty.body.error.code, 'OFFER_TEMPLATE_UNRESOLVED')
+    assert.equal(receivedSmtpMessages.length, messageCount)
+    await requestJson('PATCH', `/api/v1/offers/${created.body.data.id}`, { templateFields: { supervisorName: '王经理' } })
+    const sent = await sendOfferEmail(created.body.data.id, {
+      subject: '完整 Offer 模板验证 {{直属上级姓名}}',
+      html: '<h1>Offer 通知</h1><p>模板正文标记：offer-template-body</p><p>{{报到日期}} {{报到时间}} 前，前往 杭州市余杭区城投未来之星C2幢21楼2105室 办理报到手续。</p><p>抬头：{{发票抬头}} / {{invoiceTitle}}</p><p>税号：{{企业税号}} / {{taxNumber}}</p><p>上级：{{直属上级姓名}}（{{直属上级职务}}）；试用期{{试用期时长}}；前{{试用期薪资适用月数}}个月；第{{转正后薪资生效月份}}个月起；每月{{发薪日}}日</p><ul><li>{{候选人姓名}}</li><li>{{岗位名称}}</li><li>{{试用期月薪}}</li><li>{{转正后月薪}}</li><li>{{其他福利或约定}}</li><li>{{入职材料}}</li><li>{{bankName}}</li></ul>',
+    })
+    assert.equal(sent.status, 200, JSON.stringify(sent.body))
+
+    const delivered = receivedSmtpMessages.at(-1) ?? ''
+    assert.match(delivered, /offer-template-body/u)
+    const plainPart = delivered.match(/Content-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n([\s\S]*?)\r\n----_NmP/)
+    assert.ok(plainPart, '邮件应包含纯文本正文')
+    const plainText = Buffer.from((plainPart?.[1] ?? '').replace(/\s/gu, ''), 'base64').toString('utf8')
+    assert.match(plainText, /2026-11-15 09:30 前，前往 滨江区江陵路88号A座1201 办理报到手续/u)
+    assert.doesNotMatch(plainText, /杭州市余杭区/u)
+    assert.match(plainText, /抬头：测试<科技>有限公司 \/ 测试<科技>有限公司/u)
+    assert.match(plainText, /税号：TEST9133 \/ TEST9133/u)
+    assert.match(plainText, /上级：王经理（研发总监）；试用期3个月；前3个月；第4个月起；每月15日/u)
+    assert.match(plainText, /模板验证工程师/u)
+    assert.match(plainText, /15,000/u)
+    assert.match(plainText, /18,000/u)
+    assert.match(plainText, /无犯罪记录证明/u)
+    assert.doesNotMatch(plainText, /other:/u)
+    assert.doesNotMatch(delivered, /\{\{/u)
+  })
+
+  it('supports draft revision, skips approval, and expires a sent offer', async () => {
     const application = (await get('/api/v1/applications')).body.data.find((item: any) => item.status === 'interviewing')
     assert.ok(application)
 
@@ -780,14 +1088,11 @@ describe('Phase 1 API', { concurrency: false }, () => {
     const detail = await get(`/api/v1/offers/${id}`)
     assert.ok(detail.body.data.versions.length >= 2)
 
-    await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})
     const rejected = await requestJson('POST', `/api/v1/offers/${id}/reject`, { reason: '薪资需调整' })
-    assert.equal(rejected.body.data.status, 'draft')
-    assert.equal(rejected.body.data.approval.status, 'rejected')
+    assert.equal(rejected.status, 409)
+    assert.equal(rejected.body.error.code, 'OFFER_APPROVAL_DISABLED')
 
-    await requestJson('POST', `/api/v1/offers/${id}/submit-approval`, {})
-    await requestJson('POST', `/api/v1/offers/${id}/approve`, {})
-    await requestJson('POST', `/api/v1/offers/${id}/send`, {})
+    assert.equal((await sendOfferEmail(id)).body.data.status, 'sent')
     const expired = await requestJson('POST', `/api/v1/offers/${id}/expire`, {})
     assert.equal(expired.body.data.status, 'expired')
   })
@@ -877,11 +1182,60 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.ok(afterPass.body.data.some((item: any) => item.id === application.id))
     const created = await requestJson('POST', '/api/v1/offers', { applicationId: application.id, positionTitle: '入职归档岗位', departmentId: '技术中心', employmentType: 'full_time', startDate: '2026-10-08', baseSalary: { amount: 22000, currency: 'CNY' }, content: 'Offer 内容' })
     assert.equal(created.status, 201)
-    const offerId = created.body.data.id
+    let offerId = created.body.data.id
 
-    await requestJson('POST', `/api/v1/offers/${offerId}/submit-approval`, {})
-    await requestJson('POST', `/api/v1/offers/${offerId}/approve`, {})
-    await requestJson('POST', `/api/v1/offers/${offerId}/send`, {})
+    const sent = await sendOfferEmail(offerId)
+    assert.equal(sent.body.data.status, 'sent')
+    const sentDetail = await get(`/api/v1/offers/${offerId}`)
+    const sentAt = sentDetail.body.data.sentAt
+    const sentVersion = sentDetail.body.data.version
+    const currentVersionId = sentDetail.body.data.currentVersionId
+    const documentVersion = sentDetail.body.data.versions.find((version: any) => version.id === currentVersionId)?.version
+    const afterSend = await get('/api/v1/offers/eligible-applications')
+    assert.equal(afterSend.status, 200)
+    assert.ok(!afterSend.body.data.some((item: any) => item.id === application.id))
+    const beforeResendMessages = receivedSmtpMessages.length
+    const resent = await sendOfferEmail(offerId, { subject: 'Offer 再次通知', markdown: '这是重新发送的 Offer。' })
+    assert.equal(resent.status, 200)
+    assert.equal(resent.body.data.status, 'sent')
+    assert.equal(receivedSmtpMessages.length, beforeResendMessages + 1)
+    const resentDetail = await get(`/api/v1/offers/${offerId}`)
+    assert.equal(resentDetail.body.data.version, sentVersion + 1)
+    assert.equal(resentDetail.body.data.sentAt, sentAt)
+    assert.equal(resentDetail.body.data.currentVersionId, currentVersionId)
+    assert.equal(resentDetail.body.data.versions.find((version: any) => version.id === currentVersionId)?.version, documentVersion)
+    const applicationAfterResend = (await get('/api/v1/applications')).body.data.find((item: any) => item.id === application.id)
+    assert.equal(applicationAfterResend.status, 'offer_sent')
+
+    const cancelled = await requestJson('POST', `/api/v1/offers/${offerId}/cancel`, { reason: '候选人暂缓入职' })
+    assert.equal(cancelled.status, 200)
+    const afterCancel = await get('/api/v1/offers/eligible-applications')
+    assert.ok(afterCancel.body.data.some((item: any) => item.id === application.id))
+    const originalResent = await sendOfferEmail(offerId, { subject: '取消后重新发送', markdown: '仅更新本次邮件正文。' })
+    assert.equal(originalResent.status, 200)
+    assert.equal(originalResent.body.data.status, 'sent')
+    const cancelledAgain = await requestJson('POST', `/api/v1/offers/${offerId}/cancel`, { reason: '改为重新创建 Offer' })
+    assert.equal(cancelledAgain.status, 200)
+    const eligibleAgain = await get('/api/v1/offers/eligible-applications')
+    assert.ok(eligibleAgain.body.data.some((item: any) => item.id === application.id))
+    const recreated = await requestJson('POST', '/api/v1/offers', {
+      applicationId: application.id,
+      positionTitle: '入职归档岗位',
+      departmentId: '技术中心',
+      employmentType: 'full_time',
+      startDate: '2026-10-08',
+      baseSalary: { amount: 24000, currency: 'CNY' },
+      materials: ['medical_report'],
+      content: '重新创建的 Offer 内容',
+    })
+    assert.equal(recreated.status, 201)
+    assert.notEqual(recreated.body.data.id, offerId)
+    const conflictingResend = await sendOfferEmail(offerId, { subject: '不应发送', markdown: '已有新 Offer' })
+    assert.equal(conflictingResend.status, 409)
+    offerId = recreated.body.data.id
+    const replacementSent = await sendOfferEmail(offerId)
+    assert.equal(replacementSent.status, 200)
+    assert.equal(replacementSent.body.data.status, 'sent')
     const accepted = await requestJson('POST', `/api/v1/offers/${offerId}/accept`, {})
     assert.equal(accepted.body.data.status, 'accepted')
 
@@ -896,17 +1250,30 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(record.applicationId, application.id)
     assert.equal(record.status, 'pending')
 
-    const scheduled = await requestJson('POST', `/api/v1/onboarding/${record.id}/schedule`, {})
-    assert.equal(scheduled.status, 200)
-    assert.equal(scheduled.body.data.status, 'scheduled')
-
-    const patched = await requestJson('PATCH', `/api/v1/onboarding/${record.id}`, { plannedStartDate: '2026-10-21', notes: '准备入职资料' })
+    const patched = await requestJson('PATCH', `/api/v1/onboarding/${record.id}`, {
+      plannedStartDate: '2026-10-21',
+      plannedStartTime: '09:30',
+      reportingMode: 'onsite',
+      reportingLocation: 'A 座 12 层',
+      reportingContactName: '刘敏',
+      reportingContactPhone: '13800000000',
+      notes: '准备入职资料',
+    })
     assert.equal(patched.status, 200)
     assert.equal(patched.body.data.plannedStartDate, '2026-10-21')
     assert.equal(patched.body.data.notes, '准备入职资料')
 
+    const prepared = await requestJson('POST', `/api/v1/onboarding/${record.id}/prepare`, {})
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
+    const scheduled = await requestJson('POST', `/api/v1/onboarding/${record.id}/schedule`, {})
+    assert.equal(scheduled.status, 200, JSON.stringify(scheduled.body))
+    assert.equal(scheduled.body.data.status, 'scheduled')
+
+    const prematureCompletion = await requestJson('POST', `/api/v1/onboarding/${record.id}/complete`, {})
+    assert.equal(prematureCompletion.status, 409, JSON.stringify(prematureCompletion.body))
+    await resolveRequiredOnboardingRequirements(record.id)
     const completed = await requestJson('POST', `/api/v1/onboarding/${record.id}/complete`, {})
-    assert.equal(completed.status, 200)
+    assert.equal(completed.status, 200, JSON.stringify(completed.body))
     assert.equal(completed.body.data.status, 'completed')
     assert.ok(completed.body.data.archivedAt)
 
@@ -940,7 +1307,7 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(createEvent.actorId, expectedActorId)
     assert.equal(createEvent.toStatus, 'draft')
 
-    const actedEvents = response.body.data.filter((item: any) => ['create', 'revise', 'submit_approval', 'approve', 'send', 'accept', 'expire'].includes(item.action))
+    const actedEvents = response.body.data.filter((item: any) => ['create', 'revise', 'send', 'accept', 'expire'].includes(item.action))
     assert.ok(actedEvents.length > 0)
     for (const item of actedEvents) {
       assert.equal(item.actorId, expectedActorId, `offer audit action ${item.action} should capture authenticated actor`)
@@ -1076,11 +1443,13 @@ describe('Phase 1 API', { concurrency: false }, () => {
 
     const onboardingIds: string[] = [];
     for (const offerId of [techOffer.body.data.id, foreignOffer.body.data.id]) {
-      for (const action of ['submit-approval', 'approve', 'send', 'accept', 'archive-onboarding']) {
-        const acted = await requestJson('POST', `/api/v1/offers/${offerId}/${action}`);
-        assert.equal(acted.status, 200, `Offer ${action} 失败：${JSON.stringify(acted.body)}`);
-        if (action === 'archive-onboarding') onboardingIds.push(acted.body.data.id);
-      }
+      const sent = await sendOfferEmail(offerId)
+      assert.equal(sent.status, 200, `Offer 邮件发送失败：${JSON.stringify(sent.body)}`)
+      const accepted = await requestJson('POST', `/api/v1/offers/${offerId}/accept`)
+      assert.equal(accepted.status, 200, `Offer 接受失败：${JSON.stringify(accepted.body)}`)
+      const archived = await requestJson('POST', `/api/v1/offers/${offerId}/archive-onboarding`)
+      assert.equal(archived.status, 200, `Offer 入职归档失败：${JSON.stringify(archived.body)}`)
+      onboardingIds.push(archived.body.data.id)
     }
     const [techOnboardingId, foreignOnboardingId] = onboardingIds as [string, string];
     assert.ok(techOnboardingId && foreignOnboardingId);

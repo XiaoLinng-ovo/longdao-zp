@@ -23,7 +23,7 @@ const reviewLoading = ref(false)
 const reviewError = ref('')
 let reviewVersion = 0
 const recommendationLabels = { advance: '建议推进后续流程', reject: '不建议推进后续流程', hold: '建议补充评估' }
-const analysisReady = computed(() => !audioPending.value && view.value?.status === 'ready')
+const analysisReady = computed(() => !audioPending.value && !report.value?.reviewRequired && view.value?.status === 'ready')
 const recommendation = computed(() => analysisReady.value ? report.value?.recommendation : null)
 const recommendationLabel = computed(() => recommendation.value ? recommendationLabels[recommendation.value.outcome] : '')
 const resultLabel = computed(() => reviewLoading.value ? '读取中' : reviewError.value ? '暂时无法读取' : review.value?.decision ? STAGE_DECISION_LABEL[review.value.decision] : '待人工确认')
@@ -149,7 +149,7 @@ onUnmounted(() => { version++; reviewVersion++; clearTimer(); document.removeEve
             <div><dt>面试日期</dt><dd>{{ formatDate(interviewDate) }}</dd></div>
           </dl>
           <section class="report-overview" aria-label="总体评价">
-            <div class="score-column"><h3>候选人评分</h3><div class="report-score"><strong>{{ audioPending || pending || view?.status === 'failed' ? '待评分' : report.overallScore ?? '未评分' }}</strong><span v-if="report.overallScore !== null && !audioPending && !pending && view?.status !== 'failed'"> / 100</span></div><small>AI 综合评价</small></div>
+            <div class="score-column"><h3>候选人评分</h3><div class="report-score"><strong>{{ audioPending || pending || view?.status === 'failed' ? '待评分' : report.reviewRequired ? '待人工复核' : report.overallScore ?? '未评分' }}</strong><span v-if="report.overallScore !== null && !report.reviewRequired && !audioPending && !pending && view?.status !== 'failed'"> / 100</span></div><small>AI 综合评价</small></div>
             <div><h3>AI 总体评价</h3><p>{{ report.summary }}</p><small class="report-context">未考察内容不扣分 · {{ report.dimensions.length }} 个已考察维度</small></div>
           </section>
           <p v-if="report.version === 'actual-dialogue-v1'" class="muted">这是历史问答报告，可点击“重新生成”按完整对话重新分析；历史分数不参与当前录音分计算。</p>
@@ -160,7 +160,7 @@ onUnmounted(() => { version++; reviewVersion++; clearTimer(); document.removeEve
               <ol v-else class="finding-list"><li v-for="(finding, index) in group.rows" :key="index" class="report-finding"><p>{{ finding.text }}</p><blockquote v-for="(evidence, evidenceIndex) in finding.evidence" :key="evidenceIndex">{{ evidence.quote }}</blockquote></li></ol>
             </section>
           </div>
-          <section v-if="report.dimensions.length" class="report-section">
+          <section v-if="report.dimensions.length && !report.reviewRequired" class="report-section">
             <h3>维度评分</h3>
             <div class="report-table-wrap"><table class="report-table"><thead><tr><th>考察维度</th><th>分数</th><th>评价与原文证据</th></tr></thead>
               <tbody><tr v-for="dimension in report.dimensions" :key="dimension.name"><th>{{ dimension.name }}</th><td>{{ dimension.score }}</td><td><p>{{ dimension.text }}</p><blockquote v-for="(evidence, index) in dimension.evidence" :key="index">“{{ evidence.quote }}”</blockquote></td></tr></tbody>
@@ -173,7 +173,7 @@ onUnmounted(() => { version++; reviewVersion++; clearTimer(); document.removeEve
               <p class="recommendation-value">{{ recommendationLabel }}</p>
               <p>{{ recommendation.text }}</p>
             </template>
-            <p v-else class="muted">{{ pending ? '正在生成推荐建议。' : view?.status === 'failed' ? '分析未完成，暂不提供推荐建议。' : '暂无有充分依据的推荐建议，可重新生成总结或补充评估。' }}</p>
+            <p v-else class="muted">{{ report.reviewRequired ? '角色待人工复核，暂不提供推荐建议。' : pending ? '正在生成推荐建议。' : view?.status === 'failed' ? '分析未完成，暂不提供推荐建议。' : '暂无有充分依据的推荐建议，可重新生成总结或补充评估。' }}</p>
             <small>AI 建议仅供参考，不替代人工面试结论。</small>
           </section>
           <section class="report-section human-result">

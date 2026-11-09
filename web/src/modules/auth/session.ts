@@ -1,6 +1,20 @@
 import { setWorkspaceContext, notifyOtherTabs } from '../../shared/api/workspace-context'
 import { reactive } from 'vue'
-import { getCurrentUser, login, logout, listWorkspaces, selectWorkspace, switchSavedAccount, type AuthUser, type WorkspaceSummary } from './api'
+import {
+  getCurrentUser,
+  login,
+  logout,
+  listWorkspaces,
+  selectWorkspace,
+  switchSavedAccount,
+  updateCurrentUserProfile,
+  verifyMfa,
+  type AuthLoginResult,
+  type AuthUser,
+  type AuthenticatedAuthResponse,
+  type UpdateCurrentUserProfileInput,
+  type WorkspaceSummary,
+} from './api'
 
 interface AuthSessionState {
   ready: boolean
@@ -42,17 +56,33 @@ export async function refreshAuthSession(): Promise<void> {
   }
 }
 
-export async function loginWithEmail(email: string, password: string): Promise<WorkspaceSummary[]> {
+export function syncAuthenticatedSession(result: AuthenticatedAuthResponse): WorkspaceSummary[] {
+  setWorkspaceContext(result.user.workspaceId, `${result.sessionId}:${result.user.id}`)
+  notifyOtherTabs()
+  authSession.user = result.user
+  authSession.method = 'session'
+  authSession.sessionId = result.sessionId
+  authSession.workspaces = result.workspaces ?? []
+  return authSession.workspaces
+}
+
+export async function loginWithEmail(email: string, password: string): Promise<AuthLoginResult> {
   authSession.loading = true
   try {
     const result = await login(email, password)
-    setWorkspaceContext(result.user.workspaceId, `${result.sessionId}:${result.user.id}`)
-    notifyOtherTabs()
-    authSession.user = result.user
-    authSession.method = 'session'
-    authSession.sessionId = result.sessionId
-    authSession.workspaces = result.workspaces ?? []
-    return authSession.workspaces
+    if (result.kind === 'authenticated') syncAuthenticatedSession(result)
+    return result
+  } finally {
+    authSession.loading = false
+  }
+}
+
+export async function verifyMfaAndSync(challengeToken: string, code: string): Promise<AuthenticatedAuthResponse> {
+  authSession.loading = true
+  try {
+    const result = await verifyMfa(challengeToken, code)
+    syncAuthenticatedSession(result)
+    return result
   } finally {
     authSession.loading = false
   }
@@ -82,6 +112,12 @@ export async function switchWorkspace(workspaceId: string): Promise<void> {
   try { authSession.workspaces = await listWorkspaces() } catch {
     authSession.workspaces = authSession.workspaces.map((workspace) => workspace.id === workspaceId ? { ...workspace, status: 'active' } : workspace)
   }
+}
+
+export async function saveCurrentUserProfile(input: UpdateCurrentUserProfileInput): Promise<AuthUser> {
+  const result = await updateCurrentUserProfile(input)
+  authSession.user = result.user
+  return result.user
 }
 
 export async function switchAccount(userId: string): Promise<void> {

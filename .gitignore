@@ -52,6 +52,8 @@ node_modules/
 
 # ===== 环境变量（含真实密钥，禁止提交） =====
 .env
+deploy/modelscope/runtime.env
+deploy/modelscope/runtime.native.env
 
 # ===== 构建产物 =====
 .wrangler/
@@ -80,3 +82,19 @@ _tmp_*.mjs
 *_verify.wav
 *.wav
 chk.mjs
+
+# Local verification output, database backups, and temporary helpers
+/.codex-artifacts/
+/.codex-patch.txt
+/.tmp-*/
+/artifacts/superadmin/
+/docs/manual-screenshots/
+/apps/api/tmp-db-check*.mjs
+*.bak[0-9]*
+
+# Empty files left by interrupted shell commands
+/({cls
+/({i
+/({name
+/({text
+/JSON.stringify({role

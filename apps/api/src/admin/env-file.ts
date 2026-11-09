@@ -2,7 +2,7 @@
  * .env 文件的读取与原子写入。
  * 钉钉集成配置与 AI 模型配置共用这套原语，保证写入方式与权限一致。
  */
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -88,6 +88,19 @@ export async function writeEnvFile(filePath: string, patch: Record<string, strin
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
   await writeFile(temporaryPath, next, { encoding: 'utf8', mode: 0o600 })
   await chmod(temporaryPath, 0o600)
-  await rename(temporaryPath, filePath)
+  try {
+    await rename(temporaryPath, filePath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'EBUSY' && code !== 'EXDEV') throw error
+
+    // Docker bind mounts expose a single file that cannot be replaced by rename().
+    // In-place truncation preserves the mount and the file's existing host permissions.
+    await writeFile(filePath, next, { encoding: 'utf8' })
+  } finally {
+    await unlink(temporaryPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    })
+  }
   for (const [key, value] of Object.entries(patch)) process.env[key] = value
 }

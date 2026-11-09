@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { authSession } from '../../auth/session'
 import { useRoute, useRouter } from 'vue-router'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, testDingTalkConnection, getDingTalkApprovalConfig, updateDingTalkDepartmentApprovalConfig, updateDingTalkUserMapping, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, listAiPromptSkills, createAiPromptSkill, updateAiPromptSkill, deleteAiPromptSkill, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type DingTalkConnectionTestResult, type DingTalkApprovalConfig, type AiSettings, type AiConnectionTestResult, type AdminAnalysisTask, type AdminAuditLog, type AdminAiPromptSkill, type AiPromptSkillTarget } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, testDingTalkConnection, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, getAiSharingSettings, updateAiSharingSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, listAiPromptSkills, createAiPromptSkill, updateAiPromptSkill, deleteAiPromptSkill, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type DingTalkConnectionTestResult, type AiSettings, type AiConnectionTestResult, type AiSharingSettings, type AdminAnalysisTask, type AdminAuditLog, type AdminAiPromptSkill, type AiPromptSkillTarget } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
@@ -10,9 +10,11 @@ import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings
 import ResumeScoringSkills from '../components/ResumeScoringSkills.vue'
 import AiModelSelector from '../components/AiModelSelector.vue'
 import AccountCreation from '../components/AccountCreation.vue'
+import SmtpSettings from '../components/SmtpSettings.vue'
 import { actionLabel, statusLabel } from '../../../shared/utils/labels'
 import { formatAnalysisError } from '../../../shared/utils/analysis-error'
 import { administrationModules, isAdministrationModuleKey, platformAdministrationModules, type AdministrationModuleKey } from '../moduleConfig'
+import { loadRuntimeFeatures } from '../../../shared/config/runtime-features'
 
 const props = withDefaults(defineProps<{ enterpriseAiOnly?: boolean }>(), { enterpriseAiOnly: false })
 const route = useRoute()
@@ -26,7 +28,7 @@ const activeModule = computed<AdministrationModuleKey>(() => {
   const value = Array.isArray(routeQuery.value.module) ? routeQuery.value.module[0] : routeQuery.value.module
   return isAdministrationModuleKey(value) && platformAdministrationModules.some(item => item.key === value) ? value : 'users'
 })
-const activeModuleLabel = computed(() => administrationModules.find((module) => module.key === activeModule.value)?.label ?? '用户与角色')
+const activeModuleLabel = computed(() => administrationModules.find((module) => module.key === activeModule.value)?.label ?? '用户与账号类型')
 
 function selectModule(value: string) {
   if (!isAdministrationModuleKey(value)) return
@@ -68,22 +70,23 @@ const auditPageSize = ref(10)
 const savingUser = ref<string | null>(null)
 const savingSettings = ref(false)
 const settingsDraft = ref<Record<string, string>>({})
+const recruitmentReportsEnabled = ref(false)
+const savingReportsSetting = ref(false)
+const reportsSettingMessage = ref('')
+const reportsSettingMessageKind = ref<'success' | 'failure'>('success')
 const dingTalkSettings = ref<DingTalkEnvSettings>({})
 const dingTalkDraft = ref<Record<string, string>>({})
 const savingDingTalk = ref(false)
 const dingTalkTestResult = ref<DingTalkConnectionTestResult | null>(null)
 const testingDingTalkConnection = ref(false)
-const dingTalkApproval = ref<DingTalkApprovalConfig | null>(null)
-const dingTalkApprovalDepartmentDrafts = ref<Record<string, { dingTalkDepartmentId: string; processCode: string }>>({})
-const dingTalkApprovalUserDrafts = ref<Record<string, string>>({})
-const savingDingTalkApproval = ref<string | null>(null)
-const copyingDingTalkCallbackUrl = ref(false)
 const resumeVirusScanEnabled = ref(false)
 const savingResumeVirusScan = ref(false)
 const aiSettings = ref<AiSettings | null>(null)
+const aiSharingSettings = ref<AiSharingSettings | null>(null)
 const aiTestResult = ref<AiConnectionTestResult | null>(null)
 const testingAiConnection = ref(false)
 const savingAiSettings = ref(false)
+const savingAiSharing = ref(false)
 const aiDraft = ref({ baseUrl: '', apiKey: '', model: '', timeoutMs: '' })
 const confirmingAiKeyClear = ref(false)
 const aiModels = ref<string[]>([])
@@ -107,10 +110,6 @@ const dingTalkFields = [
   { key: 'DINGTALK_APP_KEY', label: '应用凭证 Client ID（旧称 AppKey）', secret: false, help: '钉钉开发者平台 → 应用开发 → 企业内部应用 → 凭证与基础信息，复制“Client ID（原 AppKey 和 SuiteKey）”。不要填 App ID 或 AgentId。', href: 'https://open.dingtalk.com/document/orgapp/obtain-the-appkey-and-appsecret' },
   { key: 'DINGTALK_APP_SECRET', label: '应用凭证 Client Secret（旧称 AppSecret）', secret: true, help: '与 Client ID 同一“凭证与基础信息”页面中的 Client Secret（原 AppSecret 和 SuiteSecret）；用于服务端获取 access token。请勿提交到代码仓库或聊天。', href: 'https://open.dingtalk.com/document/orgapp/obtain-the-appkey-and-appsecret' },
   { key: 'DINGTALK_INTEGRATION_TOKEN', label: '岗位同步接口 Bearer Token（可选）', secret: true, help: '仅供获准的钉钉宜搭/连接器以 Authorization: Bearer 调用本平台岗位同步接口；不是钉钉应用凭证，也不是回调 Token。不使用岗位同步接口可留空。', href: 'https://open.dingtalk.com/document/orgapp/overview-of-the-dingtalk-server-side-api' },
-  { key: 'DINGTALK_CALLBACK_TOKEN', label: 'HTTP 回调签名 Token（钉钉事件订阅）', secret: true, help: '从钉钉开发者平台该应用的“事件订阅/HTTP 推送”配置复制“签名 token”；平台用它校验回调签名，必须与钉钉端完全一致。', href: 'https://open.dingtalk.com/document/orgapp/event订阅' },
-  { key: 'DINGTALK_CALLBACK_AES_KEY', label: 'HTTP 回调加密 aes_key（43 位）', secret: true, help: '从同一“事件订阅/HTTP 推送”配置复制“加密 aes_key”（通常为 43 个字符）；用于解密回调消息，必须与钉钉端完全一致。', href: 'https://open.dingtalk.com/document/orgapp/event订阅' },
-  { key: 'DINGTALK_CALLBACK_CORP_ID', label: '回调所属企业 CorpId', secret: false, help: '填写此企业内部应用所属企业的 CorpId；不是应用 App ID、Client ID 或 AgentId。可在钉钉管理后台“设置 → 企业信息”查看。', href: 'https://open.dingtalk.com/document/orgapp/query-the-enterprise-corp-id' },
-  { key: 'DINGTALK_CALLBACK_BASE_URL', label: '公网 HTTPS 回调域名（基础地址）', secret: false, help: '只填公网 HTTPS 域名/隧道根地址，例如 https://example.trycloudflare.com；不要附加回调路径。系统会拼出下方显示的完整审批回调地址。临时隧道域名变更后需同步更新。', href: 'https://open.dingtalk.com/document/orgapp/event订阅' },
 ] as const
 
 const subjectLabels: Record<WorkflowEvent['subjectType'], string> = {
@@ -181,7 +180,7 @@ async function refresh() {
     Promise.resolve(undefined),
     listAdminAuditLogs(80),
     Promise.resolve(undefined),
-    getDingTalkApprovalConfig(),
+    getAiSharingSettings(),
   ])
 
   const failures: string[] = []
@@ -204,8 +203,8 @@ async function refresh() {
   const aiConfig = read<AiSettings>(8, 'AI 模型配置')
   const tasks = read<AdminAnalysisTask[]>(9, '失败分析任务')
   const logs = read<AdminAuditLog[]>(10, '管理审计日志')
+  const sharing = read<AiSharingSettings>(12, 'AI 共享设置')
   const skills: AdminAiPromptSkill[] | undefined = undefined
-  const adminDingTalkApproval = read<DingTalkApprovalConfig>(12, '钉钉审批配置')
   if (results[11]?.status === 'rejected') aiSkillsError.value = results[11].reason instanceof Error ? results[11].reason.message : '暂时无法读取 Skill'
   else aiSkillsError.value = ''
 
@@ -216,7 +215,8 @@ async function refresh() {
   if (adminDepartments) departments.value = adminDepartments
   if (adminSettings) {
     settings.value = adminSettings
-    settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
+    recruitmentReportsEnabled.value = adminSettings.recruitment_reports_enabled === true
+    settingsDraft.value = Object.fromEntries(Object.entries(adminSettings).filter(([key]) => key !== 'recruitment_reports_enabled').map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))
   }
   if (adminDingTalkSettings) {
     dingTalkSettings.value = adminDingTalkSettings
@@ -227,20 +227,26 @@ async function refresh() {
   else if (results[8]?.status === 'rejected') aiSettingsUnavailable.value = true
   if (tasks) failedTasks.value = tasks
   if (logs) { auditLogs.value = logs; auditPage.value = 1 }
+  if (sharing) aiSharingSettings.value = sharing
   if (skills) aiSkills.value = skills
-  if (adminDingTalkApproval) {
-    dingTalkApproval.value = adminDingTalkApproval
-    dingTalkApprovalDepartmentDrafts.value = Object.fromEntries(adminDingTalkApproval.departments.map((item) => [item.id, {
-      dingTalkDepartmentId: item.dingTalkDepartmentId === null ? '' : String(item.dingTalkDepartmentId),
-      processCode: item.processCode ?? '',
-    }]))
-    dingTalkApprovalUserDrafts.value = Object.fromEntries(adminDingTalkApproval.users.map((item) => [item.id, item.dingTalkUserId ?? '']))
-  }
 
   if (failures.length) {
     error.value = `部分系统配置暂时无法读取：${failures.join('；')}`
   }
   loading.value = false
+}
+
+async function saveAiSharing() {
+  if (!aiSharingSettings.value) return
+  savingAiSharing.value = true
+  error.value = ''
+  try {
+    aiSharingSettings.value = await updateAiSharingSettings(aiSharingSettings.value.enabled)
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '保存 AI 共享设置失败'
+  } finally {
+    savingAiSharing.value = false
+  }
 }
 
 async function saveResumeVirusScan() {
@@ -440,6 +446,26 @@ async function saveSettings() {
   finally { savingSettings.value = false }
 }
 
+async function saveRecruitmentReportsSetting() {
+  savingReportsSetting.value = true
+  reportsSettingMessage.value = ''
+  error.value = ''
+  try {
+    const updated = await updateAdminSettings({ recruitment_reports_enabled: recruitmentReportsEnabled.value })
+    settings.value = updated
+    recruitmentReportsEnabled.value = updated.recruitment_reports_enabled === true
+    await loadRuntimeFeatures(`${authSession.sessionId}:${authSession.user?.id ?? ''}`, true)
+    reportsSettingMessageKind.value = 'success'
+    reportsSettingMessage.value = recruitmentReportsEnabled.value ? '招聘报表已启用。' : '招聘报表已关闭。'
+  } catch (cause) {
+    recruitmentReportsEnabled.value = settings.value.recruitment_reports_enabled === true
+    reportsSettingMessageKind.value = 'failure'
+    reportsSettingMessage.value = cause instanceof Error ? cause.message : '保存报表开关失败'
+  } finally {
+    savingReportsSetting.value = false
+  }
+}
+
 async function saveDingTalkSettings() {
   savingDingTalk.value = true; error.value = ''; dingTalkTestResult.value = null
   try {
@@ -464,36 +490,6 @@ async function runDingTalkConnectionTest() {
   } finally {
     testingDingTalkConnection.value = false
   }
-}
-
-async function saveDingTalkDepartmentApproval(departmentId: string) {
-  const draft = dingTalkApprovalDepartmentDrafts.value[departmentId]
-  if (!draft) return
-  savingDingTalkApproval.value = `department:${departmentId}`; error.value = ''
-  try {
-    dingTalkApproval.value = await updateDingTalkDepartmentApprovalConfig({
-      departmentId,
-      dingTalkDepartmentId: draft.dingTalkDepartmentId.trim() || null,
-      processCode: draft.processCode.trim() || null,
-    })
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : '保存钉钉部门审批配置失败' }
-  finally { savingDingTalkApproval.value = null }
-}
-
-async function saveDingTalkUserMapping(userId: string) {
-  savingDingTalkApproval.value = `user:${userId}`; error.value = ''
-  try {
-    dingTalkApproval.value = await updateDingTalkUserMapping({ userId, dingTalkUserId: dingTalkApprovalUserDrafts.value[userId]?.trim() || null })
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : '保存钉钉用户映射失败' }
-  finally { savingDingTalkApproval.value = null }
-}
-
-async function copyDingTalkCallbackUrl() {
-  const url = dingTalkApproval.value?.callbackUrl
-  if (!url) return
-  copyingDingTalkCallbackUrl.value = true
-  try { await navigator.clipboard.writeText(url) } catch { error.value = '复制回调地址失败，请手动复制' }
-  finally { copyingDingTalkCallbackUrl.value = false }
 }
 
 async function changeSubject() {
@@ -523,10 +519,10 @@ onMounted(refresh)
   <div v-else>
     <div v-if="error" class="error-note" role="alert">{{ error }} <button class="btn btn-ghost" type="button" @click="refresh">重试</button></div>
     <section v-if="activeModule === 'users'" class="section">
-      <h3 class="section-title">用户与角色</h3>
+      <h3 class="section-title">用户与账号类型</h3>
       <div class="table-wrap">
-        <table><thead><tr><th>用户</th><th>角色</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><select v-model="user.role" aria-label="用户角色"><option v-for="role in roles" :key="role.id" :value="role.code">{{ role.name }}</option></select></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
+        <table><thead><tr><th>用户</th><th>账号类型</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><select v-model="user.role" aria-label="用户账号类型"><option v-for="role in roles" :key="role.id" :value="role.code">{{ role.name }}</option></select></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
           <tr v-if="!users.length"><td colspan="5" class="table-empty">暂无用户</td></tr>
         </tbody></table>
       </div>
@@ -581,6 +577,14 @@ onMounted(refresh)
       </div>
       <p v-else class="settings-empty">当前没有可编辑的系统设置项。</p>
       <div class="settings-row">
+        <div><strong>招聘报表</strong><p>开启后，企业用户可在主导航查看招聘报表；关闭后入口和报表数据接口同时停用。</p><small v-if="reportsSettingMessage" :class="`connection-note ${reportsSettingMessageKind}`">{{ reportsSettingMessage }}</small></div>
+        <label class="switch">
+          <input type="checkbox" v-model="recruitmentReportsEnabled" :disabled="savingReportsSetting" @change="saveRecruitmentReportsSetting" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-label">{{ savingReportsSetting ? '保存中...' : recruitmentReportsEnabled ? '已开启' : '已关闭' }}</span>
+        </label>
+      </div>
+      <div class="settings-row">
         <div><strong>简历病毒扫描</strong><p>开启后，新上传简历会先进入隔离区并由 ClamAV 扫描；默认关闭。</p></div>
         <label class="switch">
           <input type="checkbox" v-model="resumeVirusScanEnabled" :disabled="savingResumeVirusScan" @change="saveResumeVirusScan" />
@@ -621,8 +625,20 @@ onMounted(refresh)
         </div>
         <p v-if="aiTestResult" :class="aiTestResult.ok ? 'muted' : 'error-note'">{{ aiTestResult.message }}（{{ aiTestResult.latencyMs }} 毫秒）</p>
       </div>
-      <div v-else-if="aiSettingsUnavailable" class="error-note">无法读取平台 AI 配置：请确认当前账号是超级管理员。</div>
+      <div v-else-if="aiSettingsUnavailable" class="error-note">无法读取平台 AI 配置：请确认当前账号具有平台管理员权限。</div>
       <div v-else class="table-empty">正在读取模型配置...</div>
+      <div v-if="!props.enterpriseAiOnly && aiSharingSettings" class="settings-row ai-sharing-row">
+        <div>
+          <strong>允许企业用户共享本系统管理员 AI 配置</strong>
+          <p>开启后，所有正常服务中的企业都可以使用这里配置的接口、密钥和模型；普通用户无需接触密钥，也不能修改此开关。</p>
+          <small class="muted">当前已共享 {{ aiSharingSettings.sharedOrganizationCount }} / {{ aiSharingSettings.activeOrganizationCount }} 个企业</small>
+        </div>
+        <label class="switch">
+          <input type="checkbox" v-model="aiSharingSettings.enabled" :disabled="savingAiSharing || !aiSettings?.configured" @change="saveAiSharing" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-label">{{ aiSharingSettings.enabled ? '已开启' : '已关闭' }}</span>
+        </label>
+      </div>
     <div class="ai-skills-panel">
       <div class="section-heading">
         <div>
@@ -684,6 +700,8 @@ onMounted(refresh)
     <ResumeScoringSkills :refresh-key="loading" />
     </section>
 
+    <SmtpSettings v-else-if="activeModule === 'smtp'" />
+
     <section v-else-if="activeModule === 'dingtalk'" class="section">
       <div class="section-heading"><div><h3 class="section-title">钉钉集成配置</h3><p class="muted">保存后写入 <code>ENV_FILE_PATH</code> 指定的 .env 文件，并立即对当前 API 进程生效。Client ID/Secret 用于应用服务端调用；HTTP 回调 Token/AES Key/CorpId 用于回调验签解密，二者用途不同。</p></div><div class="inline-actions"><button class="btn btn-ghost" type="button" :disabled="testingDingTalkConnection || savingDingTalk" @click="runDingTalkConnectionTest">{{ testingDingTalkConnection ? '测试中...' : '测试连接' }}</button><button class="btn btn-primary" type="button" :disabled="savingDingTalk || testingDingTalkConnection" @click="saveDingTalkSettings">{{ savingDingTalk ? '保存中...' : '保存钉钉配置' }}</button></div></div>
       <p v-if="dingTalkTestResult" :class="dingTalkTestResult.ok ? 'connection-note success' : 'connection-note failure'">{{ dingTalkTestResult.message }}（{{ dingTalkTestResult.latencyMs }} 毫秒{{ dingTalkTestResult.status ? `，HTTP ${dingTalkTestResult.status}` : '' }}）</p>
@@ -695,38 +713,6 @@ onMounted(refresh)
         </div>
       </div>
 
-      <div class="dingtalk-approval-panel">
-        <div class="section-heading"><div><h4 class="section-title">审批结果回调与部门审批模板映射</h4><p class="muted">将完整回调地址填入钉钉应用的“事件订阅/HTTP 推送”请求网址。部门 ID 必须是钉钉真实部门的数字 ID；processCode 是对应审批模板的流程编码。平台里的测试部门不能替代钉钉真实部门映射。</p></div></div>
-        <div class="callback-url-row">
-          <label>填入钉钉“事件订阅/HTTP 推送”的完整回调请求网址</label>
-          <code v-if="dingTalkApproval?.callbackUrl">{{ dingTalkApproval.callbackUrl }}</code>
-          <span v-else class="muted">尚未配置公网 HTTPS 基础地址，请配置 DINGTALK_CALLBACK_BASE_URL</span>
-          <button v-if="dingTalkApproval?.callbackUrl" class="btn btn-ghost btn-sm" type="button" :disabled="copyingDingTalkCallbackUrl" @click="copyDingTalkCallbackUrl">{{ copyingDingTalkCallbackUrl ? '复制中...' : '复制地址' }}</button>
-        </div>
-        <div class="table-wrap">
-          <table><thead><tr><th>平台部门</th><th>钉钉真实部门 ID（数字）</th><th>钉钉审批模板流程编码（processCode）</th><th>状态</th><th>操作</th></tr></thead>
-            <tbody><tr v-for="department in dingTalkApproval?.departments ?? []" :key="department.id">
-              <td><strong>{{ department.name }}</strong><small class="table-subtitle">{{ department.code }}</small></td>
-              <td><input class="text-input" inputmode="numeric" v-model="dingTalkApprovalDepartmentDrafts[department.id].dingTalkDepartmentId" placeholder="例如 123456" /></td>
-              <td><input class="text-input process-code-input" v-model="dingTalkApprovalDepartmentDrafts[department.id].processCode" placeholder="例如 PROC-..." /></td>
-              <td><span :class="department.configured ? 'skill-status active' : 'skill-status'">{{ department.configured ? '已配置' : '待配置' }}</span></td>
-              <td><button class="btn btn-primary btn-sm" type="button" :disabled="savingDingTalkApproval === `department:${department.id}`" @click="saveDingTalkDepartmentApproval(department.id)">{{ savingDingTalkApproval === `department:${department.id}` ? '保存中...' : '保存' }}</button></td>
-            </tr><tr v-if="!dingTalkApproval?.departments.length"><td colspan="5" class="table-empty">暂无平台部门</td></tr></tbody>
-          </table>
-        </div>
-
-        <div class="section-heading dingtalk-users-heading"><div><h4 class="section-title">需求提交人 → 钉钉发起人账号映射</h4><p class="muted">将平台用户映射到同一企业中的钉钉 userId；真实审批模式下，平台以此账号作为审批发起人。请使用钉钉用户标识，不是姓名、手机号、部门 ID 或 unionId。</p></div></div>
-        <div class="table-wrap">
-          <table><thead><tr><th>平台用户</th><th>平台部门</th><th>钉钉用户 ID（userId）</th><th>状态</th><th>操作</th></tr></thead>
-            <tbody><tr v-for="user in dingTalkApproval?.users ?? []" :key="user.id">
-              <td><strong>{{ user.displayName }}</strong><small class="table-subtitle">{{ user.email }}</small></td><td>{{ user.departmentName || '—' }}</td>
-              <td><input class="text-input" v-model="dingTalkApprovalUserDrafts[user.id]" placeholder="从钉钉获取 userId" /></td>
-              <td><span :class="user.configured ? 'skill-status active' : 'skill-status'">{{ user.configured ? '已配置' : '待配置' }}</span></td>
-              <td><button class="btn btn-primary btn-sm" type="button" :disabled="savingDingTalkApproval === `user:${user.id}`" @click="saveDingTalkUserMapping(user.id)">{{ savingDingTalkApproval === `user:${user.id}` ? '保存中...' : '保存' }}</button></td>
-            </tr><tr v-if="!dingTalkApproval?.users.length"><td colspan="5" class="table-empty">暂无启用用户</td></tr></tbody>
-          </table>
-        </div>
-      </div>
     </section>
 
     <div v-else-if="activeModule === 'channels'"><ChannelIntegrationSettings /></div>
@@ -917,12 +903,5 @@ onMounted(refresh)
 .skill-content-preview { display: -webkit-box; overflow: hidden; max-width: 360px; color: #64748b; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 @media (max-width: 760px) { .ai-skill-editor-grid { grid-template-columns: 1fr; } .ai-skills-table { overflow-x: auto; } }
 
-.dingtalk-approval-panel { margin-top: 22px; padding-top: 20px; border-top: 1px solid #e5eef2; }
-.callback-url-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0 16px; padding: 12px 14px; border: 1px solid #d7e8ee; border-radius: 9px; background: #f8fcfd; }
-.callback-url-row label { font-weight: 600; color: #31536d; }
-.callback-url-row code { overflow-wrap: anywhere; color: #0f766e; }
 .table-subtitle { display: block; margin-top: 3px; color: #7890a4; font-size: 11px; }
-.process-code-input { min-width: 220px; }
-.dingtalk-users-heading { margin-top: 22px; }
-@media (max-width: 900px) { .process-code-input { min-width: 150px; } .callback-url-row { align-items: flex-start; flex-direction: column; } }
 </style>

@@ -112,7 +112,7 @@ function openDetail(row: RequisitionView) {
 }
 
 const actionDescription = computed(() => {
-  const map: Record<RequisitionAction, string> = { submit: '草稿提交后进入审批', resubmit: '驳回后可重新提交', approve: '全部审批通过后状态变为已通过', reject: '驳回需填写原因', withdraw: '撤回后进入已撤回', close: '关闭后归档该需求', cancel: '取消草稿/待审批/已驳回需求', convert: '将已通过需求转换为岗位' }
+  const map: Record<RequisitionAction, string> = { submit: '提交后需求直接生效', resubmit: '修改后重新提交并直接生效', withdraw: '撤回后进入已撤回', close: '关闭后归档该需求', cancel: '取消草稿或历史需求', convert: '将已生效需求转换为岗位' }
   return actingAction.value ? (map[actingAction.value] || '') : ''
 })
 
@@ -133,7 +133,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <PageHeader title="需求管理 · 审批" description="统一管理部门招聘编制与审批进度">
+  <PageHeader title="需求管理" description="统一管理部门招聘需求与岗位编制">
     <div class="page-actions">
       <div class="inline-actions">
         <button class="btn btn-ghost" type="button" @click="refresh">刷新</button>
@@ -142,7 +142,7 @@ onMounted(async () => {
       <select v-model="filter" class="filter" aria-label="按状态筛选">
         <option value="all">全部状态</option>
         <option value="draft">草稿</option>
-        <option value="pending_approval">待审批</option>
+        <option value="pending_approval">历史待审批</option>
         <option value="approved">已通过</option>
         <option value="rejected">已驳回</option>
         <option value="withdrawn">已撤回</option>

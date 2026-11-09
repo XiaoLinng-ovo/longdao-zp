@@ -53,6 +53,17 @@ test('HTTP completion enforces role, CSRF and stage while returning independentl
     assert.equal(list.body.data.find((i: any) => i.id === final.id).application.status, 'offer_approval')
     assert.equal(list.body.data.find((i: any) => i.id === final.id).aiScore, null)
     assert.equal((await send('POST', '/interviews/' + final.id + '/complete', { outcome: 'reject' })).status, 409)
+
+    const cancelled = await send('POST', '/interviews', { applicationId: 'application-8814', round: 1, title: '取消的初试', participants: [] })
+    assert.equal(cancelled.status, 201, JSON.stringify(cancelled.body))
+    const cancelledId = cancelled.body.data.id
+    assert.equal((await send('POST', '/interviews/' + cancelledId + '/complete', { outcome: 'cancelled' })).status, 200)
+    assert.equal((await send('POST', '/interviews/' + cancelledId + '/complete', { outcome: 'cancelled' })).status, 200)
+    list = await send('GET', '/interviews?applicationId=application-8814')
+    assert.equal(list.body.data[0].status, 'cancelled')
+    assert.equal(list.body.data[0].outcome, 'cancelled')
+    assert.equal(list.body.data[0].application.status, 'interviewing')
+    assert.equal((await send('POST', '/interviews/' + cancelledId + '/complete', { outcome: 'reject' })).status, 409)
   } finally {
     if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(e => e ? reject(e) : resolve()))
     for (const [key, value] of previous) if (value === undefined) delete process.env[key]; else process.env[key] = value

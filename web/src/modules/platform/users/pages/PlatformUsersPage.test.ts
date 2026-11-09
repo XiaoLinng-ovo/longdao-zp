@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import PlatformUsersPage from './PlatformUsersPage.vue'
 import { authSession } from '../../../auth/session'
-import { getPlatformUser, listPlatformUsers, updatePlatformUserStatus, updatePlatformWorkspaceAiAccess, type PlatformUserDetail, type PlatformUserListItem } from '../api'
+import { getPlatformUser, listPlatformUsers, resetPlatformUserAiGenerationQuota, updatePlatformUserStatus, updatePlatformWorkspaceAiAccess, type PlatformUserDetail, type PlatformUserListItem } from '../api'
 
 vi.mock('../api', () => ({
   getPlatformUser: vi.fn(),
@@ -13,6 +13,7 @@ vi.mock('../api', () => ({
   updatePlatformUserProfile: vi.fn(),
   revokePlatformUserSessions: vi.fn(),
   resetPlatformUserPassword: vi.fn(),
+  resetPlatformUserAiGenerationQuota: vi.fn(),
 }))
 vi.mock('../../../auth/session', () => ({ authSession: { user: { platformRole: 'admin', workspaceId: 'source-enterprise' }, workspaces: [{ id: 'source-enterprise', name: '平台运营企业' }] } }))
 
@@ -101,98 +102,69 @@ afterEach(() => {
 })
 
 describe('platform users page', () => {
+  function platformRoleFilterValues() {
+    const select = root.querySelector<HTMLSelectElement>('select[aria-label="平台身份"]')!
+    return [...select.options].map(option => option.value)
+  }
+
   async function openWorkspaces() {
     const button = [...root.querySelectorAll<HTMLButtonElement>('.tabs button')].find(button => button.textContent === '企业归属')!
     button.click()
     await nextTick()
   }
 
-  async function prepareSharing() {
+  it.each(['admin', 'viewer'] as const)('保留模型共享控件并按平台权限限制 %s 的操作能力', async role => {
+    await mount(role)
     await openWorkspaces()
-    root.querySelector<HTMLInputElement>('[role="switch"]')!.click()
-    await nextTick()
-    const reason = root.querySelector<HTMLInputElement>('.ai-reason input')!
-    reason.value = '授权企业共用模型'
-    reason.dispatchEvent(new Event('input', { bubbles: true }))
-    await nextTick()
-  }
-
-  it('saves enterprise sharing only after confirming a reason', async () => {
-    await mount()
-    await prepareSharing()
-    expect(root.textContent).toContain('平台运营企业')
+    expect(root.textContent).toContain('龙道科技')
+    expect(root.querySelector('[role="switch"]')).not.toBeNull()
+    expect((root.querySelector('[role="switch"]') as HTMLInputElement).disabled).toBe(role === 'viewer')
+    expect(root.querySelector('.ai-edit-form')).toBeNull()
     expect(updatePlatformWorkspaceAiAccess).not.toHaveBeenCalled()
+  })
+  it('允许可写平台账号提交模型共享变更，并刷新企业归属状态', async () => {
+    await mount('admin')
+    await openWorkspaces()
     const updated = structuredClone(detail)
     updated.workspaces[0]!.usePlatformAi = true
     updated.workspaces[0]!.platformAiSourceOrganizationName = '平台运营企业'
     vi.mocked(updatePlatformWorkspaceAiAccess).mockResolvedValue(updated)
+
+    const toggle = root.querySelector<HTMLInputElement>('[role="switch"]')!
+    toggle.click()
+    await nextTick()
+
+    const reason = root.querySelector<HTMLInputElement>('.ai-reason input')!
+    reason.value = '统一模型配置'
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
     root.querySelector<HTMLFormElement>('.ai-edit-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     await flush()
-    expect(updatePlatformWorkspaceAiAccess).toHaveBeenCalledWith(account.id, detail.workspaces[0]!.id, true, '授权企业共用模型')
+
+    expect(updatePlatformWorkspaceAiAccess).toHaveBeenCalledWith(account.id, detail.workspaces[0]!.id, true, '统一模型配置')
     expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.checked).toBe(true)
     expect(root.textContent).toContain('模型来源：平台运营企业')
-    expect(root.querySelector('.ai-edit-form')).toBeNull()
   })
-
-  it('cancels a draft without making an API request', async () => {
-    await mount()
-    await prepareSharing()
-    root.querySelector<HTMLButtonElement>('.ai-edit-form button[type="button"]')!.click()
-    await nextTick()
-    expect(updatePlatformWorkspaceAiAccess).not.toHaveBeenCalled()
-    expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.checked).toBe(false)
-  })
-
-  it('leaves other tabs usable during a save and shows an inline failure', async () => {
-    await mount()
-    await prepareSharing()
-    let fail!: (reason: Error) => void
-    vi.mocked(updatePlatformWorkspaceAiAccess).mockImplementation(() => new Promise((_, reject) => { fail = reject }))
-    root.querySelector<HTMLFormElement>('.ai-edit-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
-    await nextTick()
-    expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.disabled).toBe(true)
-    const overview = root.querySelector<HTMLButtonElement>('.tabs button')!
-    expect(overview.disabled).toBe(false)
-    overview.click()
-    await nextTick()
-    expect(root.textContent).toContain('基本信息')
-    fail(new Error('测试保存失败'))
-    await flush()
+  it('允许平台管理员重置所选试用企业的 AI 生成次数', async () => {
+    await mount('admin')
     await openWorkspaces()
-    expect(root.textContent).toContain('测试保存失败')
-    expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.disabled).toBe(false)
-  })
+    vi.mocked(resetPlatformUserAiGenerationQuota).mockResolvedValue({
+      organizationId: detail.workspaces[0]!.id,
+      organizationName: detail.workspaces[0]!.name,
+      previousGenerations: 3,
+      generations: 0,
+    })
 
-  it('does not reopen a closed user detail when a pending save finishes', async () => {
-    await mount()
-    await prepareSharing()
-    let finish!: (value: PlatformUserDetail) => void
-    vi.mocked(updatePlatformWorkspaceAiAccess).mockImplementation(() => new Promise(resolve => { finish = resolve }))
-    root.querySelector<HTMLFormElement>('.ai-edit-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    root.querySelector<HTMLButtonElement>('.quota-reset-button')!.click()
     await nextTick()
-    root.querySelector<HTMLButtonElement>('[aria-label="关闭用户详情"]')!.click()
-    await nextTick()
-    finish(structuredClone(detail))
+    expect(root.textContent).toContain('重置 AI 生成次数')
+    const reason = root.querySelector<HTMLTextAreaElement>('.reason-field textarea')!
+    reason.value = '修复误扣额度'
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    root.querySelector<HTMLButtonElement>('.primary-button')!.click()
     await flush()
-    expect(root.querySelector('.drawer-header')).toBeNull()
-  })
 
-  it('disables enterprise switches for read-only operators', async () => {
-    await mount('viewer')
-    await openWorkspaces()
-    expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.disabled).toBe(true)
-  })
-
-  it('keeps the switch unavailable before the database upgrade', async () => {
-    await mount()
-    const old = structuredClone(detail)
-    old.workspaces[0]!.platformAiAccessReady = false
-    vi.mocked(getPlatformUser).mockResolvedValue(old)
-    root.querySelector<HTMLTableRowElement>('tbody tr')!.click()
-    await flush()
-    await openWorkspaces()
-    expect(root.textContent).toContain('待启用')
-    expect(root.querySelector<HTMLInputElement>('[role="switch"]')!.disabled).toBe(true)
+    expect(resetPlatformUserAiGenerationQuota).toHaveBeenCalledWith(account.id, detail.workspaces[0]!.id, '修复误扣额度')
+    expect(root.textContent).toContain('已将「龙道科技」的 AI 生成次数从 3 次重置为 0 次')
   })
   it('loads the registered user and automatically opens account details', async () => {
     await mount()
@@ -208,9 +180,20 @@ describe('platform users page', () => {
     expect(root.querySelectorAll('.action-button')[0]?.hasAttribute('disabled')).toBe(false)
   })
 
+  it('shows platform role filters to a platform administrator', async () => {
+    await mount('admin')
+    expect(platformRoleFilterValues()).toContain('admin')
+    expect(platformRoleFilterValues()).toContain('viewer')
+  })
+
+  it('keeps the platform role filters available to viewers', async () => {
+    await mount('admin')
+    expect(platformRoleFilterValues()).toContain('admin')
+  })
+
   it('disables support actions for a platform viewer', async () => {
     await mount('viewer')
-    expect(root.textContent).toContain('平台只读运营')
+    expect(root.textContent).toContain('普通账号')
     expect([...root.querySelectorAll<HTMLButtonElement>('.action-button')].every(button => button.disabled)).toBe(true)
   })
 

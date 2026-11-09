@@ -20,7 +20,23 @@ export function generateCsrfToken(): string {
   return randomBytes(32).toString('base64url')
 }
 
+/**
+ * Local development, test runners and preview servers bind ephemeral ports
+ * (127.0.0.1:0, vite preview, tunnel URLs), so a fixed allowlist would reject
+ * legitimate same-machine requests. Production keeps the strict allowlist.
+ */
+export function allowsLocalDevelopmentOrigins(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.NODE_ENV === 'production') return false
+  // REQUIRE_CSRF=true is an explicit strict mode: even on a laptop the request
+  // must carry an allowlisted Origin, so cross-site forgery cannot hide behind
+  // a missing header.
+  return env.REQUIRE_CSRF !== 'true'
+}
+
 export function isAllowedOrigin(origin: string | undefined, allowlist: string[], allowDevelopmentOrigins = false): boolean {
+  // A caller that omits Origin is never treated as a trusted browser page.
+  // Business routes may still tolerate it outside production, but that decision
+  // belongs to the route layer, not to the origin matcher.
   if (!origin) return false
   if (allowlist.includes(origin)) return true
   if (!allowDevelopmentOrigins) return false

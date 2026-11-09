@@ -90,7 +90,7 @@ void describe('OpenAI-compatible resume analyzer', () => {
       fetch: async () => {
         calls++
         const response = Response.json({})
-        response.json = async () => { throw new TypeError('connection terminated') }
+        response.text = async () => { throw new TypeError('connection terminated') }
         return response
       },
     })
@@ -314,7 +314,7 @@ void describe('OpenAI-compatible resume analyzer', () => {
       fetch: async (_input, init) => {
         signal = init?.signal ?? undefined
         const response = Response.json({})
-        response.json = async () => await new Promise<never>(() => {})
+        response.text = async () => await new Promise<never>(() => {})
         return response
       },
     })

@@ -1,6 +1,6 @@
 import { RecruitingWorkflowError } from './workflow.js'
 
-export type InterviewOutcome = 'continue' | 'offer' | 'reject'
+export type InterviewOutcome = 'continue' | 'offer' | 'reject' | 'cancelled'
 export interface InterviewResult {
   outcome: InterviewOutcome | null
   aiScore: number | null
@@ -8,7 +8,7 @@ export interface InterviewResult {
 }
 
 export function interviewOutcome(value: unknown): InterviewOutcome | null {
-  return value === 'continue' || value === 'offer' || value === 'reject' ? value : null
+  return value === 'continue' || value === 'offer' || value === 'reject' || value === 'cancelled' ? value : null
 }
 
 export function summaryScore(status: unknown, report: unknown): number | null {
@@ -19,9 +19,12 @@ export function summaryScore(status: unknown, report: unknown): number | null {
     ? summary.overallScore : null
 }
 
-export function validateDirectInterviewOutcome(interview: { stage?: string; round: number }, outcome: InterviewOutcome): void {
+export function validateInterviewOutcome(interview: { stage?: string; round: number }, outcome: InterviewOutcome): void {
   const final = interview.stage === 'final' || interview.round >= 2
-  if (!['continue', 'offer', 'reject'].includes(outcome) || (final ? outcome === 'continue' : outcome === 'offer')) {
-    throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', final ? '复试请选择通过进入 Offer 或未通过' : '初试请选择进入下一轮或未通过', 400)
+  if (!['continue', 'offer', 'reject', 'cancelled'].includes(outcome) || (final ? outcome === 'continue' : outcome === 'offer')) {
+    throw new RecruitingWorkflowError('INVALID_INTERVIEW_OUTCOME', final ? '复试请选择通过进入 Offer、未通过或取消面试' : '初试请选择进入下一轮、未通过或取消面试', 400)
   }
 }
+
+// 保留旧导出，避免已有调用方升级时中断。
+export const validateDirectInterviewOutcome = validateInterviewOutcome

@@ -47,6 +47,7 @@ function fakePool(admin = true) {
   const query = async (sql, values = []) => {
     if (sql === 'ROLLBACK') rolledBack = true
     if (sql.includes('JOIN organization_members')) return {rows: admin ? [{id:values[0]}] : []}
+    if (sql.includes('FROM organizations')) return {rows: [{id: values[0], use_platform_ai: true, platform_ai_source_organization_id: null}]}
     if (sql.startsWith('SELECT')) return {rows: row ? [row] : []}
     if (sql.includes('INSERT INTO enterprise_ai_settings')) { row = {organization_id:values[0],base_url:values[1],api_key_ciphertext:values[2],model:values[3],timeout_ms:values[4]}; return {rows:[row]} }
     if (sql.includes('INSERT INTO audit_logs')) audit = values
@@ -63,7 +64,7 @@ test('all active enterprises use the same platform administrator configuration',
   await withPlatformEnv({OPENAI_BASE_URL:'https://platform.example/v1',OPENAI_API_KEY:'platform-secret',OPENAI_MODEL:'platform-model',OPENAI_TIMEOUT_MS:'2000'}, async () => {
     const store = new EnterpriseAiStore({query:async (sql, values) => {
       assert.match(sql, /FROM organizations/u)
-      return {rows:[{id: values[0]}]}
+      return {rows:[{id: values[0], use_platform_ai: true, platform_ai_source_organization_id: null}]}
     }},key)
     const first = await store.runtimeEnv(a)
     const second = await store.runtimeEnv(b)
@@ -74,7 +75,7 @@ test('all active enterprises use the same platform administrator configuration',
 })
 test('an active enterprise without platform configuration fails explicitly', async () => {
   await withPlatformEnv({}, async () => {
-    const store = new EnterpriseAiStore({query:async()=>({rows:[{id:a}]})},key)
+    const store = new EnterpriseAiStore({query:async()=>({rows:[{id:a, use_platform_ai: true, platform_ai_source_organization_id: null}]})},key)
     await assert.rejects(store.runtimeEnv(a),code('PLATFORM_AI_NOT_CONFIGURED'))
   })
 })
@@ -112,7 +113,7 @@ test('bare origins normalize to /v1 while explicit provider prefixes remain unch
   assert.throws(() => normalizeAiBaseUrl('https://user:password@provider.example/'), code('VALIDATION_ERROR'))
   assert.throws(() => normalizeAiBaseUrl('https://provider.example/?token=secret'), code('VALIDATION_ERROR'))
 })
-test('enterprise save remains backward-compatible but cannot override platform runtime settings', async () => {
+test('enterprise save remains backward-compatible but cannot override platform runtime settings when sharing is enabled', async () => {
   await withPlatformEnv({OPENAI_BASE_URL:'https://platform.example/v1',OPENAI_API_KEY:'platform-secret',OPENAI_MODEL:'platform-model'}, async () => {
     const pool = fakePool(), store = new EnterpriseAiStore(pool, key)
     const view = await store.save(a, {OPENAI_BASE_URL:'https://provider.example',OPENAI_MODEL:'tenant-model',OPENAI_API_KEY:secret}, b)

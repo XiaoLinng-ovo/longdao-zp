@@ -33,6 +33,19 @@ describe('initial interview advancement', () => {
     assert.deepEqual(await store.read(), before)
   })
 
+  it('rejects third-round creation and final-round advancement without partial writes', async () => {
+    const { store, service, initial } = await fixture()
+    await service.concludeInterview(initial.id, 'continue')
+    const state = await store.read()
+    const final = state.interviews.find(item => item.applicationId === initial.applicationId && item.round === 2)!
+    await assert.rejects(
+      service.createInterview({ applicationId: initial.applicationId, round: 3, title: '第三轮', participants: [{ userId: 'interviewer-1', role: 'interviewer' }] }),
+      (error: any) => error.code === 'INTERVIEW_ROUND_LIMIT',
+    )
+    await assert.rejects(service.concludeInterview(final.id, 'continue'), (error: any) => error.code === 'INVALID_INTERVIEW_OUTCOME')
+    assert.deepEqual(await store.read(), state)
+  })
+
   it('rejects unlocked feedback and missing required interviewers without partial writes', async () => {
     const { store, service, initial } = await fixture()
     await store.transaction(state => { state.interviewFeedback.find(item => item.interviewId === initial.id)!.status = 'submitted' })

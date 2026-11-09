@@ -1,5 +1,6 @@
 -- Run inside the migration transaction: block concurrent membership/job writes while
 -- backfilling counters and installing triggers. No rows are deleted or reassigned.
+BEGIN;
 SET LOCAL lock_timeout = '10s';
 LOCK TABLE organizations, organization_members, jobs IN ACCESS EXCLUSIVE MODE;
 
@@ -72,3 +73,4 @@ CREATE TRIGGER organization_member_capacity AFTER INSERT OR DELETE OR UPDATE OF 
  FOR EACH ROW EXECUTE FUNCTION maintain_organization_capacity();
 CREATE TRIGGER organization_job_capacity AFTER INSERT OR DELETE OR UPDATE OF organization_id ON jobs
  FOR EACH ROW EXECUTE FUNCTION maintain_organization_capacity();
+COMMIT;

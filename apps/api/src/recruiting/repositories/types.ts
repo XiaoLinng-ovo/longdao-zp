@@ -414,8 +414,13 @@ export interface OfferVersionDbRecord {
   departmentId: string
   employmentType: string
   startDate: string | null
+  reportingLocation: string | null
+  invoiceTitle: string | null
+  taxNumber: string | null
+  templateFields?: import('../offer-template-fields.js').OfferTemplateFields
   compensation: Record<string, unknown>
   benefits: string[]
+  materials: string[]
   content: string
   createdAt: string
 }
@@ -438,6 +443,20 @@ export interface OfferUpdateInput {
   version?: number
 }
 
+export interface OfferTransitionInput {
+  action: string
+  fromStatus: string
+  toStatus: string
+  applicationStatus: string
+  actorId: string
+  reason?: string
+}
+
+export interface OfferTransitionResult {
+  offer: OfferDbRecord
+  application: ApplicationRecord
+}
+
 export interface OfferVersionCreateInput {
   id?: string
   offerId: string
@@ -446,9 +465,44 @@ export interface OfferVersionCreateInput {
   departmentId: string
   employmentType: string
   startDate?: string | null
+  reportingLocation?: string | null
+  invoiceTitle?: string | null
+  taxNumber?: string | null
+  templateFields?: import('../offer-template-fields.js').OfferTemplateFields
   compensation: Record<string, unknown>
   benefits?: string[]
+  materials?: string[]
   content: string
+}
+
+export interface OfferTemplateDbRecord {
+  id: string
+  name: string
+  filename: string
+  content: string
+  isActive: boolean
+  isDefault: boolean
+  createdById: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OfferTemplateCreateInput {
+  id?: string
+  name: string
+  filename: string
+  content: string
+  isActive?: boolean
+  isDefault?: boolean
+  createdById?: string | null
+}
+
+export interface OfferTemplateUpdateInput {
+  name?: string
+  filename?: string
+  content?: string
+  isActive?: boolean
+  isDefault?: boolean
 }
 
 // ===== 入职归档（onboarding_records）=====
@@ -457,6 +511,23 @@ export interface OnboardingDbRecord {
   applicationId: string
   offerId: string
   plannedStartDate: string | null
+  plannedStartTime: string | null
+  reportingMode: 'onsite' | 'remote' | 'hybrid' | null
+  reportingLocation: string | null
+  reportingContactName: string | null
+  reportingContactPhone: string | null
+  hrOwnerName: string | null
+  hiringManagerName: string | null
+  workCity: string | null
+  officeLocation: string | null
+  riskNotes: string | null
+  cancellationReasonCode: string | null
+  cancellationNotes: string | null
+  cancelledAt: string | null
+  noShowReasonCode: string | null
+  noShowNotes: string | null
+  noShowAt: string | null
+  actualArrivalAt: string | null
   status: string
   notes: string | null
   archivedAt: string | null
@@ -469,15 +540,185 @@ export interface OnboardingCreateInput {
   applicationId: string
   offerId: string
   plannedStartDate?: string | null
+  plannedStartTime?: string | null
+  reportingMode?: 'onsite' | 'remote' | 'hybrid' | null
+  reportingLocation?: string | null
+  reportingContactName?: string | null
+  reportingContactPhone?: string | null
+  hrOwnerName?: string | null
+  hiringManagerName?: string | null
+  workCity?: string | null
+  officeLocation?: string | null
+  riskNotes?: string | null
   status?: string
   notes?: string | null
 }
 
 export interface OnboardingUpdateInput {
   plannedStartDate?: string | null
+  plannedStartTime?: string | null
+  reportingMode?: 'onsite' | 'remote' | 'hybrid' | null
+  reportingLocation?: string | null
+  reportingContactName?: string | null
+  reportingContactPhone?: string | null
+  hrOwnerName?: string | null
+  hiringManagerName?: string | null
+  workCity?: string | null
+  officeLocation?: string | null
+  riskNotes?: string | null
+  cancellationReasonCode?: string | null
+  cancellationNotes?: string | null
+  cancelledAt?: string | null
+  noShowReasonCode?: string | null
+  noShowNotes?: string | null
+  noShowAt?: string | null
+  actualArrivalAt?: string | null
   status?: string
   notes?: string | null
   archivedAt?: string | null
+}
+
+export interface OnboardingTaskDbRecord {
+  id: string
+  onboardingId: string
+  title: string
+  category: 'hr' | 'it' | 'admin' | 'manager' | 'training' | 'candidate'
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'not_required'
+  isRequired: boolean
+  ownerRole: 'recruiter' | 'hiring_manager' | 'admin' | 'hr_admin' | 'candidate' | null
+  templateKey: string | null
+  ownerName: string | null
+  dueDate: string | null
+  notes: string | null
+  blockedReason: string | null
+  completedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OnboardingTaskCreateInput {
+  id?: string
+  onboardingId: string
+  title: string
+  category: OnboardingTaskDbRecord['category']
+  status?: OnboardingTaskDbRecord['status']
+  isRequired?: boolean
+  ownerRole?: OnboardingTaskDbRecord['ownerRole']
+  templateKey?: string | null
+  ownerName?: string | null
+  dueDate?: string | null
+  notes?: string | null
+}
+
+export interface OnboardingTaskUpdateInput {
+  title?: string
+  category?: OnboardingTaskDbRecord['category']
+  status?: OnboardingTaskDbRecord['status']
+  isRequired?: boolean
+  ownerRole?: OnboardingTaskDbRecord['ownerRole']
+  templateKey?: string | null
+  ownerName?: string | null
+  dueDate?: string | null
+  notes?: string | null
+  blockedReason?: string | null
+  completedAt?: string | null
+}
+
+export interface OnboardingMaterialDbRecord {
+  id: string
+  onboardingId: string
+  code: string
+  label: string
+  status: 'pending' | 'collected' | 'verified' | 'waived'
+  isRequired: boolean
+  collectedAt: string | null
+  verifiedAt: string | null
+  verifiedByUserId: string | null
+  waivedAt: string | null
+  notes: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OnboardingMaterialCreateInput {
+  id?: string
+  onboardingId: string
+  code: string
+  label: string
+  status?: OnboardingMaterialDbRecord['status']
+  isRequired?: boolean
+  notes?: string | null
+}
+
+export interface OnboardingMaterialUpdateInput {
+  status?: OnboardingMaterialDbRecord['status']
+  isRequired?: boolean
+  collectedAt?: string | null
+  verifiedAt?: string | null
+  verifiedByUserId?: string | null
+  waivedAt?: string | null
+  notes?: string | null
+}
+
+export interface OnboardingReminderDbRecord {
+  id: string
+  onboardingId: string
+  milestone: '7_days' | '3_days' | 'day_of'
+  audience: 'candidate' | 'hr' | 'manager' | 'it' | 'admin'
+  channel: 'in_app' | 'email'
+  status: 'scheduled' | 'sent' | 'failed' | 'skipped'
+  scheduledAt: string
+  sentAt: string | null
+  failedAt: string | null
+  failureReason: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OnboardingReminderCreateInput {
+  id?: string
+  onboardingId: string
+  milestone: OnboardingReminderDbRecord['milestone']
+  audience: OnboardingReminderDbRecord['audience']
+  channel?: OnboardingReminderDbRecord['channel']
+  status?: OnboardingReminderDbRecord['status']
+  scheduledAt: string
+}
+
+export interface OnboardingReminderUpdateInput {
+  status?: OnboardingReminderDbRecord['status']
+  scheduledAt?: string
+  sentAt?: string | null
+  failedAt?: string | null
+  failureReason?: string | null
+}
+
+export interface OnboardingIntegrationDbRecord {
+  id: string
+  onboardingId: string
+  provider: 'oa' | 'it_service_desk' | 'access_control' | 'email_account' | 'hris'
+  status: 'not_configured' | 'pending' | 'syncing' | 'ready' | 'failed'
+  externalReference: string | null
+  lastAttemptAt: string | null
+  lastSuccessAt: string | null
+  lastError: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OnboardingIntegrationCreateInput {
+  id?: string
+  onboardingId: string
+  provider: OnboardingIntegrationDbRecord['provider']
+  status?: OnboardingIntegrationDbRecord['status']
+}
+
+export interface OnboardingIntegrationUpdateInput {
+  status?: OnboardingIntegrationDbRecord['status']
+  externalReference?: string | null
+  lastAttemptAt?: string | null
+  lastSuccessAt?: string | null
+  lastError?: string | null
 }
 
 // ===== 流程事件（workflow_events）=====

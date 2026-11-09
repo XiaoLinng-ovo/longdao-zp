@@ -17,13 +17,15 @@ describe('streaming transcript preservation', () => {
     assert.equal(result[0]?.transcriptComparison?.streamingComplete, false)
     assert.equal(rows[0]?.transcriptComparison, undefined)
   })
-  it('preserves conflicting recognition as a separate alternative, never duplicate speech', () => {
+  it('keeps the accurate offline words when a complete preview disagrees', () => {
     const offline = '我负责平台开发和测试。', streaming = '我负责平台开发。团队一共有八个人。'
-    const result = reconcileTranscript([sentence(offline)], { text: streaming, endMs: 15000, complete: true }, 0)
-    assert.equal(result.map(row => row.text).join(''), streaming)
+    const result = reconcileTranscript([{ ...sentence(offline), speakerId: 'voice_candidate', speakerVerified: true }], { text: streaming, endMs: 15000, complete: true }, 0)
+    assert.equal(result.map(row => row.text).join(''), offline)
     assert.equal(result[0]?.transcriptComparison?.offlineText, offline)
-    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'streaming')
-    assert.equal(result[0]?.speakerVerified, false)
+    assert.equal(result[0]?.transcriptComparison?.streamingText, streaming)
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
+    assert.equal(result[0]?.transcriptComparison?.offlineSegments, undefined)
+    assert.equal(result[0]?.speakerVerified, true)
   })
   for (const [offline, streaming] of [
     ['我负责平台开发。后来完成了上线。', '我不负责平台的开发。'],
@@ -33,11 +35,11 @@ describe('streaming transcript preservation', () => {
     ['好的。我负责开发和测试。', '好啊。'],
   ]) for (const complete of [false, true]) it(`does not fuzzy-replace meaningful differences (complete=${complete}): ${streaming}`, () => {
     const result = reconcileTranscript([sentence(offline!)], { text: streaming!, endMs: 15000, complete }, 0)
-    assert.equal(result.map(row => row.text).join(''), complete ? streaming : offline)
+    assert.equal(result.map(row => row.text).join(''), offline)
     assert.equal(result[0]?.transcriptComparison?.offlineText, offline)
     assert.equal(result[0]?.transcriptComparison?.streamingText, streaming)
-    assert.equal(result[0]?.transcriptComparison?.selectedSource, complete ? 'streaming' : 'offline')
-    assert.equal(result[0]?.speakerVerified, !complete)
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
+    assert.equal(result[0]?.speakerVerified, true)
   })
   it('aligns Traditional preview with Simplified acoustic turns without losing speakers', () => {
     const rows = [sentence('请介绍学校项目。'), { ...sentence('我负责开发。', 1000), speakerId: 'voice_2' }]
@@ -84,8 +86,9 @@ describe('streaming transcript preservation', () => {
   it('does not interleave two divergent versions of the same audio', () => {
     const rows = [sentence('我负责平台开发和测试。')]
     const result = reconcileTranscript(rows, { text: '我负责平台开发。团队一共有八个人。', endMs: 15000, complete: true }, 0)
-    assert.deepEqual(result.map(row => row.text), ['我负责平台开发。团队一共有八个人。'])
-    assert.equal(result[0]?.speakerMixed, true)
+    assert.deepEqual(result.map(row => row.text), ['我负责平台开发和测试。'])
+    assert.equal(result[0]?.transcriptComparison?.streamingText, '我负责平台开发。团队一共有八个人。')
+    assert.equal(result[0]?.speakerMixed, undefined)
   })
   it('does not attach a verified role to unrelated streaming words', () => {
     const row = sentence('好。')
@@ -151,13 +154,13 @@ describe('streaming transcript preservation', () => {
     assert.equal(result[1], rows[1])
   })
 
-  it('keeps full text as one unconfirmed chunk when no acoustic interval exists for a missing prefix', () => {
+  it('keeps the offline turn when the preview adds a leading phrase without an audio interval', () => {
     const text = '前面的背景说明，继续介绍项目。'
     const result = reconcileTranscript([sentence('继续介绍项目。')], { text, endMs: 15000, complete: true }, 0)
     assert.equal(result.length, 1)
-    assert.equal(result[0]?.text, text)
-    assert.deepEqual([result[0]?.startMs, result[0]?.endMs], [0, 15000])
-    assert.equal(result[0]?.speakerVerified, false)
+    assert.equal(result[0]?.text, '继续介绍项目。')
+    assert.equal(result[0]?.transcriptComparison?.streamingText, text)
+    assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
   })
 
   it('does not split comma-separated streaming speech into tiny rows', () => {

@@ -8,6 +8,8 @@ import { LocalRecruitingStore } from './store.js'
 import type { NormalizedRecruitingRepository } from './repositories/postgres-repository.js'
 import type { ObjectStorage } from '@smartrecruit-pro/object-storage'
 
+process.env.NODE_ENV = 'test'
+
 function fixture() {
   const store = new LocalRecruitingStore()
   const files = new Map<string, Buffer>()

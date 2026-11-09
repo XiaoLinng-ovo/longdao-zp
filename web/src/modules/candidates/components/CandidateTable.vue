@@ -28,6 +28,21 @@ const displayRows = computed(() => props.rows.flatMap((row) => {
     : []
   return [{ row, child: false, span: children.length + 1 }, ...children.map((application) => ({ row: application, child: true, span: 0 }))]
 }))
+function aiAdviceText(row: Candidate): string {
+  if (aiResumeScore(row) !== undefined) return ''
+  return {
+    queued: '排队等待 AI 分析',
+    processing: 'AI 正在分析，完成后生成评分',
+    failed: 'AI 分析失败，可重试',
+    removed: 'AI 分析任务已删除',
+    completed: '分析完成，未生成有效评分',
+  }[row.analysisStatus || ''] || '尚未开始 AI 分析'
+}
+function applicationStatusText(row: Candidate): string {
+  return ['queued', 'processing', 'failed'].includes(row.analysisStatus || '')
+    ? row.analysisStatus!
+    : row.applicationStatus
+}
 </script>
 
 <template>
@@ -49,7 +64,7 @@ const displayRows = computed(() => props.rows.flatMap((row) => {
           <button v-if="row.resumeReview" class="basis-link" type="button" @click="emit('review', row, 'evidence')">查看评分依据</button>
         </td>
         <td class="advice-cell">
-          <span v-if="aiResumeScore(row) === undefined" class="muted">{{ ['queued', 'processing'].includes(row.analysisStatus || '') ? 'AI 评分生成中' : '暂无有效 AI 评分' }}</span>
+          <span v-if="aiResumeScore(row) === undefined" class="muted">{{ aiAdviceText(row) }}</span>
           <span v-else :class="aiResumeScore(row)! >= 80 ? 'advice-pass' : 'advice-reject'">{{ aiResumeScore(row)! >= 80 ? '建议通过，进入初试' : '建议淘汰（AI 评分低于 80 分）' }}</span>
           <small v-if="row.resumeReview?.talentPool" class="talent-tag">已加入人才库</small>
           <small v-if="row.resumeReview?.decision === 'eliminated'" class="muted">已淘汰</small>
@@ -62,7 +77,7 @@ const displayRows = computed(() => props.rows.flatMap((row) => {
             :error="row.analysisError"
           />
         </td>
-        <td><StatusTag :status="row.applicationStatus" /></td>
+        <td><StatusTag :status="applicationStatusText(row)" /></td>
         <td>{{ row.updatedAt }}</td>
         <td><div class="row-actions">
           <div class="action-row primary-actions">

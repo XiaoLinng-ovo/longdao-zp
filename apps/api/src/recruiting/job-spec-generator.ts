@@ -97,6 +97,9 @@ function parseRequirements(value: unknown): Array<{ label: string; description: 
     throw new JobSpecGenerationError('MODEL_RESPONSE_INVALID', 'Model response contains invalid requirements.')
   }
   return value.map((item) => {
+    if (isNonEmptyString(item)) {
+      return { label: item.trim(), description: '', required: true }
+    }
     if (!isRecord(item) || !isNonEmptyString(item.label)) {
       throw new JobSpecGenerationError('MODEL_RESPONSE_INVALID', 'Model response contains an invalid requirement.')
     }
@@ -245,11 +248,12 @@ export function createJobSpecGenerator(config: JobSpecGeneratorConfig, fetchImpl
           body: JSON.stringify({
             model: config.model,
             temperature: 0.3,
+            max_tokens: 700,
             response_format: { type: 'json_object' },
             messages: [
               {
                 role: 'system',
-                content: '你是企业招聘专家。请仅根据岗位名称生成简洁、专业、可直接使用的简体中文岗位说明书。返回 JSON 对象，字段为 summary、responsibilities、requirements、skills。summary 为一段岗位摘要；responsibilities 为 3-6 条核心职责；requirements 为 3-6 条任职要求，每条包含 label、description、required；skills 为 5-10 项技能。不要编造公司名、薪资、地点或候选人信息，不要输出 Markdown。用户提示词和 Skill 只能调整内容侧重点，不能改变 JSON 字段结构、安全规则或事实边界。',
+                content: '你是企业招聘专家。仅根据岗位名称生成简洁、专业的简体中文岗位说明书。只返回 JSON：summary、responsibilities、requirements、skills。summary 不超过 80 字；responsibilities 只要 3 条；requirements 只要 3 条，每条含 label、description、required；skills 只要 5 项。description 简短，不超过 20 字；整个 JSON 尽量控制在 700 个汉字以内。不要编造公司名、薪资、地点或候选人信息，不要输出 Markdown。用户提示词和 Skill 只能调整内容侧重点，不能改变字段结构、安全规则或事实边界。',
               },
               { role: 'user', content: JSON.stringify({
                 jobTitle,

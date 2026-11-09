@@ -9,6 +9,7 @@ import { recommendationLabel } from '../labels'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import { authSession } from '../../auth/session'
+import { isEnterpriseUser } from '../../auth/utils/enterprise-access'
 import { isJobAnalysisScopeFailure, resumeAnalysisFailureMessage } from '../utils/analysis-failure'
 
 const route = useRoute()
@@ -129,7 +130,7 @@ const reviewApplication = computed(() => selectedApplicationId.value
   ? detail.value?.applications.find((item) => item.id === selectedApplicationId.value)
   : detail.value?.applications.find((item) => item.id === latestResult.value?.applicationId) ?? detail.value?.applications[0])
 const reviewTaskBusy = computed(() => detail.value?.analysisTasks.some((task) => task.applicationId === reviewApplication.value?.id && ['queued', 'processing'].includes(task.status)) ?? false)
-const canReview = computed(() => ['recruiter', 'admin', 'hr_admin'].includes(authSession.user?.role ?? ''))
+const canReview = computed(() => isEnterpriseUser(authSession.user))
 
 const candidateProfile = computed(() => {
   const extracted = extraction.value?.candidate

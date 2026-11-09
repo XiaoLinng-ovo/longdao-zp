@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-vi.mock('../shared/config/features', () => ({ recruitmentRequestsEnabled: true, externalJobPublishingEnabled: false }))
+vi.mock('../shared/config/features', () => ({ recruitmentRequestsEnabled: true, recruitmentReportsEnabled: false, externalJobPublishingEnabled: false }))
 import { createAppRouter, installAuthGuard, getNavigationItemsForRole } from './router'
 import { authSession } from '../modules/auth/session'
 
@@ -19,7 +19,7 @@ describe('explicitly enabled historical recruitment requests', () => {
     await router.push('/requisitions/legacy-id')
     expect(router.currentRoute.value.name).toBe('requisition-detail')
     await router.push('/enterprise/approval-settings')
-    expect(router.currentRoute.value.name).toBe('enterprise-approval-settings')
+    expect(router.currentRoute.value.name).toBe('dashboard')
   })
   it('does not bypass enterprise administrator authorization when restored', async () => {
     authSession.workspaces[0]!.role = 'member'
@@ -27,6 +27,6 @@ describe('explicitly enabled historical recruitment requests', () => {
     const router = createAppRouter()
     installAuthGuard(router)
     await router.push('/enterprise/approval-settings')
-    expect(router.currentRoute.value.name).toBe('forbidden')
+    expect(router.currentRoute.value.name).toBe('dashboard')
   })
 })

@@ -29,6 +29,20 @@ async function mount(initial = true, props: { applicationId?: string; stage?: In
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); backgroundAudio.jobs.splice(0); authSession.user = null; vi.useRealTimers(); vi.resetAllMocks(); document.body.style.overflow = '' })
 
 describe('InterviewSummaryDialog', () => {
+  it('labels completed but unreviewed transcripts as awaiting human review and hides scores and recommendations', async () => {
+    const data = ready()
+    data.report!.reviewRequired = true
+    data.report!.summary = '角色待人工复核，暂不评分。'
+    data.report!.recommendation = { outcome: 'advance', text: '不应显示的旧建议', evidence: [] }
+    load.mockResolvedValue(data)
+    const el = await mount()
+    expect(el.querySelector('.report-score')?.textContent).toContain('待人工复核')
+    expect(el.querySelector('.report-score')?.textContent).not.toContain('82')
+    expect(el.querySelector('.report-table')).toBeNull()
+    expect(el.querySelector('[aria-label="推荐建议"]')?.textContent).toContain('暂不提供推荐建议')
+    expect(el.textContent).not.toContain('不应显示的旧建议')
+  })
+
   it('prevents generation from incomplete audio and keeps polling until background saving finishes', async () => {
     vi.useFakeTimers()
     authSession.user = { id: 'u', workspaceId: 'w' } as never

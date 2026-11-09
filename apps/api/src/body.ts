@@ -5,12 +5,17 @@ const MAX_BODY_BYTES = 1024 * 1024;
 // A 10 MiB file expands to ~13.34 MiB in the JSON base64 upload envelope.
 // Keep other JSON routes at 1 MiB; only resume uploads need this allowance.
 const MAX_RESUME_BODY_BYTES = Math.ceil(10 * 1024 * 1024 / 3) * 4 + 64 * 1024;
+const MAX_OFFER_EMAIL_BODY_BYTES = Math.ceil(10 * 1024 * 1024 / 3) * 4 + 128 * 1024;
 
 function isResumeUploadBody(pathname: string, method: string): boolean {
   return method === 'POST' && (
     pathname === '/api/v1/resumes'
     || /^\/api\/v1\/resume-import-batches\/[^/]+\/items\/[^/]+\/content$/.test(pathname)
   )
+}
+
+function isOfferEmailBody(pathname: string, method: string): boolean {
+  return method === 'POST' && /^\/api\/v1\/offers\/[^/]+\/send-email$/.test(pathname)
 }
 
 interface CachedBody {
@@ -31,7 +36,8 @@ export async function readBody(context: RequestContext): Promise<CachedBody> {
   if (cached) return cached;
 
   const maxBytes = isResumeUploadBody(context.url.pathname, context.req.method ?? '')
-    ? MAX_RESUME_BODY_BYTES : MAX_BODY_BYTES;
+    ? MAX_RESUME_BODY_BYTES
+    : isOfferEmailBody(context.url.pathname, context.req.method ?? '') ? MAX_OFFER_EMAIL_BODY_BYTES : MAX_BODY_BYTES;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of context.req) {

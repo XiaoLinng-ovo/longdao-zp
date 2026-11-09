@@ -18,6 +18,19 @@ describe('候选人 API', () => {
     expect(candidate).toMatchObject({ updatedAt: '2026-10-19', updatedAtTimestamp: application.updatedAt })
     if (grouped) expect(candidate.applicationRows?.[1]).toMatchObject({ updatedAt: '2026-10-19', updatedAtTimestamp: '2026-10-19T12:00:00Z' })
   })
+  it('uses the most recently updated application as the grouped candidate primary row', async () => {
+    getJson.mockImplementation((path: string) => Promise.resolve({ ok: true, requestId: 'test', data: path === '/jobs'
+      ? [{ id: 'job-old', title: '旧岗位' }, { id: 'job-new', title: '新岗位' }]
+      : [{ id: 'candidate-1', fullName: '测试', status: 'active', updatedAt: '2026-10-20T12:00:00Z', applications: [
+        { id: 'app-old', candidateId: 'candidate-1', jobId: 'job-old', status: 'interviewing', aiStatus: 'completed', updatedAt: '2026-10-19T09:00:00Z' },
+        { id: 'app-new', candidateId: 'candidate-1', jobId: 'job-new', status: 'pending_analysis', aiStatus: 'pending', updatedAt: '2026-10-21T09:00:00Z' },
+      ] }],
+    } as never))
+    const [candidate] = await loadCandidates()
+    expect(candidate.applicationId).toBe('app-new')
+    expect(candidate.updatedAtTimestamp).toBe('2026-10-21T09:00:00Z')
+    expect(candidate.applicationRows?.map((row) => row.applicationId)).toEqual(['app-new', 'app-old'])
+  })
   it.each([false, true])('preserves application interview progress for grouped=%s', async (grouped) => {
     const progress = { id: 'interview-1', round: 1, stage: 'initial', status: 'scheduled' }
     const application = { id: 'app-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'interviewing', aiStatus: 'completed', updatedAt: '2026-10-16', interviewProgress: progress }
