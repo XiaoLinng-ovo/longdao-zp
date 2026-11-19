@@ -1,0 +1,26 @@
+{
+  "name": "@smartrecruit-pro/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared domain DTOs, status enums, and API contracts for SmartRecruit Pro",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "node scripts/tsc.mjs -p tsconfig.json --noEmit",
+    "test": "node scripts/tsc.mjs -p tsconfig.test-build.json && node --test dist-test/tests/workflow.test.js dist-test/tests/command-contract.test.js",
+    "build": "node scripts/tsc.mjs -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}
