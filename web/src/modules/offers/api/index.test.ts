@@ -1,0 +1,79 @@
+import { describe, expect, it, vi } from 'vitest'
+import { apiClient } from '../../../shared/api'
+import { getOffer, listOfferContextRows, listOffers, loadApplicationsForOffer, offerAction, offerActionsFor, offerStatusCode, renderOfferTemplate, updateOffer } from './index'
+
+vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn(), patchJson: vi.fn(), postJson: vi.fn() } }))
+const getJson = vi.mocked(apiClient.getJson)
+const patchJson = vi.mocked(apiClient.patchJson)
+const postJson = vi.mocked(apiClient.postJson)
+
+describe('Offer API', () => {
+  it('新建读取专用复试通过列表，详情仍可读取所有申请', async () => {
+    getJson.mockImplementation(async (path: string) => ({ ok: true, requestId: 'test', data: path === '/offers/eligible-applications' ? [{ id: 'passed', candidateId: 'c', jobId: 'j' }] : path === '/applications' ? [{ id: 'all', candidateId: 'c', jobId: 'j' }] : [] }) as never)
+    expect((await loadApplicationsForOffer(true)).map(item => item.id)).toEqual(['passed'])
+    expect((await loadApplicationsForOffer()).map(item => item.id)).toEqual(['all'])
+  })
+  it('渲染 Offer 模板时替换已知变量并清空缺失变量', () => {
+    expect(renderOfferTemplate('候选人：{{ candidateName }}；岗位：{{jobTitle}}；日期：{{startDate}}', { candidateName: '王思远', jobTitle: '后端工程师' }))
+      .toBe('候选人：王思远；岗位：后端工程师；日期：')
+  })
+  it('支持中文模板变量', () => {
+    expect(renderOfferTemplate('办理入职手续需提供的材料：\n{{入职材料}}', { '入职材料': '1. 身份证；\n2. 招商银行工资卡；' }))
+      .toBe('办理入职手续需提供的材料：\n1. 身份证；\n2. 招商银行工资卡；')
+  })
+  it('映射列表行时不暴露历史审批字段', async () => {
+    getJson.mockResolvedValue({ ok: true, requestId: 'test', data: [{ id: 'offer-1', code: 'OFF-1', applicationId: 'app-1', status: 'draft', approval: { status: 'pending', approver: '待审批' }, version: 1, updatedAt: '2026-09-11T00:00:00Z' }] } as never)
+    const rows = await listOffers()
+    expect(getJson).toHaveBeenCalledWith('/offers')
+    expect(rows[0]).toMatchObject({ entityId: 'offer-1', status: 'draft' })
+    expect(rows[0]).not.toHaveProperty('approvalStatus')
+    expect(rows[0]).not.toHaveProperty('approver')
+  })
+
+  it('上下文列表补齐候选人和岗位名称', async () => {
+    getJson.mockImplementation((path: string) => {
+      if (path === '/offers') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'offer-1', code: 'OFF-1', applicationId: 'app-1', status: 'draft', approval: { status: 'pending' }, version: 1, updatedAt: '2026-09-11T00:00:00Z' }] } as never)
+      if (path === '/applications') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'app-1', code: 'APP-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'offer' }] } as never)
+      if (path === '/candidates') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王思远' }] } as never)
+      if (path === '/jobs') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'job-1', code: 'JOB-1', title: '高级后端工程师' }] } as never)
+      if (path === '/onboarding') return Promise.resolve({ ok: true, requestId: 'test', data: [{ id: 'onboarding-1', applicationId: 'app-1', offerId: 'offer-1', status: 'pending', createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-20T00:00:00Z' }] } as never)
+      throw new Error(`unexpected path ${path}`)
+    })
+    const rows = await listOfferContextRows()
+    expect(rows[0].candidate).toContain('王思远')
+    expect(rows[0].job).toContain('高级后端工程师')
+    expect(rows[0].onboardingStatus).toBe('pending')
+  })
+
+  it('详情取当前版本或最后一个版本', async () => {
+    const v1 = { id: 'v1', version: 1, positionTitle: '初版', departmentId: '技术', employmentType: 'full_time', compensation: { baseSalary: { amount: 10000, currency: 'CNY' } }, benefits: [], content: 'v1', createdAt: '2026-09-10T00:00:00Z' }
+    const v2 = { ...v1, id: 'v2', version: 2, positionTitle: '修订版', content: 'v2' }
+    getJson.mockResolvedValue({ ok: true, requestId: 'test', data: { id: 'offer-1', code: 'OFF-1', applicationId: 'app-1', status: 'draft', approval: { status: 'pending' }, version: 2, currentVersionId: 'v2', versions: [v1, v2] } } as never)
+    const detail = await getOffer('offer-1')
+    expect(detail.version?.version).toBe(2)
+    expect(detail.version?.positionTitle).toBe('修订版')
+  })
+
+  it('收紧后端状态字符串并调用操作/修订 API', async () => {
+    expect(offerStatusCode({ status: 'expired' })).toBe('expired')
+    expect(offerStatusCode(null)).toBeUndefined()
+    postJson.mockResolvedValue({ ok: true, requestId: 'test', data: { status: 'expired' } } as never)
+    await offerAction('offer-1', 'expire')
+    expect(postJson).toHaveBeenCalledWith('/offers/offer-1/expire', {})
+    patchJson.mockResolvedValue({ ok: true, requestId: 'test', data: { status: 'draft', version: 2 } } as never)
+    await updateOffer('offer-1', { content: '新版' })
+expect(patchJson).toHaveBeenCalledWith('/offers/offer-1', { content: '新版' }, undefined)
+    await updateOffer('offer-1', { content: '并发保护新版' }, 3)
+    expect(patchJson).toHaveBeenCalledWith('/offers/offer-1', { content: '并发保护新版' }, { headers: { 'If-Match': '3' } })
+  })
+
+  it('only exposes actions valid for the current Offer and onboarding state', () => {
+    expect(offerActionsFor('sent')).toEqual(['resend', 'accept', 'decline', 'expire', 'cancel'])
+    expect(offerActionsFor('accepted')).toEqual(['resend', 'archive-onboarding'])
+    expect(offerActionsFor('accepted', 'pending')).toEqual(['resend'])
+    expect(offerActionsFor('declined')).toEqual([])
+    expect(offerActionsFor('cancelled')).toEqual(['resend'])
+    expect(offerActionsFor('expired')).toEqual([])
+  })
+})
+
