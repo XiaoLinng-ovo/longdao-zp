@@ -1,0 +1,6 @@
+# This service has a separate build context with only these required inputs.
+**
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!main.py

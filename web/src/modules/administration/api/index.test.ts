@@ -1,0 +1,114 @@
+import { describe, expect, it, vi } from 'vitest'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, getAdminSettings, updateAdminSettings, listFailedAnalysisTasks, listAdminAuditLogs, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getChannelSettings, updateChannelSettings, testChannelConnection, listAccountOrganizations, createAdminUser, listEnterpriseDepartments, createEnterpriseDepartment, updateEnterpriseDepartment, deleteEnterpriseDepartment } from './index'
+import { apiClient } from '../../../shared/api'
+
+vi.mock('../../../shared/api', () => ({ apiClient: { getJson: vi.fn() } }))
+const getJson = vi.mocked(apiClient.getJson)
+
+describe('管理后台 API', () => {
+  it('加载管理用户、角色、设置、失败任务和审计日志', async () => {
+    getJson.mockImplementation(async (path) => ({ ok: true, data: path.includes('settings') ? { aiBaseUrl: 'https://gateway.local' } : [], requestId: 'test' }) as never)
+    await listAdminUsers(); await listAdminRoles(); await getAdminSettings(); await listFailedAnalysisTasks(); await listAdminAuditLogs(20)
+    expect(getJson).toHaveBeenCalledWith('/admin/users')
+    expect(getJson).toHaveBeenCalledWith('/admin/roles')
+    expect(getJson).toHaveBeenCalledWith('/admin/settings')
+    expect(getJson).toHaveBeenCalledWith('/admin/analysis-tasks?status=failed')
+    expect(getJson).toHaveBeenCalledWith('/admin/audit-logs?limit=20')
+  })
+
+  it('更新系统设置使用 PATCH 并返回服务端设置', async () => {
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { timezone: 'Asia/Shanghai' }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    const result = await updateAdminSettings({ timezone: 'Asia/Shanghai' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/settings', { timezone: 'Asia/Shanghai' })
+    expect(result.timezone).toBe('Asia/Shanghai')
+  })
+  it('读取可用企业并创建账号，保留服务端返回的一次性密码', async () => {
+    getJson.mockResolvedValue({ ok: true, data: [{ id: 'org-1', name: '示例企业' }], requestId: 'test' } as never)
+    expect(await listAccountOrganizations()).toEqual([{ id: 'org-1', name: '示例企业' }])
+    expect(getJson).toHaveBeenCalledWith('/admin/account-organizations')
+
+    const result = { user: { id: 'u-1' }, initialPassword: 'Generated!123', generatedPassword: true }
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: result, requestId: 'test' })
+    ;(apiClient as unknown as { postJson: typeof postJson }).postJson = postJson
+    expect(await createAdminUser({ email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })).toEqual(result)
+    expect(postJson).toHaveBeenCalledWith('/admin/users', { email: 'new@example.com', displayName: '新同事', organizationId: 'org-1', departmentCode: 'dept-tech', role: 'recruiter' })
+  })
+  it('普通成员通过企业级接口读取和维护当前企业部门', async () => {
+    const department = { id: 'dept/1', code: 'dept-tech', name: '技术部', isActive: true, createdAt: '2026-11-05T00:00:00.000Z', updatedAt: '2026-11-05T00:00:00.000Z' }
+    const deleted = { id: department.id, code: department.code, name: department.name, removedApprovalPolicies: 1 }
+    getJson.mockResolvedValue({ ok: true, data: [department], requestId: 'test' } as never)
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: department, requestId: 'test' })
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: department, requestId: 'test' })
+    const deleteJson = vi.fn().mockResolvedValue({ ok: true, data: deleted, requestId: 'test' })
+    Object.assign(apiClient, { postJson, patchJson, deleteJson })
+
+    expect(await listEnterpriseDepartments()).toEqual([department])
+    expect(await createEnterpriseDepartment({ name: '技术部' })).toEqual(department)
+    expect(await updateEnterpriseDepartment(department.id, { name: '研发部', isActive: false })).toEqual(department)
+    expect(await deleteEnterpriseDepartment(department.id)).toEqual(deleted)
+
+    expect(getJson).toHaveBeenCalledWith('/departments?activeOnly=false')
+    expect(postJson).toHaveBeenCalledWith('/departments', { name: '技术部' })
+    expect(patchJson).toHaveBeenCalledWith('/departments/dept%2F1', { name: '研发部', isActive: false })
+    expect(deleteJson).toHaveBeenCalledWith('/departments/dept%2F1')
+  })
+  it('读取并更新钉钉环境配置', async () => {
+    getJson.mockResolvedValue({ ok: true, data: {}, requestId: 'test' } as never)
+    await getDingTalkSettings()
+    expect(getJson).toHaveBeenCalledWith('/admin/dingtalk-settings')
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: {}, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    await updateDingTalkSettings({ DINGTALK_APP_KEY: 'app-key' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/dingtalk-settings', { DINGTALK_APP_KEY: 'app-key' })
+  })
+  it('读取并更新简历病毒扫描开关', async () => {
+    getJson.mockResolvedValue({ ok: true, data: { enabled: false }, requestId: 'test' } as never)
+    expect((await getResumeVirusScanSetting()).enabled).toBe(false)
+    expect(getJson).toHaveBeenCalledWith('/admin/resume-virus-scan')
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { enabled: true }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    expect((await updateResumeVirusScanSetting(true)).enabled).toBe(true)
+    expect(patchJson).toHaveBeenCalledWith('/admin/resume-virus-scan', { enabled: true })
+  })
+  it('读取并更新招聘渠道配置，并单独测试连接', async () => {
+    getJson.mockResolvedValue({ ok: true, data: { boss: { id: 'boss' } }, requestId: 'test' } as never)
+    await getChannelSettings()
+    expect(getJson).toHaveBeenCalledWith('/admin/channel-settings')
+
+    const patchJson = vi.fn().mockResolvedValue({ ok: true, data: { boss: { id: 'boss' } }, requestId: 'test' })
+    ;(apiClient as unknown as { patchJson: typeof patchJson }).patchJson = patchJson
+    await updateChannelSettings({ CHANNEL_BOSS_ENABLED: 'true' })
+    expect(patchJson).toHaveBeenCalledWith('/admin/channel-settings', { CHANNEL_BOSS_ENABLED: 'true' })
+
+    const postJson = vi.fn().mockResolvedValue({ ok: true, data: { status: 'not_configured', message: '缺少配置' }, requestId: 'test' })
+    ;(apiClient as unknown as { postJson: typeof postJson }).postJson = postJson
+    expect((await testChannelConnection('boss')).status).toBe('not_configured')
+    expect(postJson).toHaveBeenCalledWith('/admin/channel-connections/boss/test', {})
+  })
+  it('汇总 ready 与 health 为配置检查项', async () => {
+    getJson.mockImplementation(async (path) => {
+      if (path === '/ready') return { ok: true, data: { status: 'ready', checks: { configuration: 'ok' } }, requestId: 'test' } as never
+      return { ok: true, data: { status: 'ok', service: 'smartrecruit-api', version: '0.1.0', uptimeSeconds: 1 }, requestId: 'test' } as never
+    })
+    const rows = await listAdminChecks()
+    expect(rows.find(row => row.category === '服务健康')?.status).toBe('active')
+    expect(rows.find(row => row.category === '运行时长')?.detail).toContain('1 秒')
+    expect(rows.some(row => row.category.includes('审批') || row.category.includes('模型服务'))).toBe(false)
+  })
+
+  it('缺少配置证据或健康异常时不能写死为正常', async () => {
+    getJson.mockImplementation(async path => ({ ok: true, data: path === '/ready'
+      ? { status: 'unready', checks: {} }
+      : { status: 'degraded', service: 'api', uptimeSeconds: 0 }, requestId: 'test' }) as never)
+    const rows = await listAdminChecks()
+    for (const category of ['服务就绪', '配置检查', '服务健康']) expect(rows.find(row => row.category === category)?.status).toBe('failed')
+  })
+
+  it('支持按 subjectType 和 limit 查询流程审计事件', async () => {
+    getJson.mockResolvedValue({ ok: true, data: [{ id: 'event-1', subjectType: 'offer', subjectId: 'OFF-1', subjectLabel: 'OFF-1', action: 'expire', fromStatus: 'sent', toStatus: 'expired', actorId: 'user-demo', createdAt: '2026-09-11T00:00:00Z' }], requestId: 'test' } as never)
+    const events = await loadWorkflowEvents('offer', 20)
+    expect(getJson).toHaveBeenCalledWith('/workflow-events?subjectType=offer&limit=20')
+    expect(events[0]?.action).toBe('expire')
+  })
+})

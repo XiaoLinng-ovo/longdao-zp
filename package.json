@@ -1,0 +1,67 @@
+{
+  "name": "smartrecruit-pro",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/worker",
+    "web",
+    "packages/contracts",
+    "packages/database-readiness",
+    "packages/resume-intelligence",
+    "packages/enterprise-ai"
+  ],
+  "description": "SmartRecruit Pro recruitment workflow demo with a small deployable backend",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/start-api-production.mjs",
+    "start:production": "node scripts/start-api-production.mjs",
+    "start:dev": "node scripts/start-api-local.mjs",
+    "test:production-safety": "node --test scripts/tests/production-safety.test.mjs",
+    "start:all": "node scripts/start-all.mjs",
+    "runtime:prepare": "node scripts/runtime-release.mjs",
+    "runtime:start": "node scripts/runtime-control.mjs start",
+    "runtime:stop": "node scripts/runtime-control.mjs stop",
+    "runtime:status": "node scripts/runtime-control.mjs status",
+    "runtime:doctor": "node scripts/runtime-control.mjs doctor",
+    "runtime:logs": "node scripts/runtime-control.mjs logs",
+    "test:runtime-management": "node --test scripts/tests/runtime-management.test.mjs",
+    "start:web:production": "node scripts/serve-web-production.mjs",
+    "test:web:production": "node --test scripts/serve-web-production.test.mjs",
+    "dev": "npm --prefix web run dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter @smartrecruit-pro/api typecheck && pnpm --filter @smartrecruit-pro/worker typecheck && pnpm --filter smartrecruit-pro-web typecheck && pnpm --filter @smartrecruit-pro/contracts typecheck && pnpm --filter @smartrecruit-pro/resume-intelligence typecheck",
+    "test": "pnpm -r test",
+    "db:status": "node scripts/migrate-postgres.mjs --status",
+    "db:check": "node scripts/migrate-postgres.mjs --check",
+    "db:migrate": "node scripts/migrate-postgres.mjs",
+    "db:maintenance": "node scripts/maintenance-migrations.mjs",
+    "db:company-maintenance": "node scripts/maintenance-company-data.mjs",
+    "test:company-maintenance": "node --test scripts/tests/company-data-maintenance.test.mjs",
+    "test:company-maintenance:isolated": "node scripts/test-company-data-maintenance-isolated.mjs",
+    "runtime:recovery-audit": "node scripts/runtime-recovery-audit.mjs",
+    "runtime:recovery-rehearsal": "node scripts/runtime-recovery-rehearsal.mjs",
+    "test:maintenance-recovery": "node --test scripts/tests/maintenance-recovery.test.mjs",
+    "db:five-decisions": "node scripts/maintenance-five-decisions.mjs",
+    "test:five-decisions": "node --test scripts/tests/company-conflict-repair.test.mjs",
+    "test:five-decisions:clone": "node scripts/rehearse-five-decision-maintenance.mjs",
+    "deploy:api": "node scripts/deploy-api.mjs",
+    "test:database-release": "node --test scripts/tests/database-release.test.mjs",
+    "test:postgres:reliability": "node scripts/test-postgres-reliability.mjs",
+    "test:company-isolation": "node scripts/test-company-schema-isolation.mjs",
+    "db:schemas:check": "node scripts/check-company-schemas.mjs",
+    "test:asr-metrics": "node --test scripts/tests/transcription-metrics.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.16.0 <21 || >=22.3.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "source-map-js": "1.2.2",
+      "minimatch@>=7 <11.0.1": "11.0.1"
+    }
+  },
+  "devDependencies": {
+    "pm2": "7.1.2"
+  }
+}
