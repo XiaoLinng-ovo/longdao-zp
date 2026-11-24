@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+export const releaseProbeOrigins = Object.freeze([
+  'https://first-address.trycloudflare.com',
+  'https://second-address.trycloudflare.com',
+  'https://zhaopin.longdaoec.com',
+])
+
 export function verifyReleaseOriginPolicy(root, { spawnProcess = spawn, env = process.env } = {}) {
   const isolated = Object.fromEntries(Object.entries(env).filter(([key]) =>
     /^(PATH|SYSTEMROOT|WINDIR|TEMP|TMP|COMSPEC|USERPROFILE|HOME|PATHEXT|SYSTEMDRIVE)$/iu.test(key)))
@@ -23,7 +29,8 @@ export function verifyReleaseOriginPolicy(root, { spawnProcess = spawn, env = pr
         const result = JSON.parse(output.trim())
         assert.equal(result.ready, true)
         assert.equal(result.originPolicy, 'same-origin')
-        assert.ok(result.checkedRequests >= 42)
+        assert.ok(result.checkedRequests >= releaseProbeOrigins.length * 7 * 3)
+        assert.deepEqual(result.checkedOrigins, releaseProbeOrigins)
         yes(result)
       } catch (error) { no(new Error('RELEASE_ORIGIN_POLICY: Invalid isolated check result', { cause: error })) }
     })
@@ -76,7 +83,7 @@ export async function probeReleaseOriginPolicy(root) {
       '/api/v1/resume-import-batches', '/api/v1/resume-import-batches/probe/items/probe/content',
       '/api/v1/resume-import-batches/probe/cancel']
     let checkedRequests = 0
-    for (const origin of ['https://first-address.trycloudflare.com', 'https://second-address.trycloudflare.com']) {
+    for (const origin of releaseProbeOrigins) {
       for (const path of paths) {
         for (const [source, token, status, code] of [
           [origin, 'token', 401, 'AUTHENTICATION_REQUIRED'],
@@ -90,7 +97,7 @@ export async function probeReleaseOriginPolicy(root) {
         }
       }
     }
-    return { ready: true, originPolicy: 'same-origin', checkedRequests }
+    return { ready: true, originPolicy: 'same-origin', checkedRequests, checkedOrigins: [...releaseProbeOrigins] }
   } finally {
     if (gateway) await new Promise(yes => { gateway.close(yes); gateway.closeIdleConnections() })
     if (api) await new Promise(yes => { api.close(yes); api.closeIdleConnections() })

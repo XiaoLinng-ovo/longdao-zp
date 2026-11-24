@@ -58,3 +58,22 @@ node --test scripts/tests/runtime-tunnel-origin.test.mjs
 ```powershell
 node --test scripts/tests/runtime-origin-check.test.mjs scripts/tests/runtime-management.test.mjs scripts/tests/runtime-tunnel-origin.test.mjs
 ```
+
+### 本次实际验收与发布状态
+
+- 候选版本：`business-20261124-tunnel-origin-r2`，从当前封存发布复制后仅补齐同域安全校验、代理地址识别、网关及相关启动检查；其他业务源码、前端资源和依赖已逐文件核验保持不变。
+- 网关、运行管理、来源发布门禁和隧道测试共 46 项通过；直接针对候选发布包的域名轮换、认证、CSRF 及合成简历上传集成测试另 1 项通过。隔离发布门禁覆盖 42 次请求。
+- 首次正式只读预检被 `companyDataConsistency` 的 `DATA_PATH_CONFLICT` 拦截，未切换服务。复核确认企业 `00000000-0000-4000-8000-000000000028` 的 `audit_logs` 仅缺少 1 条原始记录，`company-only=0`、`conflicting=0`。随后用户明确授权先备份、补齐此记录再发布。
+- **已完成备份及恢复演练**：最终冻结备份位于 `C:\Users\小刘LLL\AppData\Local\SmartRecruit\tunnel-origin-audit-backup-2026-11-24T01-56-13-117Z`，使用仅当前账户可访问的 ACL；保留完整数据库 dump、无密码角色定义、有效配置、原始审计事件及校验记录。dump SHA256 为 `c75bacbaf96ae8d6bd7a69b8e662f530d523cb55c351a68a34e56afbbccc9067`。独立 PostgreSQL 恢复后，所有表数据指纹、结构、所有者和权限均匹配；补齐演练及候选版本预检通过，独立实例已停止。
+- 在线备份的第一次尝试因后台正常更新其他表而触发全表指纹保护，未写生产数据。未降低校验标准；改为停止本项目三个受管角色并在同一冻结事务内备份、演练和正式补齐。旧版本重启同样受缺失日志门禁阻挡，因此维护期间保持停写，不绕过发布保护。
+- **只补齐 1 条审计记录**：从 `public.audit_logs` 原样复制 ID `51a51a27-588d-442f-b364-d87bd5f059b1` 到对应企业表，原始行 SHA256 为 `9c107ea2fba0ce29ec0b8f9c59e5bcba34077800e427443d3c815efa22539001`。事务中核验来源和目标完全相同；去除新插入 ID 后企业日志指纹与备份一致，其他所有表指纹不变。没有删除、覆盖已有日志或执行数据库迁移。修复摘要位于 `logs/runtime/audit-repair-tunnel-origin-20261124.json`。
+- **已正式上线**：`business-20261124-tunnel-origin-r2` 于北京时间 2026-11-24 10:02 激活。发布预检全部通过，本地及公网健康响应均确认 `originPolicy=same-origin`，公网七类写路径的 21 次安全探测通过。数据库、密钥、存储、端口等业务环境和有效配置文件保持不变。发布结果位于 `logs/runtime/deployment-tunnel-origin-20261124.json`。
+- **真实公网域名轮换验收通过**：原入口 `https://twist-brook-sterling-dictionary.trycloudflare.com` 及临时第二入口 `https://reflections-pressure-attempting-balloon.trycloudflare.com` 均未列入 `ALLOWED_ORIGINS`，均通过七类写路径检查，`reloaded=false`；配置文件、活动版本状态和三个角色的启动计数文件完全不变。临时测试连接器已关闭，原入口保留。验收结果位于 `logs/runtime/tunnel-rotation-verification-20261124.json`。
+- 浏览器验收确认原公网入口正常显示登录页。线上安全探测不携带登录会话，不冒充真实用户的完整上传或 AI 解析验收；合成简历生命周期已在实际发布包的隔离集成测试中验证。CSRF、认证和陌生来源拒绝仍然生效，没有开放域名通配符。
+
+## 固定正式域名预配置（2026-11-24）
+
+- 用户指定正式域名为 `https://zhaopin.longdaoec.com`。已备份本机 `.env` 后，仅向其 `ALLOWED_ORIGINS` 追加此精确 HTTPS 来源，原有配置和来源全部保留；根配置示例、Linux 生产模板及旧 Compose 入口同步保留该域名。没有修改活动封存发布或为此重启业务服务，当前已上线的同域策略无需此项重启即可接受正式域名。
+- 后续候选发布的来源门禁增加正式域名，共检查三个来源、七类写路径、三类安全条件，合计 63 次请求；生产 Docker 镜像构建也执行隔离门禁。实际发布包的合成候选人、申请、简历上传测试使用正式域名，未向正式域名服务器写入测试数据。
+- DNS 与服务器入口是另一个部署前置条件。本次实测该域名已解析到 `60.204.216.128`，但 HTTPS `/api/v1/health` 返回 Nginx 404，不是招聘 API；本轮没有可用的目标服务器连接配置，未修改其 DNS、TLS 或 Nginx。应用侧准备完成不等于公网固定入口已上线。正式接入步骤见 `deploy/PRODUCTION.md` 的“固定正式域名”。
+- 当前线上网关以正式域名 Host/Origin 模拟请求的 21 次安全检查通过，候选发布隔离门禁的 63 次检查及实际封存版本的合成上传集成测试通过；48 项网关、运行管理和来源门禁回归通过。服务未重启，未写业务数据，配置核验只改变 `ALLOWED_ORIGINS`。证据位于 `logs/runtime/formal-domain-preconfiguration-20261124.json`。本机 Docker daemon 未运行，尚未执行完整镜像构建，不能以静态 Dockerfile 检查冒充镜像已构建成功。

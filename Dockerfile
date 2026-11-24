@@ -15,7 +15,9 @@ RUN pnpm install --frozen-lockfile
 COPY apps ./apps
 COPY packages ./packages
 COPY web ./web
+COPY scripts/runtime-origin-check.mjs scripts/serve-web-production.mjs ./scripts/
 RUN pnpm --filter @smartrecruit-pro/contracts build && pnpm --filter @smartrecruit-pro/object-storage build && pnpm --filter @smartrecruit-pro/resume-intelligence build && pnpm --filter @smartrecruit-pro/enterprise-ai build && pnpm --filter @smartrecruit-pro/api build:production && pnpm --filter @smartrecruit-pro/worker build:production && pnpm --dir web build
+RUN node --input-type=module -e "import { verifyReleaseOriginPolicy } from './scripts/runtime-origin-check.mjs'; console.log(JSON.stringify(await verifyReleaseOriginPolicy(process.cwd())))"
 
 FROM node:22-bookworm-slim AS backend
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/* && install -d -o node -g node /var/lib/smartrecruit/objects

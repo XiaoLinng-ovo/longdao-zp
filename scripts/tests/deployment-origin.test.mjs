@@ -64,7 +64,8 @@ test('production gateway accepts new website domains without reconfiguration and
     process.env.NODE_ENV = 'production'
     for (const allowed of ['', 'https://old-address.trycloudflare.com']) {
       process.env.ALLOWED_ORIGINS = allowed
-      for (const origin of ['https://first-address.trycloudflare.com', 'https://second-address.trycloudflare.com', 'https://recruit.example.test:8443']) {
+      for (const origin of ['https://first-address.trycloudflare.com', 'https://second-address.trycloudflare.com',
+        'https://recruit.example.test:8443', 'https://zhaopin.longdaoec.com']) {
         for (const path of paths) {
           const accepted = await send(port, origin, path)
           assert.equal(accepted.status, 401, `${origin} ${path}: ${JSON.stringify(accepted.body)}`)
@@ -80,7 +81,7 @@ test('production gateway accepts new website domains without reconfiguration and
       }
     }
     process.env.ALLOWED_ORIGINS = ''
-    const origin = 'https://third-address.trycloudflare.com'
+    const origin = 'https://zhaopin.longdaoec.com'
     const candidate = await send(port, origin, '/api/v1/candidates', { fullName: 'Deployment origin test', source: 'test' }, { authorization })
     assert.equal(candidate.status, 201, JSON.stringify(candidate.body))
     const application = await send(port, origin, '/api/v1/applications', { candidateId: candidate.body.data.id, jobId: 'job-108' }, { authorization })

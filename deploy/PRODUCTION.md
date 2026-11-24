@@ -14,10 +14,26 @@ test -e deploy/runtime.production.env || cp deploy/runtime.production.env.exampl
 - 空库新装：设置 `PGPASSWORD`；用 `openssl rand -hex 32` 分别生成两项认证密钥。先配置 SMTP，再走产品注册流程。`SYSTEM_ADMIN_USER_NO` 绑定实际用户编号，不是邮箱；拿到编号后更新该值并重建 API 容器。不使用开发种子创建正式账号。
 - 企业 AI 和支付配置分别使用 `AI_CONFIG_ENCRYPTION_KEY`、`PAYMENT_ENCRYPTION_KEY`，各用 `openssl rand -base64 32` 单独生成并妥善备份。迁移旧库时必须保留原值，否则无法解密已保存的配置。完整可选配置参考根目录 `.env.example`，但不要将其中开发用的 S3、数据库默认值直接用于生产。
 - 迁移现有系统：先备份并在隔离环境验证恢复 PostgreSQL、对象文件和原运行配置。保留原有认证、加密和外部服务密钥；保留对象键和登记位置。若旧记录登记的是 Windows 本地存储路径，不要只复制附件并硬改路径。应先核对存储位置登记及历史读写映射并验证回放，否则就绪检查可能拒绝启动，或历史附件无法读取。
-- 网页与 `/api` 通过同一个网站入口访问时，来源自动校验，无需填写网址白名单。正式域名或临时域名变化，不需要为此修改配置、重建容器。`ALLOWED_ORIGINS` 仅用于额外允许的跨域前端来源，默认留空；其中旧域名不会妨碍当前网站的同域请求。按业务配置 SMTP、AI、钉钉、支付、Turnstile 或对象存储。不要直接使用 Windows `.env`，也不要将真实配置写入镜像。
+- 网页与 `/api` 通过同一个网站入口访问时，来源自动校验。正式域名 `https://zhaopin.longdaoec.com` 已写入部署模板的 `ALLOWED_ORIGINS`，后续部署应保留；其他跨域前端可追加精确来源，不使用通配符。已有的 `deploy/runtime.production.env` 不会被模板覆盖，应一次性合并该值并保留其他原配置。即使白名单尚未包含当前域名，同域访问仍然受支持；无需为临时域名轮换修改配置。按业务配置 SMTP、AI、钉钉、支付、Turnstile 或对象存储。不要直接使用 Windows `.env`，也不要将真实配置写入镜像。
 - 容器由环境文件注入配置。在服务器修改配置后重建容器生效，不依赖后台修改容器内的 `.env`。使用宿主机反代到 `127.0.0.1:5174`，传递 Host 和 HTTPS 协议信息，并支持 `/funasr-stream` 的 WebSocket 升级；不要把数据库、API 或模型服务直接暴露在公网。
 
 来源判断同时核对协议、域名和端口，不使用 `Sec-Fetch-Site` 作为放行依据。Web 网关覆盖客户端传入的 `X-Forwarded-Host`；API 仅接受回环地址或可信代理传入的来源转发头。生产 Compose 已配置私有 Docker 网段的 `ORIGIN_TRUSTED_PROXY_IPS`，不要把公网地址加入此项。外层 HTTPS 反代须保留浏览器访问的 Host（含非默认端口），并覆盖 `X-Forwarded-Proto` 为实际协议；HTTP 与 WebSocket 均需如此。登录、企业权限及 CSRF Token 校验保持启用；更换域名后需要重新登录。
+
+## 固定正式域名
+
+正式入口为 `https://zhaopin.longdaoec.com`。生产镜像构建和本地受管候选发布的隔离来源门禁均验证此域名与两个新临时域名，覆盖七类写路径及 CSRF、认证、陌生来源拒绝，共 63 次请求。检查使用合成令牌和内存服务，不连接业务数据库。实际镜像构建通过前不能宣称目标服务器已部署。
+
+域名白名单不代替服务器入口配置。将该域名的 DNS 指向部署服务器，在其有效的 HTTPS 站点中配置 `server_name zhaopin.longdaoec.com` 和匹配的 TLS 证书，将整个网站代理到生产 Compose 的 `http://127.0.0.1:5174`（自定义 `WEB_PORT` 时替换）。必须保留 `$http_host`、设置 `X-Forwarded-Proto $scheme` 并支持 WebSocket；不要只转发静态页、只代理 API，或把正式域名绑定到会变化的临时隧道地址。本地 Windows 当前受管端口是 5175，不能误认为生产服务器端口。
+
+应用启动后，在服务器和公网分别确认：
+
+```bash
+curl -fsS http://127.0.0.1:5174/api/v1/ready
+curl -fsS https://zhaopin.longdaoec.com/api/v1/health
+curl -fsS https://zhaopin.longdaoec.com/api/v1/ready
+```
+
+公网 health 必须返回招聘 API 身份及 `originPolicy=same-origin`，ready 必须就绪；再验证登录、简历上传及启用的面试功能。Nginx 404 或其他站点的 HTTP 200 都不算部署完成。2026-11-24 的预配置检查中，该域名解析到 `60.204.216.128`，HTTPS `/api/v1/health` 返回 Nginx 404，尚未接到本机招聘应用；此为检查时状态，不代表已替服务器完成反代或发布。
 
 ## 构建、检查、启动
 
