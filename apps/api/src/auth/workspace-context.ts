@@ -5,7 +5,7 @@ import { HttpError } from '../http.js'
 import { organizationSchemaName, runWithTenantContext } from '../db/tenant-context.js'
 
 export interface WorkspaceSchemaRegistry {
-  query<T = any>(text: string, values?: unknown[]): Promise<{ rows: T[] }>
+  query<T extends Record<string, unknown> = any>(text: string, values?: unknown[]): Promise<{ rows: T[] }>
 }
 
 export async function requireReadyWorkspaceSchema(schemas: WorkspaceSchemaRegistry, workspaceId: string): Promise<string> {

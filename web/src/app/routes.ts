@@ -143,6 +143,12 @@ export const appRoutes: AppRouteRecord[] = [
     },
   },
   {
+    path: '/join',
+    name: 'invitation-join',
+    component: () => import('../modules/auth/pages/InvitationJoinPage.vue'),
+    meta: { title: '加入企业', navLabel:'加入企业',icon:'',group:'系统',crumb:'系统 / 加入企业', hideInNav: true, hideShell: true },
+  },
+  {
     path: '/register',
     name: 'register',
     component: () => import('../modules/auth/pages/RegisterPage.vue'),

@@ -50,7 +50,7 @@ async function join() {
 </script>
 <template>
   <section class="join-card" aria-labelledby="join-title">
-    <div><h2 id="join-title">使用邀请码加入企业</h2><p>邀请码用于加入企业，不代替邮箱密码登录。每个邀请码仅可使用一次。</p></div>
+    <div><h2 id="join-title">使用邀请码加入企业</h2><p>邀请码生成后 3 天内可供多人加入，加入后为普通成员。</p></div>
     <form class="join-form" @submit.prevent="check">
       <label class="sr-only" for="workspace-invite-code">邀请码或邀请链接</label>
       <input id="workspace-invite-code" v-model="code" :disabled="busy" placeholder="输入邀请码或粘贴邀请链接" autocomplete="off" maxlength="2048" />

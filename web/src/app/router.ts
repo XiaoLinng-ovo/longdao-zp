@@ -13,11 +13,14 @@ export { navigationItems, getNavigationItemsForRole }
 export function installAuthGuard(router: Router): void {
   router.beforeEach(async (to) => {
     if (!authSession.ready) await refreshAuthSession()
+    if (to.name === 'workspaces' && typeof to.query.invite === 'string') return { name:'invitation-join', query:{invite:to.query.invite}, replace:true }
+    if (to.name === 'invitation-join') return true
     if (authSession.error && !authSession.user) return false
 
     if (to.name === 'login' || to.name === 'register' || to.name === 'forgot-password') {
       if (to.name === 'login' && to.query.addAccount === '1') return true
       if (authSession.user) {
+        if (to.name === 'register' && typeof to.query.invite === 'string') return {name:'invitation-join',query:{invite:to.query.invite}}
         const redirect = safeAuthRedirect(to.query.redirect)
         const platformLandingPath = authSession.user.isSystemAdmin ? getPlatformLandingPath('admin') : undefined
         return redirect || (authSession.user.workspaceId ? { name: 'dashboard' } : platformLandingPath ?? { name: 'workspaces' })

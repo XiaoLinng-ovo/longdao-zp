@@ -69,6 +69,7 @@ export interface RegisterInput {
   email: string
   password: string
   companyName: string
+  invitationCode?: string
   phone?: string
   ipAddress?: string
   verificationCode?: string

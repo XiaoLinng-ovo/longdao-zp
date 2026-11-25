@@ -11,12 +11,14 @@ const mocks = vi.hoisted(() => ({
   getSecurityConfig: vi.fn(),
   syncAuthenticatedSession: vi.fn(),
   switchWorkspace: vi.fn(),
+  getInvitationSummary: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => mocks.route,
   useRouter: () => ({ push: mocks.push }),
 }))
+vi.mock('../api/invitations', () => ({ getInvitationSummary:mocks.getInvitationSummary }))
 vi.mock('../api', () => ({
   getSecurityConfig: mocks.getSecurityConfig,
   register: mocks.register,
@@ -87,6 +89,7 @@ async function submitForm() {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.route.query = {}
+  mocks.getInvitationSummary.mockResolvedValue({workspaceName:'受邀企业',expiresAt:'2099-01-01',shared:true})
   mocks.requestRegistrationCode.mockResolvedValue({ accepted: true, retryAfterSeconds: 60 })
   mocks.register.mockResolvedValue({
     user: { id: 'user-1', name: '陈婉清', email: 'owner@example.com', role: 'recruiter', departmentId: '' },
@@ -109,6 +112,37 @@ afterEach(() => {
 })
 
 describe('注册页两步验证', () => {
+  it('受邀注册不填写企业名称，验证后绑定现有企业', async () => {
+    mocks.route.query={invite:'ABCDEF123456ABCDEF123456'}
+    const element=await mount()
+    expect(element.querySelector('input[autocomplete=organization]')).toBeNull()
+    expect(element.textContent).toContain('受邀企业')
+    const values=['受邀成员','member@example.com','','strong-password','strong-password']
+    element.querySelectorAll<HTMLInputElement>('form input').forEach((input,index)=>{input.value=values[index]??'';input.dispatchEvent(new Event('input'))})
+    await submitForm()
+    const codeInput=element.querySelector<HTMLInputElement>('input[autocomplete=one-time-code]')!
+    codeInput.value='123456';codeInput.dispatchEvent(new Event('input'))
+    mocks.switchWorkspace.mockRejectedValueOnce(new Error('切换重试'))
+    await submitForm()
+    expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({companyName:'',invitationCode:'ABCDEF123456ABCDEF123456'}))
+    expect(mocks.push).toHaveBeenCalledWith({name:'invitation-join',query:{invite:'ABCDEF123456ABCDEF123456'}})
+  })
+  it('无效邀请不能退回创建企业流程或发送验证码', async () => {
+    mocks.route.query={invite:'INVALID'}
+    mocks.getInvitationSummary.mockRejectedValueOnce(new Error('邀请码已过期'))
+    const element=await mount()
+    expect(element.querySelector('input[autocomplete=organization]')).toBeNull()
+    expect(element.querySelector<HTMLButtonElement>('button[type=submit]')?.disabled).toBe(true)
+    await submitForm()
+    expect(mocks.requestRegistrationCode).not.toHaveBeenCalled()
+    expect(mocks.register).not.toHaveBeenCalled()
+  })
+  it('从旧邀请登录页进入注册也保留邀请码', async () => {
+    mocks.route.query={redirect:'/workspaces?invite=ABCDEF123456ABCDEF123456'}
+    const element=await mount()
+    expect(mocks.getInvitationSummary).toHaveBeenCalledWith('ABCDEF123456ABCDEF123456')
+    expect(element.querySelector('input[autocomplete=organization]')).toBeNull()
+  })
   it('验证码发送成功后才进入第二步', async () => {
     const element = await mount()
     expect(element.textContent).toContain('步骤 1 / 2')

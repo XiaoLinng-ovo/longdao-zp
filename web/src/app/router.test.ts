@@ -304,13 +304,14 @@ describe('invitation redirects', () => {
   it('preserves the entire invitation URL while requesting login', async () => {
     const router=createAppRouter();installAuthGuard(router)
     await router.push('/workspaces?invite=ABCDEF123456ABCDEF123456')
-    expect(router.currentRoute.value.query.redirect).toBe('/workspaces?invite=ABCDEF123456ABCDEF123456')
+    expect(router.currentRoute.value.name).toBe('invitation-join')
+    expect(router.currentRoute.value.query.invite).toBe('ABCDEF123456ABCDEF123456')
   })
   it('returns signed-in users to their invitation instead of dropping it', async () => {
     authSession.user={id:'u1',name:'测试',email:'test@example.invalid',role:'recruiter',departmentId:'',workspaceId:'w1'}
     const router=createAppRouter();installAuthGuard(router)
     await router.push({name:'login',query:{redirect:'/workspaces?invite=ABCDEF123456ABCDEF123456'}})
-    expect(router.currentRoute.value.name).toBe('workspaces')
+    expect(router.currentRoute.value.name).toBe('invitation-join')
     expect(router.currentRoute.value.query.invite).toBe('ABCDEF123456ABCDEF123456')
   })
   it('rejects external redirects and lookalike workspace routes', async () => {

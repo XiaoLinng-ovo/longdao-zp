@@ -75,3 +75,36 @@ it('refuses local session fallback in production without database configuration'
   const { createAuthSessionStore } = await import('./auth-service.js')
   assert.throws(() => createAuthSessionStore({ NODE_ENV: 'production' }), /database configuration/i)
 })
+
+for(const revoked of [false,true]) it('invited registration stays in one transaction, no company provision; revoked='+revoked,async()=>{
+ const workspaceId='22222222-2222-4222-8222-222222222222',invitationId='33333333-3333-4333-8333-333333333333'
+ const calls:string[]=[]
+ const now=new Date(),future=new Date(Date.now()+600000)
+ const invitation={id:invitationId,organization_id:workspaceId,workspace_name:'受邀企业',workspace_kind:'test',workspace_status:'active',service_available:true,is_shared:true,expires_at:future,...(revoked?{revoked_at:now}:{})}
+ const query=async<T extends Record<string,unknown>>(sql:string):Promise<{rows:T[]}>=>{
+  calls.push(sql)
+  let rows:Record<string,unknown>[]=[]
+  if(sql.includes('SELECT * FROM email_verification_challenges')) rows=[{id:'challenge',expires_at:future,code_hash:'a'.repeat(64),attempts:0,max_attempts:5}]
+  else if(sql.includes('INSERT INTO users')) rows=[{id:user.id,email:'invited@example.com',display_name:'受邀成员'}]
+  else if(sql.includes('FROM organization_invitations i')) rows=[invitation]
+  else if(sql.startsWith('SELECT * FROM organizations')) rows=[{id:workspaceId,name:'受邀企业',kind:'test',status:'active',created_at:now,service_status:'trial'}]
+  else if(sql.startsWith('SELECT id FROM users')) rows=[{id:user.id}]
+  else if(sql.includes('FROM public.organization_schemas')) rows=[{schema_name:'company_'+workspaceId.replaceAll('-',''),status:'ready',structure_ready:true}]
+  return {rows:rows as T[]}
+ }
+ const db={query,async connect(){return {query,release(){calls.push('RELEASE')}}}}
+ const repository=new PostgresSessionRepository(db)
+ const registration=repository.registerUserWithVerification({name:'受邀成员',email:'invited@example.com',password:'strong-password',companyName:'',invitationCode:'ABCDEF123456ABCDEF123456'},{codeHash:'a'.repeat(64)})
+ if(revoked) {
+  await assert.rejects(registration,{code:'INVITATION_REVOKED'})
+  assert.ok(calls.includes('ROLLBACK'));assert.ok(!calls.includes('COMMIT'))
+ } else {
+  const result=await registration
+  assert.equal(result.workspace.id,workspaceId);assert.equal(result.workspace.role,'member')
+  assert.ok(calls.includes('COMMIT'))
+  assert.ok(calls.findIndex(sql=>sql.includes('INSERT INTO organization_invitation_joins'))<calls.indexOf('COMMIT'))
+ }
+ assert.ok(!calls.some(sql=>sql.includes('INSERT INTO organizations')||sql.includes('initialize_organization_schema')))
+ assert.ok(calls.findIndex(sql=>sql.includes('SET consumed_at'))<calls.findIndex(sql=>sql.includes('INSERT INTO users')))
+ assert.equal(calls.at(-1),'RELEASE')
+})

@@ -360,3 +360,18 @@ test('current user profile updates only contact fields and persists them', async
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('ownership transfer reauthentication requires a real session and current password',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'smartrecruit-transfer-'))
+ try {
+  const store=new LocalAuthSessionStore(join(directory,'auth.json'))
+  const registered=await store.registerUser({name:'交接测试用户',email:'transfer@example.invalid',password:'strong-password',companyName:'交接测试企业'})
+  const {session}=await store.createSession(registered.user)
+  const service=new AuthService(store,{env:{NODE_ENV:'test'}})
+  const auth={user:registered.user,sessionId:session.sessionId,method:'session' as const}
+  await assert.rejects(service.authorizeOwnershipTransfer(undefined,'strong-password'),{code:'AUTHENTICATION_REQUIRED'})
+  await assert.rejects(service.authorizeOwnershipTransfer({...auth,method:'development-bootstrap'},'strong-password'),{code:'AUTHENTICATION_REQUIRED'})
+  await assert.rejects(service.authorizeOwnershipTransfer(auth,'wrong-password'),{code:'INVALID_CURRENT_PASSWORD'})
+  await assert.doesNotReject(service.authorizeOwnershipTransfer(auth,'strong-password'))
+ } finally {await rm(directory,{recursive:true,force:true})}
+})

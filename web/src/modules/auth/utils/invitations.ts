@@ -1,7 +1,7 @@
 export const businessRoleLabels: Record<string, string> = {
   recruiter: '企业用户', hiring_manager: '企业用户', approver: '企业用户', interviewer: '企业用户', hr_admin: '企业用户', admin: '企业用户',
 }
-export const membershipLabels: Record<string, string> = { owner: '企业主管理员', admin: '企业子管理员', member: '普通用户' }
+export const membershipLabels: Record<string, string> = { owner: '企业主管理员', admin: '企业子管理员', member: '普通成员' }
 export function extractInvitationCode(input: string): string {
   const trimmed = input.trim()
   let code = trimmed
@@ -9,7 +9,7 @@ export function extractInvitationCode(input: string): string {
   return code.replace(/[\s-]/g, '').toUpperCase()
 }
 export function invitationLink(code: string, origin = window.location.origin): string {
-  const url = new URL('/workspaces', origin)
+  const url = new URL('/join', origin)
   url.searchParams.set('invite', code)
   return url.toString()
 }

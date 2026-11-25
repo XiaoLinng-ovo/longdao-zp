@@ -438,6 +438,7 @@ export class LocalAuthSessionStore {
     return this.exclusive(async () => {
       const file = await this.readFile()
       const data = normalizeRegistrationInput(input)
+      if (data.invitationCode) throw Object.assign(new Error('企业邀请需要 PostgreSQL 数据库'), {code:'POSTGRES_REQUIRED',status:503})
       await this.verifyAndConsumeChallenge(file, 'registration', data.email, verification.codeHash)
       const result = await this.createRegisteredEntities(file, data, verification.verifiedAt ?? timestamp())
       file.registrationAttempts = [...(file.registrationAttempts ?? []), { email: data.email, attemptedAt: timestamp() }]
@@ -503,6 +504,7 @@ export class LocalAuthSessionStore {
   }
 
   async registerUser(input: RegisterInput): Promise<RegisterResult> {
+    if (input.invitationCode !== undefined) throw Object.assign(new Error('企业邀请需要 PostgreSQL 数据库'), {code:'POSTGRES_REQUIRED',status:503})
     return this.exclusive(async () => {
       const file = await this.readFile()
       const data = normalizeRegistrationInput(input)

@@ -542,6 +542,11 @@
       "version": "0108",
       "name": "0108_enterprise_administration.sql",
       "sha256": "922e35df3b28c87957ec28db7e689b47aca82e8cf3140d31c34bc581b6658ce2"
+    },
+    {
+      "version": "0109",
+      "name": "0109_shared_workspace_invitations.sql",
+      "sha256": "4abf5cd31abef9b8e655fe9cc19d53b33efe0f0bde797252814de30150a3af74"
     }
   ],
   "public": [
@@ -16124,6 +16129,97 @@
     },
     {
       "kind": "relation",
+      "name": "organization_invitation_joins",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "invitation_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "joined_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": false,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (user_id)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (invitation_id, user_id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (invitation_id) REFERENCES organization_invitations(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (invitation_id, user_id)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
       "name": "organization_invitations",
       "detail": {
         "kind": "r",
@@ -16221,6 +16317,15 @@
             "generated": ""
           },
           {
+            "name": "is_shared",
+            "type": "boolean",
+            "default": "false",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
             "name": "membership_role",
             "type": "text",
             "default": "'member'::text",
@@ -16283,6 +16388,14 @@
         "policies": [],
         "triggers": [],
         "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK (((NOT is_shared) OR ((email IS NULL) AND (membership_role = 'member'::text) AND (business_role = 'recruiter'::text) AND (department_id IS NULL) AND (accepted_at IS NULL) AND (accepted_by IS NULL) AND (expires_at = (created_at + '72:00:00'::interval)))))",
+            "no_inherit": false
+          },
           {
             "type": "c",
             "deferred": false,

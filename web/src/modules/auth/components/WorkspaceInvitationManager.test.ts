@@ -5,10 +5,10 @@ import WorkspaceInvitationManager from './WorkspaceInvitationManager.vue'
 import * as api from '../api/invitations'
 import { copyText } from '../utils/invitations'
 vi.mock('../api/invitations',()=>({createInvitation:vi.fn(),listInvitations:vi.fn(),listWorkspaceMembers:vi.fn(),listInvitationDepartments:vi.fn(),revokeInvitation:vi.fn(),updateWorkspaceMember:vi.fn(),setWorkspaceMemberStatus:vi.fn(),transferWorkspaceOwnership:vi.fn()}))
-vi.mock('../session',()=>({authSession:{user:{id:'self'}}}))
+vi.mock('../session',()=>({authSession:{user:{id:'self'}},refreshAuthSession:vi.fn()}))
 vi.mock('../utils/invitations', async(importOriginal)=>({...await importOriginal<typeof import('../utils/invitations')>(),copyText:vi.fn()}))
 let app:App,root:HTMLDivElement
-const invitation={id:'i',workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',email:null,membershipRole:'member',businessRole:'recruiter',departmentId:null,departmentName:null,createdAt:'2026-10-09',expiresAt:'2099-01-01',acceptedAt:null,status:'pending',code:'ABCDEF-123456-ABCDEF-123456'} as api.Invitation
+const invitation={id:'i',workspaceId:'w',workspaceName:'测试企业',workspaceKind:'test',email:null,membershipRole:'member',businessRole:'recruiter',departmentId:null,departmentName:null,createdAt:'2026-10-09',expiresAt:'2099-01-01',acceptedAt:null,shared:true,joinedCount:0,status:'pending',code:'ABCDEF-123456-ABCDEF-123456'} as api.Invitation
 async function flush(){for(let i=0;i<8;i++){await Promise.resolve();await nextTick()}}
 async function mount(role='owner', targetRole: 'member' | 'admin' = 'member') {
  vi.mocked(api.listInvitations).mockResolvedValue([])
@@ -29,15 +29,15 @@ describe('WorkspaceInvitationManager',()=>{
   expect(root.querySelector('.invite-form select[aria-label="业务角色"]')).toBeNull()
   expect(root.querySelector('select[aria-label="同事的所属部门"]')).not.toBeNull()
   vi.mocked(api.createInvitation).mockResolvedValue({...invitation,businessRole:'recruiter'})
-  button('生成邀请').click();await flush()
-  expect(api.createInvitation).toHaveBeenCalledWith('w',expect.objectContaining({businessRole:'recruiter'}))
+  button('生成 / 查看有效邀请').click();await flush()
+  expect(api.createInvitation).toHaveBeenCalledWith('w',{})
  })
  it('creates an invitation and copies the link without claiming automatic sending',async()=>{
   await mount();vi.mocked(api.createInvitation).mockResolvedValue(invitation)
-  button('生成邀请').click();await flush()
-  expect(api.createInvitation).toHaveBeenCalledWith('w',expect.objectContaining({membershipRole:'member',businessRole:'recruiter',expiresInDays:7}))
+  button('生成 / 查看有效邀请').click();await flush()
+  expect(api.createInvitation).toHaveBeenCalledWith('w',{})
   button('复制邀请链接').click();await flush()
-  expect(copyText).toHaveBeenCalledWith(expect.stringContaining('/workspaces?invite='))
+  expect(copyText).toHaveBeenCalledWith(expect.stringContaining('/join?invite='))
   expect(root.textContent).toContain('已复制')
   expect(root.textContent).toContain('本机地址')
  })
@@ -48,15 +48,37 @@ describe('WorkspaceInvitationManager',()=>{
   expect(root.querySelector('select[aria-label="自己的业务角色"]')).toBeNull()
   expect(root.querySelector('select[aria-label="同事的业务角色"]')).toBeNull()
  })
- it('owner can invite a sub-administrator without platform or owner role options',async()=>{
+ it('does not offer email, role, department or validity controls at invitation time',async()=>{
   await mount()
-  const select=root.querySelector<HTMLSelectElement>('.invite-form select')!
-  expect(select.querySelector('option[value=admin]')?.textContent).toBe('企业子管理员')
-  expect(root.querySelector('option[value=owner]')).toBeNull()
-  select.value='admin';select.dispatchEvent(new Event('change'));await flush()
-  vi.mocked(api.createInvitation).mockResolvedValue({...invitation,membershipRole:'admin'})
-  button('生成邀请').click();await flush()
-  expect(api.createInvitation).toHaveBeenCalledWith('w',expect.objectContaining({membershipRole:'admin',businessRole:'recruiter'}))
+  expect(root.querySelectorAll('.invite-form input,.invite-form select')).toHaveLength(0)
+  expect(root.textContent).toContain('3 天有效')
+ })
+ it('reuses the active invite without duplicate rows',async()=>{
+  await mount();vi.mocked(api.createInvitation).mockResolvedValue({...invitation})
+  button('生成 / 查看有效邀请').click();await flush()
+  button('生成 / 查看有效邀请').click();await flush()
+  expect(root.querySelectorAll('table')[0]?.querySelectorAll('tbody tr')).toHaveLength(1)
+ })
+ it('requires confirmation before replacing an active invitation',async()=>{
+  await mount();vi.spyOn(window,'confirm').mockReturnValue(false)
+  button('重新生成').click();await flush()
+  expect(api.createInvitation).not.toHaveBeenCalled()
+  vi.mocked(window.confirm).mockReturnValue(true)
+  vi.mocked(api.createInvitation).mockResolvedValue({...invitation})
+  button('重新生成').click();await flush()
+  expect(api.createInvitation).toHaveBeenCalledWith('w',{replace:true})
+ })
+ it('requires password and reason before submitting ownership transfer',async()=>{
+  await mount();button('交接').click();await flush()
+  expect(api.transferWorkspaceOwnership).not.toHaveBeenCalled()
+  const inputs=root.querySelectorAll<HTMLInputElement>('.transfer-form input')
+  inputs[0]!.value='工作交接';inputs[0]!.dispatchEvent(new Event('input'))
+  inputs[1]!.value='current-password';inputs[1]!.dispatchEvent(new Event('input'))
+  await flush()
+  vi.mocked(api.transferWorkspaceOwnership).mockRejectedValue(new Error('密码不正确'))
+  root.querySelector('.transfer-form')!.dispatchEvent(new Event('submit',{cancelable:true}));await flush()
+  expect(api.transferWorkspaceOwnership).toHaveBeenCalledWith('w','other','工作交接','current-password')
+  expect(root.querySelector<HTMLInputElement>('input[type=password]')?.value).toBe('')
  })
  for(const targetRole of ['member','admin'] as const) {
   it('owner can change '+targetRole+' with explicit confirmation',async()=>{
@@ -103,7 +125,7 @@ describe('WorkspaceInvitationManager',()=>{
  })
  it('confirms revocation and immediately disables sharing a revoked invite',async()=>{
   await mount();vi.mocked(api.createInvitation).mockResolvedValue({...invitation})
-  button('生成邀请').click();await flush()
+  button('生成 / 查看有效邀请').click();await flush()
   vi.spyOn(window,'confirm').mockReturnValue(false);button('撤销').click();await flush()
   expect(api.revokeInvitation).not.toHaveBeenCalled()
   vi.mocked(window.confirm).mockReturnValue(true);vi.mocked(api.revokeInvitation).mockResolvedValue({ok:true})

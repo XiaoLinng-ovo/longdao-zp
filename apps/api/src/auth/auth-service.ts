@@ -141,6 +141,10 @@ export class AuthService {
     return { ...identity, expectedPasswordHash: passwordHash }
   }
 
+  async authorizeOwnershipTransfer(auth: AuthContext | undefined, password: unknown, ipAddress?: string): Promise<void> {
+    await this.proveCurrentPassword(auth, password, ipAddress)
+  }
+
   private newLoginEmail(value: unknown, currentEmail: string): string {
     const email = normalizeVerificationEmail(value)
     if (email === currentEmail) throw authError('新邮箱不能与当前登录邮箱相同', 'VALIDATION_ERROR', 400)
@@ -200,8 +204,12 @@ export class AuthService {
     assertVerificationSecret(this.env)
     const codeHash = hashVerificationCode('registration', data.email, code, this.env.AUTH_OTP_HMAC_SECRET)
     const registered = await this.sessionStore.registerUserWithVerification(input, { codeHash })
-    const session = await this.sessionStore.createSession(registered.user, undefined, input.ipAddress ? { ipAddress: input.ipAddress } : {})
-    return { ...registered, ...session }
+    try {
+      const session = await this.sessionStore.createSession(registered.user, undefined, input.ipAddress ? { ipAddress: input.ipAddress } : {})
+      return { ...registered, ...session }
+    } catch {
+      throw authError('账号已注册完成，请返回登录；无需再次注册或创建企业', 'REGISTRATION_SESSION_FAILED', 503)
+    }
   }
 
   async confirmPasswordReset(input: {

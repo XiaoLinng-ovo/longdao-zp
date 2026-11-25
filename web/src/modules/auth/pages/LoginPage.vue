@@ -15,7 +15,7 @@ const router = useRouter()
 const route = useRoute()
 const addingAccount = computed(() => route.query.addAccount === '1')
 const initialRedirect = safeAuthRedirect(route.query.redirect)
-const joiningWorkspace = ref(Boolean(initialRedirect && /^\/workspaces(?:[?#]|$)/u.test(initialRedirect)))
+const joiningWorkspace = ref(Boolean(initialRedirect && /^\/(?:workspaces|join)(?:[?#]|$)/u.test(initialRedirect)))
 const invitationCode = ref(initialRedirect ? new URL(initialRedirect, window.location.origin).searchParams.get('invite') ?? '' : '')
 const authRedirect = computed(() => {
   if (!joiningWorkspace.value) return safeAuthRedirect(route.query.redirect)
@@ -95,7 +95,7 @@ async function finishLogin(availableWorkspaces: WorkspaceSummary[]) {
     if (onlyWorkspace) await switchWorkspace(onlyWorkspace.id)
   }
   const redirect = safeRedirect()
-  if (redirect && (/^\/workspaces(?:[?#]|$)/u.test(redirect) || authSession.user?.workspaceId)) {
+  if (redirect && (/^\/(?:workspaces|join)(?:[?#]|$)/u.test(redirect) || authSession.user?.workspaceId)) {
     await completeLogin(redirect)
     return
   }

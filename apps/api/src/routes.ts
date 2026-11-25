@@ -510,6 +510,7 @@ const routeMiddleware: Middleware = async (context, next) => {
       email: String(body.email ?? ''),
       password: String(body.password ?? ''),
       companyName: String(body.companyName ?? ''),
+      ...(body.invitationCode === undefined ? {} : { invitationCode: String(body.invitationCode) }),
       ...(body.phone === undefined ? {} : { phone: String(body.phone) }),
       verificationCode: String(body.verificationCode ?? ''),
       ...authClientAddress(context),
@@ -537,6 +538,16 @@ const routeMiddleware: Middleware = async (context, next) => {
   }
 
   const invitationManagement = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/(invitations|members)(?:\/([^/]+))?(?:\/(status|transfer))?$/)
+  if (path === '/api/v1/workspace-invitations/summary' && method === 'POST') {
+    if (!usePostgres) throw new HttpError(503, 'POSTGRES_REQUIRED', '企业邀请需要 PostgreSQL 数据库')
+    const origin = typeof context.req.headers.origin === 'string' ? context.req.headers.origin : undefined
+    if ((origin || originIsStrict()) && !isAllowedRequestOrigin(context.req)) throw new HttpError(403, 'CSRF_ORIGIN_MISMATCH', '请求来源不受信任')
+    context.res.setHeader('cache-control', 'no-store')
+    context.res.setHeader('referrer-policy', 'no-referrer')
+    try { sendSuccess(context, await workspaceInvitations.summary((await readJson(context)).code, authClientAddress(context).ipAddress ?? 'unknown')) }
+    catch (error) { if (error instanceof InvitationError) throw new HttpError(error.status,error.code,error.message); throw error }
+    return
+  }
   const invitationJoin = path === '/api/v1/workspace-invitations/preview' || path === '/api/v1/workspace-invitations/accept'
   if (invitationManagement || invitationJoin) {
     const auth = requireAuth(context)
@@ -564,7 +575,11 @@ const routeMiddleware: Middleware = async (context, next) => {
         if (resource === 'members') {
           if (!id && method === 'GET') { sendSuccess(context, await workspaceInvitations.members(workspaceId, auth.user.id)); return }
           if (id && invitationManagement[4] === 'status' && method === 'PATCH') { sendSuccess(context, await workspaceInvitations.setMemberStatus(workspaceId, auth.user.id, id, await readJson(context))); return }
-          if (id && invitationManagement[4] === 'transfer' && method === 'POST') { sendSuccess(context, await workspaceInvitations.transferOwnership(workspaceId, auth.user.id, id, await readJson(context))); return }
+          if (id && invitationManagement[4] === 'transfer' && method === 'POST') {
+            const body = await readJson(context)
+            await authService.authorizeOwnershipTransfer(auth, body.currentPassword, authClientAddress(context).ipAddress)
+            sendSuccess(context, await workspaceInvitations.transferOwnership(workspaceId, auth.user.id, id, body)); return
+          }
           if (id && !invitationManagement[4] && method === 'PATCH') { sendSuccess(context, await workspaceInvitations.updateMember(workspaceId, auth.user.id, id, await readJson(context))); return }
         }
       }

@@ -23,6 +23,7 @@ import type {
 } from './types.js'
 import { hashPassword, verifyPassword } from './password.js'
 import { normalizeRegistrationInput } from './registration.js'
+import { joinSharedInvitation } from './workspace-invitations.js'
 import { safeHashEqual } from './verification-code.js'
 import { organizationSchemaName } from '../db/tenant-context.js'
 
@@ -437,6 +438,17 @@ export class PostgresSessionRepository implements SessionRepository {
           [data.email, data.name, data.phone, passwordHash, verification.verifiedAt ?? null],
         )
         const user = userResult.rows[0]
+        if (data.invitationCode) {
+          const joined = await joinSharedInvitation(client, data.invitationCode, user.id)
+          const workspace = joined.workspace
+          await client.query(`INSERT INTO user_roles (user_id,role_id) SELECT $1::uuid,id FROM roles WHERE code='recruiter' ON CONFLICT DO NOTHING`, [user.id])
+          await client.query(`INSERT INTO platform_audit_logs (actor_user_id,organization_id,action,metadata) VALUES ($1::uuid,$2::uuid,'platform.user.registered',$3::jsonb)`, [user.id,workspace.id,JSON.stringify({source:'shared_invitation',emailVerified:true})])
+          await client.query('INSERT INTO registration_attempts (email,ip_address,succeeded) VALUES ($1,$2::inet,true)', [data.email,input.ipAddress ?? null])
+          return { result: {
+            user: { id:user.id, ...(user.user_no ? {userNo:user.user_no}:{}), name:user.display_name,email:user.email,role:'recruiter',departmentId:'',workspaceId:workspace.id,workspaceName:workspace.name,workspaceKind:workspace.kind },
+            workspace: { id:workspace.id,name:workspace.name,kind:workspace.kind,status:workspace.status,role:'member',createdAt:iso(workspace.created_at),serviceStatus:workspace.service_status,trialEndsAt:workspace.trial_ends_at ? iso(workspace.trial_ends_at):null,serviceAvailable:true },
+          } satisfies RegisterResult } as const
+        }
         const workspaceResult = await client.query<any>(
           `INSERT INTO organizations (name,kind,created_by,service_status)
            VALUES ($1,'production',$2::uuid,'trial')
