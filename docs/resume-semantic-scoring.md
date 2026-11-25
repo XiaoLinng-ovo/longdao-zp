@@ -4,7 +4,7 @@
 
 - 生产 PostgreSQL 模式下，已有岗位要求的简历评分由 AI Worker 执行。API 的同步处理入口保持任务排队，不再内联产出关键词匹配分数。
 - 有岗位专属评分 Skill 的任务仍只允许 AI Worker 处理，保留规则快照。
-- Worker 配置完整的 OPENAI_BASE_URL、OPENAI_API_KEY、OPENAI_MODEL 后默认使用 OpenAI-compatible 模型。WORKER_USE_LLM_ANALYSIS=false 可以显式关闭调用，但岗位评分会明确失败，不会退回关键词算法。
+- Worker 从 PostgreSQL 读取获准使用的平台或企业模型，不读取 OPENAI_* 环境变量。平台配置在系统管理后台保存，API 与 Worker 共用原 AI_CONFIG_ENCRYPTION_KEY。WORKER_USE_LLM_ANALYSIS=false 可以显式关闭调用，但岗位评分会明确失败，不会退回关键词算法。
 - 数据库任务轮询需 WORKER_DB_POLL=true。没有岗位要求且没有 Skill 时，只做解析，不调用模型、不生成匹配分数。
 - NODE_ENV=test 的内存仓库保留规则模拟，用于既有工作流测试；不代表生产评分链路。
 

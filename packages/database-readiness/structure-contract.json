@@ -547,6 +547,11 @@
       "version": "0109",
       "name": "0109_shared_workspace_invitations.sql",
       "sha256": "4abf5cd31abef9b8e655fe9cc19d53b33efe0f0bde797252814de30150a3af74"
+    },
+    {
+      "version": "0110",
+      "name": "0110_platform_ai_settings.sql",
+      "sha256": "76d706bcf6c1c6eacb7d2203789a2f09069d0dfe9094b0820ade40845dd0fba6"
     }
   ],
   "public": [
@@ -19407,6 +19412,140 @@
             "validated": true,
             "deferrable": false,
             "definition": "PRIMARY KEY (id)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
+      "name": "platform_ai_settings",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "api_key_ciphertext",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "base_url",
+            "type": "text",
+            "default": "''::text",
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "model",
+            "type": "text",
+            "default": "''::text",
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "singleton",
+            "type": "boolean",
+            "default": "true",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "timeout_ms",
+            "type": "integer",
+            "default": "120000",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "updated_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "updated_by",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (singleton)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK (((timeout_ms >= 1) AND (timeout_ms <= 300000)))",
+            "no_inherit": false
+          },
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK (singleton)",
+            "no_inherit": false
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (singleton)",
             "no_inherit": true
           }
         ],

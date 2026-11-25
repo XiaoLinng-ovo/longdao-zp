@@ -1,9 +1,33 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+
 import { describe, it } from 'node:test'
-import { describeBaseUrlHost, describeFetchFailure, readAiEnvSettings, readAiSettings, testAiConnection, updateAiEnvSettings } from './ai-settings.js'
+import { describeBaseUrlHost, describeFetchFailure, readAiSettings, testAiConnection } from './ai-settings.js'
+
+import { loadInterviewAnswerAnalyzerConfig } from '../interviews/answer-analyzer.js'
+import { loadInterviewQuestionGeneratorConfig } from '../interviews/question-generator.js'
+import { loadQuestionSheetGeneratorConfig } from '../interviews/question-sheet-generator.js'
+import { loadJobDescriptionGeneratorConfig } from '../recruiting/job-description-generator.js'
+import { loadJobSpecGeneratorConfig } from '../recruiting/job-spec-generator.js'
+
+describe('database-only AI configuration', () => {
+  it('never borrows legacy process model settings when a database configuration is omitted', async () => {
+    const legacy = { OPENAI_BASE_URL: 'https://ignored.invalid/v1', OPENAI_API_KEY: 'ignored-secret', OPENAI_MODEL: 'ignored-model', OPENAI_TIMEOUT_MS: '10000' }
+    const previous = Object.fromEntries(Object.keys(legacy).map(key => [key, process.env[key]]))
+    Object.assign(process.env, legacy)
+    try {
+      assert.equal(readAiSettings().configured, false)
+      assert.equal((await testAiConnection()).ok, false)
+      for (const load of [loadInterviewAnswerAnalyzerConfig, loadInterviewQuestionGeneratorConfig, loadQuestionSheetGeneratorConfig, loadJobDescriptionGeneratorConfig, loadJobSpecGeneratorConfig]) {
+        assert.throws(() => load(), error => error instanceof Error && !error.message.includes('ignored-secret'))
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+})
 
 describe('AI 模型配置视图', () => {
   it('未配置时明确列出缺失项，且不泄露任何密钥', () => {
@@ -79,7 +103,7 @@ describe('AI 连接自检', () => {
     assert.deepEqual(unauthorized.models, [])
   })
 
-  it('未传地址与密钥时回落到当前生效的进程配置', async () => {
+  it('未传地址与密钥时使用显式传入的数据库配置', async () => {
     let authorization = ''
     const env = { OPENAI_BASE_URL: 'https://env.example.com/v1', OPENAI_API_KEY: 'env-key' }
     const result = await testAiConnection({}, env, async (_input, init) => {
@@ -102,55 +126,6 @@ describe('AI 连接自检', () => {
     assert.equal(describeFetchFailure({ cause: { code: 'ECONNRESET' } }), '连接被对端重置')
   })
 })
-
-describe('AI 模型配置写入', () => {
-  it('把地址、模型与超时写入 .env，密钥只以掩码返回', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'ai-settings-'))
-    const file = join(dir, '.env')
-    try {
-      const saved = await updateAiEnvSettings(file, {
-        OPENAI_BASE_URL: 'https://api.deepseek.com/v1',
-        OPENAI_API_KEY: 'sk-1234567890',
-        OPENAI_MODEL: 'deepseek-chat',
-        OPENAI_TIMEOUT_MS: '30000',
-      })
-      assert.equal(saved.OPENAI_BASE_URL.value, 'https://api.deepseek.com/v1')
-      assert.equal(saved.OPENAI_MODEL.value, 'deepseek-chat')
-      assert.equal(saved.OPENAI_API_KEY.value, 'sk••••90')
-      assert.equal(saved.OPENAI_API_KEY.configured, true)
-
-      const content = await readFile(file, 'utf8')
-      assert.match(content, /OPENAI_BASE_URL=https:\/\/api\.deepseek\.com\/v1/)
-      assert.match(content, /OPENAI_API_KEY=sk-1234567890/)
-
-      const reread = await readAiEnvSettings(file)
-      assert.equal(reread.OPENAI_API_KEY.value, 'sk••••90')
-      assert.equal(process.env.OPENAI_MODEL, 'deepseek-chat')
-    } finally {
-      delete process.env.OPENAI_BASE_URL
-      delete process.env.OPENAI_API_KEY
-      delete process.env.OPENAI_MODEL
-      delete process.env.OPENAI_TIMEOUT_MS
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('拒绝非法地址、内嵌凭据、非正整数超时与换行注入', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'ai-settings-'))
-    const file = join(dir, '.env')
-    try {
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_BASE_URL: 'not-a-url' }), /接口地址必须是合法地址/)
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_BASE_URL: 'ftp://api.example.com' }), /只支持 http 或 https/)
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_BASE_URL: 'https://user:pass@api.example.com' }), /不能包含用户名或密码/)
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_TIMEOUT_MS: '0' }), /超时必须是正整数/)
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_MODEL: 'a\nb' }), /不能包含换行符/)
-      await assert.rejects(updateAiEnvSettings(file, { OPENAI_UNKNOWN: 'x' } as never), /不支持的模型配置项/)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-})
-
 
 describe('AI connection response regression', () => {
   it('normalizes bare origins to /v1/models without retries', async () => {

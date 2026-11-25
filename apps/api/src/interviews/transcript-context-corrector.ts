@@ -386,7 +386,7 @@ export class TranscriptContextCorrector {
     return { corrections: [...first.corrections, ...second.corrections], uncertainties: [...first.uncertainties, ...second.uncertainties] }
   }
 
-  async correct(input: TranscriptContextCorrectionInput, env: NodeJS.ProcessEnv = process.env): Promise<TranscriptContextCorrectionResult> {
+  async correct(input: TranscriptContextCorrectionInput, env: NodeJS.ProcessEnv = {}): Promise<TranscriptContextCorrectionResult> {
     return new TranscriptContextCorrector(createBillingFetch(env, this.fetchImpl)).correctWithEnv(input,env)
   }
   private async correctWithEnv(input: TranscriptContextCorrectionInput, env: NodeJS.ProcessEnv): Promise<TranscriptContextCorrectionResult> {

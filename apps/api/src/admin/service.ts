@@ -1,9 +1,9 @@
-import { EnterpriseAiStore } from '@smartrecruit-pro/enterprise-ai';
+import { EnterpriseAiStore, PlatformAiStore, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
 import { randomInt, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashPassword } from '../auth/password.js';
 import { readDingTalkEnvSettings, readResumeVirusScanSetting, updateDingTalkEnvSettings, updateResumeVirusScanSetting, type DingTalkEnvPatch } from './dingtalk-env-settings.js';
-import { readAiEnvSettings, readAiSettings, testAiConnection, updateAiEnvSettings, type AiConnectionTestInput, type AiConnectionTestResult, type AiEnvPatch, type AiSettingsResponse } from './ai-settings.js';
+import { testAiConnection, type AiConnectionTestInput, type AiConnectionTestResult, type AiEnvPatch, type AiSettingsResponse } from './ai-settings.js';
 import { resolveEnvFilePath } from './env-file.js';
 import { readChannelConnectionInput, readChannelSettings, updateChannelSettings, type ChannelSettings } from '../integrations/channels/settings.js';
 import { createChannelConnector } from '../integrations/channels/registry.js';
@@ -695,16 +695,14 @@ export class AdminService {
 
   /**
    * 模型连接信息：地址、模型、超时可在后台维护，密钥只返回掩码。
-   * 连接状态用于展示当前进程实际生效的配置。
+   * 连接状态与 API、Worker 使用同一条数据库记录。
    */
   async getAiSettings(): Promise<AiSettingsResponse> {
-    return { ...readAiSettings(), env: await readAiEnvSettings(resolveEnvFilePath()) }
+    return new PlatformAiStore(this.pool).get()
   }
 
   async updateAiSettings(patch: AiEnvPatch, actorId: string, requestId?: string): Promise<AiSettingsResponse> {
-    const env = await updateAiEnvSettings(resolveEnvFilePath(), patch)
-    await this.appendAudit(actorId, 'admin.ai_settings.update', 'env_file', null, requestId, { keys: Object.keys(patch) })
-    return { ...readAiSettings(), env }
+    return new PlatformAiStore(this.pool).save(patch, actorId, requestId)
   }
 
   async getAiSharingSettings(): Promise<AiSharingSettings> {
@@ -756,8 +754,10 @@ export class AdminService {
   }
 
   /** 用给定（或当前生效）的连接拉取模型列表，供「先测试再保存模型」使用。 */
-  testAiConnection(input: AiConnectionTestInput = {}): Promise<AiConnectionTestResult> {
-    return testAiConnection(input)
+  async testAiConnection(input: AiConnectionTestInput = {}): Promise<AiConnectionTestResult> {
+    const env = await new PlatformAiStore(this.pool).connectionEnv()
+    assertAiEndpointAllowed(input.baseUrl?.trim() || env.OPENAI_BASE_URL || '')
+    return testAiConnection(input, env)
   }
 
   async getChannelSettings(): Promise<ChannelSettings> {

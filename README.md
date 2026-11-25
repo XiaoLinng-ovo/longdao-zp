@@ -145,20 +145,13 @@ python -m venv .venv
 
 ## 大模型简历分析
 
-默认不配置模型时使用内置规则评分，不会向任何第三方发送简历内容。要启用模型分析，在管理后台「AI 模型」填写并保存，或直接设置服务端环境变量：
+平台默认模型仅保存在 PostgreSQL 的 public.platform_ai_settings 中；不再读取、导入或写入 OPENAI_* 环境变量及 .env 模型配置。系统管理员在管理后台「AI 模型」填写接口地址、API Key、模型和超时，保存后 API 与 Worker 的后续调用直接读取数据库，无需重启。
 
-```bash
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=你的模型密钥
-OPENAI_MODEL=deepseek-chat
-OPENAI_TIMEOUT_MS=30000
-```
+API Key 加密入库，读取接口只返回固定掩码。API 与 Worker 必须使用相同且稳定的 AI_CONFIG_ENCRYPTION_KEY；生产环境还需设置 AI_ALLOWED_BASE_URL_ORIGINS 精确 HTTPS 来源白名单。这两项是服务器安全配置，不是模型设置。升级前先备份数据库和原加密主密钥，按生产维护流程应用迁移 0110；旧环境变量配置不会自动导入，需在后台重新保存。
 
-四项齐全才会启用。管理后台保存后写入 `.env`（`ENV_FILE_PATH` 优先，其次 `apps/api/.env`、仓库根 `.env`）并立即对当前进程生效，无需重启；读取接口只返回掩码，不回显密钥原文。
+企业需获得平台授权并选择平台模型，也可使用企业自配模型。未配置、密钥无法解密或请求失败时明确报错，不会借用旧环境变量或以关键词评分冒充 AI。没有岗位要求及评分 Skill 的基本解析可不调用模型。
 
-服务使用 OpenAI 兼容的 `chat/completions` 接口（连通性自检走 `/models`），可替换为 DeepSeek、通义千问、OpenAI 等兼容服务。密钥只保存在 API/Worker 服务器上。
-
-启用后，在「简历库」上传 PDF/DOCX/图片简历即可获得模型生成的匹配评分、优势、风险和建议面试题；模型未配置、请求失败或返回格式不符时自动退回规则评分，招聘流程不会中断。
+服务使用 OpenAI 兼容的 chat/completions 接口，连接测试仅验证 models 列表，实际生成仍需验证。详细升级步骤见 [平台模型 PostgreSQL 配置](docs/platform-ai-postgresql.md)。
 
 ## 常见问题
 

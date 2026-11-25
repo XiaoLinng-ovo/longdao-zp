@@ -32,7 +32,7 @@ const required = (value: string | undefined) => value?.trim() || undefined
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const isText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 
-export function loadInterviewAnswerAnalyzerConfig(env: NodeJS.ProcessEnv = process.env): InterviewAnswerAnalyzerConfig {
+export function loadInterviewAnswerAnalyzerConfig(env: NodeJS.ProcessEnv = {}): InterviewAnswerAnalyzerConfig {
   const baseUrl = required(env.OPENAI_BASE_URL); const apiKey = required(env.OPENAI_API_KEY); const model = required(env.OPENAI_MODEL)
   // 空值必须回落到默认值，否则会被当成 0 判为非法配置。
   const timeoutMs = Number(env.OPENAI_TIMEOUT_MS?.trim() || '120000')

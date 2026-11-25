@@ -15,6 +15,14 @@ export interface EnterpriseAiView {
   apiKeyConfigured: boolean; missing: string[]; updatedAt: string | null;
   env: Record<'OPENAI_BASE_URL' | 'OPENAI_API_KEY' | 'OPENAI_MODEL' | 'OPENAI_TIMEOUT_MS', { value: string; configured: boolean; masked: boolean }>
 }
+export type PlatformAiView = Omit<EnterpriseAiView, 'organizationId' | 'scope'> & { scope: 'platform' }
+export class PlatformAiStore {
+  constructor(pool: DatabasePool, masterKey?: string)
+  get(): Promise<PlatformAiView>
+  connectionEnv(): Promise<Record<string, string>>
+  runtimeEnv(): Promise<Record<string, string>>
+  save(patch: unknown, actorId: string, requestId?: string): Promise<PlatformAiView>
+}
 export class EnterpriseAiStore {
   constructor(pool: DatabasePool, masterKey?: string)
   assertAdmin(organizationId: string | undefined, actorId: string, executor?: Queryable, lock?: boolean): Promise<string>

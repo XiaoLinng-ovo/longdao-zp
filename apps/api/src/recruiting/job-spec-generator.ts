@@ -56,7 +56,7 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-export function loadJobSpecGeneratorConfig(env: NodeJS.ProcessEnv = process.env): JobSpecGeneratorConfig {
+export function loadJobSpecGeneratorConfig(env: NodeJS.ProcessEnv = {}): JobSpecGeneratorConfig {
   const baseUrl = optionalText(env.OPENAI_BASE_URL)
   const apiKey = optionalText(env.OPENAI_API_KEY)
   const model = optionalText(env.OPENAI_MODEL)
@@ -66,7 +66,7 @@ export function loadJobSpecGeneratorConfig(env: NodeJS.ProcessEnv = process.env)
       'Job spec generation requires OPENAI_BASE_URL, OPENAI_API_KEY, and OPENAI_MODEL.',
     )
   }
-  // 空值（例如 .env 里被写成 OPENAI_TIMEOUT_MS=）必须回落到默认值，否则会被当成 0 判为非法。
+  // 空超时使用默认值，避免 Number 将其解释为 0。
   const timeoutMs = Number(optionalText(env.OPENAI_TIMEOUT_MS) ?? '120000')
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new JobSpecGenerationError('AI_NOT_CONFIGURED', 'OPENAI_TIMEOUT_MS must be a positive integer.')

@@ -201,7 +201,7 @@ void describe('worker health', () => {
     assert.equal(state.snapshot().externalDependencies.clamav, 'not_configured')
   })
 
-  it('loads one OpenAI-compatible model only when all required settings exist', () => {
+  it('ignores legacy model environment settings', () => {
     const disabled = loadConfig({ OPENAI_BASE_URL: 'https://llm.example/v1' }, 'test-host')
     const enabled = loadConfig({
       OPENAI_BASE_URL: 'https://llm.example/v1/',
@@ -209,11 +209,9 @@ void describe('worker health', () => {
       OPENAI_MODEL: 'resume-model',
       OPENAI_TIMEOUT_MS: '45000',
     }, 'test-host')
-    assert.equal(disabled.openai, undefined)
-    assert.deepEqual(enabled.openai, {
-      baseUrl: 'https://llm.example/v1/', apiKey: 'secret', model: 'resume-model', timeoutMs: 45_000,
-    })
-    assert.equal(enabled.leaseDurationMs, 75_000)
+    assert.equal('openai' in disabled, false)
+    assert.equal('openai' in enabled, false)
+    assert.equal(enabled.leaseDurationMs, 60_000)
     assert.equal(enabled.useLlmAnalysis, true)
     assert.equal(loadConfig({ WORKER_USE_LLM_ANALYSIS: 'true' }, 'test-host').useLlmAnalysis, true)
     assert.equal(loadConfig({ OPENAI_BASE_URL: 'https://llm.example/v1', OPENAI_API_KEY: 'secret', OPENAI_MODEL: 'resume-model', WORKER_USE_LLM_ANALYSIS: 'false' }, 'test-host').useLlmAnalysis, false)

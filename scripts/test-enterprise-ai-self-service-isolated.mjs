@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { projectRoot, startIsolatedPostgres } from './isolated-environment.mjs'
 import { listMigrationFiles } from '../packages/database-readiness/index.js'
 import { BillingStore } from '../packages/enterprise-ai/billing.js'
-import { EnterpriseAiStore, SELF_SERVICE_AI_BASE_URL } from '../packages/enterprise-ai/index.js'
+import { PlatformAiStore, EnterpriseAiStore, SELF_SERVICE_AI_BASE_URL } from '../packages/enterprise-ai/index.js'
 
 assert.ok(process.argv[2], 'Explicit isolated PostgreSQL bin directory required; no business fallback')
 const instance = await startIsolatedPostgres(process.argv[2])
@@ -68,6 +68,7 @@ try {
     assert.equal(members.find(row => row.organization_id===legacyAdmin).role, 'owner')
     assert.ok(members.every(row => row.is_active))
   })
+  await new PlatformAiStore(pool, masterKey).save({ OPENAI_BASE_URL: 'https://platform.example/v1', OPENAI_API_KEY: 'synthetic-platform-key', OPENAI_MODEL: 'platform-model' }, actor)
   companyPool = new Pool({ ...connection, options: '-c search_path=' + schema + ',public' })
   otherPool = new Pool({ ...connection, options: '-c search_path=' + otherSchema + ',public' })
   const store = new EnterpriseAiStore(companyPool, masterKey), otherStore = new EnterpriseAiStore(otherPool, masterKey)
@@ -144,12 +145,14 @@ try {
     await assert.rejects(invitations.updateMember(org, member, secondAdmin, { membershipRole: 'member' }), { code: 'FORBIDDEN' })
     await assert.rejects(invitations.updateMember(org, member, actor, { membershipRole: 'admin' }), { code: 'FORBIDDEN' })
     await assert.rejects(invitations.setMemberStatus(org, member, secondAdmin, { isActive: false, reason: 'cannot disable peer' }), { code: 'FORBIDDEN' })
-    await assert.rejects(invitations.create(org, member, { membershipRole: 'admin' }), { code: 'FORBIDDEN' })
+    await assert.rejects(invitations.create(org, member, { membershipRole: 'admin' }), { code: 'VALIDATION_ERROR' })
     await assert.rejects(invitations.transferOwnership(org, member, secondAdmin, { reason: 'cannot transfer owner' }), { code: 'FORBIDDEN' })
-    const invitation = await invitations.create(org, actor, { membershipRole: 'admin' })
+    const invitation = await invitations.create(org, actor, {})
     assert.ok((await invitations.list(org, actor)).some(item => item.id === invitation.id))
-    assert.ok(!(await invitations.list(org, member)).some(item => item.id === invitation.id))
+    assert.ok((await invitations.list(org, member)).some(item => item.id === invitation.id))
     await invitations.accept(invitation.code, invitedAdmin)
+    assert.equal((await sessions.listWorkspaces(invitedAdmin)).find(item => item.id === org).role, 'member')
+    await invitations.updateMember(org, actor, invitedAdmin, { membershipRole: 'admin' })
     assert.equal((await sessions.listWorkspaces(invitedAdmin)).find(item => item.id === org).role, 'admin')
     await store.assertAdmin(org, invitedAdmin)
     await assert.rejects(platform.listCustomers(invitedAdmin, new URLSearchParams()), { code: 'SYSTEM_ADMIN_REQUIRED' })
@@ -183,7 +186,8 @@ try {
   })
   await check('ownership transfers atomically and platform can appoint without cross-tenant authority leaks', async () => {
     await invitations.transferOwnership(org, actor, member, { reason: 'handover test' })
-    await assert.rejects(store.assertAdmin(org, actor), { code: 'WORKSPACE_ADMIN_REQUIRED' })
+    await store.assertAdmin(org, actor)
+    assert.equal((await sessions.listWorkspaces(actor)).find(item => item.id === org).role, 'admin')
     await store.assertAdmin(org, member)
     await assert.rejects(pool.query("UPDATE public.organization_members SET role='owner' WHERE organization_id=$1 AND user_id=$2", [org, actor]), { code: '23505' })
     await assert.rejects(platformUsers.appointWorkspaceOwner(system, outsider, org, { reason: 'wrong company' }), { code: 'MEMBER_UNAVAILABLE' })

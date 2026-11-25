@@ -128,7 +128,7 @@ function required(value: string | undefined): string | undefined {
 }
 
 export function loadInterviewQuestionGeneratorConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = {},
 ): InterviewQuestionGeneratorConfig {
   const baseUrl = required(env.OPENAI_BASE_URL)
   const apiKey = required(env.OPENAI_API_KEY)

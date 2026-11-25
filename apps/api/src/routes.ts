@@ -9,8 +9,8 @@ import { PlatformOperatorsService } from './admin/platform-operators.js';
 import { OperationalRecoveryService } from './admin/operational-recovery.js';
 
 import { mapTrialQuotaError, TrialQuotaService } from './platform/trial-quota.js';
-import { EnterpriseAiStore, EnterpriseAiError, validateEnterpriseAiPatch, validateSelfServiceAiPatch, SELF_SERVICE_AI_BASE_URL, assertAiEndpointAllowed, meterAiOperation, createBillingFetch } from '@smartrecruit-pro/enterprise-ai';
-import { readAiSettings, testAiConnection } from './admin/ai-settings.js';
+import { EnterpriseAiStore, PlatformAiStore, EnterpriseAiError, validateEnterpriseAiPatch, validateSelfServiceAiPatch, SELF_SERVICE_AI_BASE_URL, assertAiEndpointAllowed, meterAiOperation, createBillingFetch } from '@smartrecruit-pro/enterprise-ai';
+import { testAiConnection } from './admin/ai-settings.js';
 import { decodePdfAttachment, readSmtpEnvSettings, renderRichEmailHtml, renderMarkdownEmail, sendSmtpMail, testSmtpConnection, updateSmtpEnvSettings } from './integrations/email/smtp.js';
 import type { Middleware } from './http.js';
 import { HttpError } from './http.js';
@@ -22,7 +22,6 @@ import { offerTemplateFieldValues } from './recruiting/offer-template-fields.js'
 import { RecruitingWorkflowError } from './recruiting/workflow.js';
 import { NormalizedRecruitingRepository, RepositoryNotFoundError } from './recruiting/repositories/postgres-repository.js';
 import { AdminService, AdminConflictError, AdminNotFoundError, AdminValidationError, type AiPromptSkillTarget } from './admin/service.js';
-import { AiSettingsValidationError } from './admin/ai-settings.js';
 import { ChannelSettingsValidationError } from './integrations/channels/settings.js';
 import type { ChannelProvider } from './integrations/channels/types.js';
 import type { Pool } from 'pg';
@@ -344,7 +343,15 @@ const routeMiddleware: Middleware = async (context, next) => {
     const voice = await probeVoiceHealth()
     const funasrStatus = voice.funasr, fasterWhisperStatus = voice.fasterWhisper
     const ocrStatus = process.env.OCR_SERVICE_URL?.trim() ? 'ok' : 'unavailable'
-    const llmStatus = readAiSettings().configured ? 'ok' : 'not_configured'
+    let llmStatus = 'not_configured'
+    if (usePostgres) {
+      try {
+        await new PlatformAiStore(pool).runtimeEnv()
+        llmStatus = 'ok'
+      } catch (error) {
+        llmStatus = error instanceof EnterpriseAiError && error.code === 'PLATFORM_AI_NOT_CONFIGURED' ? 'not_configured' : 'unavailable'
+      }
+    }
     const voiceReady = voice.capabilities.chunks
     const degradedReasons: string[] = []
     if (!voiceReady) degradedReasons.push('语音转写主引擎 FunASR 未就绪，备用引擎不能替代实时与片段转写')
@@ -1146,12 +1153,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (path === '/api/v1/admin/ai-settings' && method === 'GET') { requireSystemAdministrator(auth); context.res.setHeader('cache-control', 'no-store'); sendSuccess(context, await adminService.getAiSettings()); return; }
     if (path === '/api/v1/admin/ai-settings' && method === 'PATCH') {
       requireSystemAdministrator(auth);
-      try {
-        sendSuccess(context, await adminService.updateAiSettings(await readJson(context), auth.user.id, context.requestId));
-      } catch (error) {
-        if (error instanceof AiSettingsValidationError) throw new HttpError(400, 'VALIDATION_ERROR', error.message);
-        throw error;
-      }
+      sendSuccess(context, await adminService.updateAiSettings(await readJson(context), auth.user.id, context.requestId));
       return;
     }
     if (path === '/api/v1/admin/ai-sharing' && method === 'GET') {
@@ -1178,11 +1180,11 @@ const routeMiddleware: Middleware = async (context, next) => {
       if (body.apiKey !== undefined) patch.OPENAI_API_KEY = body.apiKey;
       if (body.timeoutMs !== undefined) patch.OPENAI_TIMEOUT_MS = String(body.timeoutMs);
       validateEnterpriseAiPatch(patch);
-      sendSuccess(context, await testAiConnection({
+      sendSuccess(context, await adminService.testAiConnection({
         ...(typeof body.baseUrl === 'string' ? { baseUrl: body.baseUrl } : {}),
         ...(typeof body.apiKey === 'string' ? { apiKey: body.apiKey } : {}),
         ...(body.timeoutMs !== undefined ? { timeoutMs: Number(body.timeoutMs) } : {}),
-      }, process.env, (url, init) => fetch(url, { ...init, redirect: 'error' }))); return;
+      })); return;
     }
     if (path === '/api/v1/admin/channel-settings' && method === 'GET') { requireSystemAdministrator(auth); sendSuccess(context, await adminService.getChannelSettings()); return; }
     if (path === '/api/v1/admin/channel-settings' && method === 'PATCH') {

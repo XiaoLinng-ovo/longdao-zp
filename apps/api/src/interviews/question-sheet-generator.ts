@@ -70,7 +70,7 @@ function modelRequestFailure(error: unknown, config: QuestionSheetGeneratorConfi
     : `${label}连接失败，请检查模型服务或网络后重试。`, error)
 }
 
-export function loadQuestionSheetGeneratorConfig(env: NodeJS.ProcessEnv = process.env): QuestionSheetGeneratorConfig {
+export function loadQuestionSheetGeneratorConfig(env: NodeJS.ProcessEnv = {}): QuestionSheetGeneratorConfig {
   const baseUrl = text(env.OPENAI_BASE_URL)
   const apiKey = text(env.OPENAI_API_KEY)
   const model = text(env.OPENAI_MODEL)

@@ -344,7 +344,7 @@ export class QuestionSheetService {
       recordingScore,
     }
     try {
-      const env = this.dependencies.resolveAiEnv ? await this.dependencies.resolveAiEnv(applicationId) : process.env
+      const env = this.dependencies.resolveAiEnv ? await this.dependencies.resolveAiEnv(applicationId) : {}
       const config = loadQuestionSheetGeneratorConfig(env)
       const generator = this.dependencies.createStageReview
         ? this.dependencies.createStageReview(config)

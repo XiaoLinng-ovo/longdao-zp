@@ -37,19 +37,25 @@ function scope(id) {
 }
 function encryptionKey(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/u.test(value) || Buffer.from(value, 'base64').length !== 32 || Buffer.from(value, 'base64').toString('base64') !== value) {
-    throw new EnterpriseAiError('AI_ENCRYPTION_KEY_UNAVAILABLE', '企业 AI 加密主密钥未配置或格式无效，请联系平台管理员', 503)
+    throw new EnterpriseAiError('AI_ENCRYPTION_KEY_UNAVAILABLE', 'AI 加密主密钥未配置或格式无效，请联系平台管理员', 503)
   }
   return Buffer.from(value, 'base64')
 }
 // AAD binds ciphertext to an organization; copying a database value between tenants cannot decrypt it.
 export function encryptApiKey(secret, organizationId, masterKey) {
+  return encryptSecret(secret, `enterprise-ai:v1:${scope(organizationId)}`, masterKey)
+}
+function encryptSecret(secret, aad, masterKey) {
   const nonce = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(masterKey), nonce)
-  cipher.setAAD(Buffer.from(`enterprise-ai:v1:${scope(organizationId)}`))
+  cipher.setAAD(Buffer.from(aad))
   const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()])
   return ['v1', nonce.toString('base64'), cipher.getAuthTag().toString('base64'), encrypted.toString('base64')].join('.')
 }
 export function decryptApiKey(value, organizationId, masterKey) {
+  return decryptSecret(value, `enterprise-ai:v1:${scope(organizationId)}`, masterKey)
+}
+function decryptSecret(value, aad, masterKey) {
   const key = encryptionKey(masterKey)
   try {
     const parts = value.split('.')
@@ -57,12 +63,12 @@ export function decryptApiKey(value, organizationId, masterKey) {
     const nonce = Buffer.from(parts[1], 'base64'), tag = Buffer.from(parts[2], 'base64')
     if (nonce.length !== 12 || tag.length !== 16) throw new Error('invalid ciphertext')
     const cipher = createDecipheriv('aes-256-gcm', key, nonce)
-    cipher.setAAD(Buffer.from(`enterprise-ai:v1:${scope(organizationId)}`))
+    cipher.setAAD(Buffer.from(aad))
     cipher.setAuthTag(tag)
     return Buffer.concat([cipher.update(Buffer.from(parts[3], 'base64')), cipher.final()]).toString('utf8')
   } catch {
     // Never include ciphertext, credentials, or provider responses in this error.
-    throw new EnterpriseAiError('AI_SECRET_DECRYPTION_FAILED', '企业 AI 密钥无法解密，请检查平台主密钥备份或重新保存企业密钥', 503)
+    throw new EnterpriseAiError('AI_SECRET_DECRYPTION_FAILED', 'AI 密钥无法解密，请检查平台主密钥备份或重新保存模型密钥', 503)
   }
 }
 export function validateEnterpriseAiPatch(patch) {
@@ -108,7 +114,7 @@ function toView(id, row) {
     missing, env, updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null }
 }
 /** Resolve the single platform-managed model configuration used by every enterprise. */
-function platformRuntimeEnv(env = process.env) {
+function platformRuntimeEnv(env) {
   const baseUrl = env.OPENAI_BASE_URL?.trim() ?? ''
   const apiKey = env.OPENAI_API_KEY?.trim() ?? ''
   const model = env.OPENAI_MODEL?.trim() ?? ''
@@ -116,7 +122,7 @@ function platformRuntimeEnv(env = process.env) {
   if (!baseUrl || !apiKey || !model || !/^\d+$/u.test(timeout) || Number(timeout) < 1) {
     throw new EnterpriseAiError('PLATFORM_AI_NOT_CONFIGURED', '平台管理员尚未完成 AI 配置，请联系平台管理员', 503)
   }
-  assertAiEndpointAllowed(baseUrl, env)
+  assertAiEndpointAllowed(baseUrl)
   return {
     OPENAI_BASE_URL: normalizeAiBaseUrl(baseUrl),
     OPENAI_API_KEY: apiKey,
@@ -146,6 +152,60 @@ function selfServiceRuntimeEnv(id, row, masterKey) {
   return enterpriseRuntimeEnv(id, {
     ...row, base_url: SELF_SERVICE_AI_BASE_URL, timeout_ms: Number(selfServiceTimeoutMs),
   }, masterKey, { NODE_ENV: 'production', AI_ALLOWED_BASE_URL_ORIGINS: SELF_SERVICE_AI_BASE_URL })
+}
+
+function platformView(row) {
+  const { organizationId, ...view } = toView(null, row)
+  return { ...view, scope: 'platform' }
+}
+
+/** Global configuration is database-only, including when accessed through a tenant pool. */
+export class PlatformAiStore {
+  constructor(pool, masterKey = process.env.AI_CONFIG_ENCRYPTION_KEY) { this.pool = pool; this.masterKey = masterKey }
+  async get() {
+    const result = await this.pool.query('SELECT * FROM public.platform_ai_settings WHERE singleton = true')
+    return platformView(result.rows[0])
+  }
+  async connectionEnv() {
+    const result = await this.pool.query('SELECT * FROM public.platform_ai_settings WHERE singleton = true')
+    const row = result.rows[0]
+    return {
+      OPENAI_BASE_URL: row?.base_url ?? '',
+      OPENAI_API_KEY: row?.api_key_ciphertext ? decryptSecret(row.api_key_ciphertext, 'platform-ai:v1:default', this.masterKey) : '',
+      OPENAI_MODEL: row?.model ?? '',
+      OPENAI_TIMEOUT_MS: String(row?.timeout_ms ?? 120000),
+    }
+  }
+  async runtimeEnv() {
+    return platformRuntimeEnv(await this.connectionEnv())
+  }
+  async save(patch, actorId, requestId) {
+    validateEnterpriseAiPatch(patch)
+    encryptionKey(this.masterKey)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      // Lock also serializes competing first inserts, when there is no row to lock yet.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('platform-ai-settings', 0))")
+      const current = (await client.query('SELECT * FROM public.platform_ai_settings WHERE singleton = true FOR UPDATE')).rows[0]
+      const baseUrl = normalizeAiBaseUrl(patch.OPENAI_BASE_URL ?? current?.base_url ?? '')
+      assertAiEndpointAllowed(baseUrl)
+      const secret = patch.OPENAI_API_KEY === undefined ? current?.api_key_ciphertext ?? null
+        : patch.OPENAI_API_KEY.trim() ? encryptSecret(patch.OPENAI_API_KEY.trim(), 'platform-ai:v1:default', this.masterKey) : null
+      const result = await client.query(`INSERT INTO public.platform_ai_settings (singleton, base_url, api_key_ciphertext, model, timeout_ms, updated_by)
+        VALUES (true, $1, $2, $3, $4, $5::uuid) ON CONFLICT (singleton) DO UPDATE SET
+        base_url=excluded.base_url, api_key_ciphertext=excluded.api_key_ciphertext, model=excluded.model,
+        timeout_ms=excluded.timeout_ms, updated_by=excluded.updated_by, updated_at=now() RETURNING *`,
+        [baseUrl, secret, patch.OPENAI_MODEL?.trim() ?? current?.model ?? '',
+          patch.OPENAI_TIMEOUT_MS === undefined ? current?.timeout_ms ?? 120000 : Number(patch.OPENAI_TIMEOUT_MS), actorId])
+      await client.query(`INSERT INTO public.platform_audit_logs (actor_user_id, action, request_id, metadata)
+        VALUES ($1::uuid, 'admin.ai_settings.update', $2, $3::jsonb)`,
+        [actorId, requestId ?? null, JSON.stringify({ keys: Object.keys(patch), keyAction: patch.OPENAI_API_KEY === undefined ? 'preserve' : secret ? 'replace' : 'clear' })])
+      await client.query('COMMIT')
+      return platformView(result.rows[0])
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
 }
 
 /** Resolve the configuration permitted for this enterprise. Platform sharing is explicit. */
@@ -190,7 +250,7 @@ export class EnterpriseAiStore {
         const source = (await this.pool.query(`SELECT * FROM "${registry.schema_name}".enterprise_ai_settings WHERE organization_id=$1`, [sourceId])).rows[0]
         return bindBillingEnv(enterpriseRuntimeEnv(sourceId, source, this.masterKey), this.pool, id)
       }
-      return bindBillingEnv(platformRuntimeEnv(), this.pool, id)
+      return bindBillingEnv(await new PlatformAiStore(this.pool, this.masterKey).runtimeEnv(), this.pool, id)
     }
     throw new EnterpriseAiError('ENTERPRISE_AI_NOT_CONFIGURED', '请联系企业管理员配置 AI 模型，或选择已获平台授权的模型', 409)
   }

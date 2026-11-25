@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { test } from 'node:test'
-import { EnterpriseAiStore, encryptApiKey, decryptApiKey, validateEnterpriseAiPatch, validateSelfServiceAiPatch, SELF_SERVICE_AI_BASE_URL, assertAiEndpointAllowed } from './index.js'
+import { PlatformAiStore, EnterpriseAiStore, encryptApiKey, decryptApiKey, validateEnterpriseAiPatch, validateSelfServiceAiPatch, SELF_SERVICE_AI_BASE_URL, assertAiEndpointAllowed } from './index.js'
+let platformRow
 const a = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', b = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 const key = randomBytes(32).toString('base64'), secret = 'tenant-only-test-secret'
 const code = expected => error => error.code === expected && !error.message.includes(secret)
@@ -17,6 +18,15 @@ async function withPlatformEnv(values, action) {
     }
   }
 }
+
+// Produce platform-scoped ciphertext through the real writer, never enterprise AAD.
+await new PlatformAiStore({connect:async()=>({release(){},query:async(sql,values)=>{
+  if (sql.includes('INSERT INTO public.platform_ai_settings')) {
+    platformRow={base_url:values[0],api_key_ciphertext:values[1],model:values[2],timeout_ms:values[3]}
+    return {rows:[platformRow]}
+  }
+  return {rows:[]}
+}})},key).save({OPENAI_BASE_URL:'https://platform.example/v1',OPENAI_API_KEY:'platform-secret',OPENAI_MODEL:'platform-model',OPENAI_TIMEOUT_MS:'2000'},b)
 
 test('AES-GCM uses randomized ciphertext and roundtrips without storing plaintext', () => {
   const first = encryptApiKey(secret, a, key), second = encryptApiKey(secret, a, key)
@@ -50,6 +60,7 @@ function fakePool(admin = true, source = 'enterprise') {
     if (sql.includes('FROM public.organizations')) return {rows: [{use_platform_ai: true, ai_model_source: source}]}
     if (sql.includes('FROM organizations')) return {rows: [{id: values[0], ai_model_source: source, use_platform_ai: true, platform_ai_source_organization_id: null,
       own_self_service_enabled: row?.self_service_enabled, own_base_url: row?.base_url, own_api_key_ciphertext: row?.api_key_ciphertext, own_model: row?.model}]}
+    if (sql.includes('public.platform_ai_settings')) return {rows: platformRow ? [platformRow] : []}
     if (sql.startsWith('SELECT')) return {rows: row ? [row] : []}
     if (sql.includes('INSERT INTO enterprise_ai_settings')) { row = {organization_id:values[0],base_url:values[1],api_key_ciphertext:values[2],model:values[3],timeout_ms:values[4],self_service_enabled:values[6]}; return {rows:[row]} }
     if (sql.includes('INSERT INTO audit_logs')) audit = values
@@ -65,6 +76,7 @@ test('missing tenant context is rejected instead of selecting global configurati
 test('explicitly authorized platform-source enterprises share platform configuration', async () => {
   await withPlatformEnv({OPENAI_BASE_URL:'https://platform.example/v1',OPENAI_API_KEY:'platform-secret',OPENAI_MODEL:'platform-model',OPENAI_TIMEOUT_MS:'2000'}, async () => {
     const store = new EnterpriseAiStore({query:async (sql, values) => {
+      if (sql.includes('public.platform_ai_settings')) return {rows: [platformRow]}
       assert.match(sql, /FROM organizations/u)
       return {rows:[{id: values[0], ai_model_source: 'platform', use_platform_ai: true, platform_ai_source_organization_id: null}]}
     }},key)
@@ -76,8 +88,8 @@ test('explicitly authorized platform-source enterprises share platform configura
   })
 })
 test('an active enterprise without platform configuration fails explicitly', async () => {
-  await withPlatformEnv({}, async () => {
-    const store = new EnterpriseAiStore({query:async()=>({rows:[{id:a, ai_model_source: 'platform', use_platform_ai: true, platform_ai_source_organization_id: null}]})},key)
+  await withPlatformEnv({OPENAI_BASE_URL:'https://ignored.example/v1',OPENAI_API_KEY:'ignored-key',OPENAI_MODEL:'ignored-model'}, async () => {
+    const store = new EnterpriseAiStore({query:async(sql)=>({rows:sql.includes('public.platform_ai_settings') ? [] : [{id:a, ai_model_source: 'platform', use_platform_ai: true, platform_ai_source_organization_id: null}]})},key)
     await assert.rejects(store.runtimeEnv(a),code('PLATFORM_AI_NOT_CONFIGURED'))
   })
 })

@@ -15,7 +15,7 @@ test -e deploy/runtime.production.env || cp deploy/runtime.production.env.exampl
 - 企业 AI 和支付配置分别使用 `AI_CONFIG_ENCRYPTION_KEY`、`PAYMENT_ENCRYPTION_KEY`，各用 `openssl rand -base64 32` 单独生成并妥善备份。迁移旧库时必须保留原值，否则无法解密已保存的配置。完整可选配置参考根目录 `.env.example`，但不要将其中开发用的 S3、数据库默认值直接用于生产。
 - 迁移现有系统：先备份并在隔离环境验证恢复 PostgreSQL、对象文件和原运行配置。保留原有认证、加密和外部服务密钥；保留对象键和登记位置。若旧记录登记的是 Windows 本地存储路径，不要只复制附件并硬改路径。应先核对存储位置登记及历史读写映射并验证回放，否则就绪检查可能拒绝启动，或历史附件无法读取。
 - 网页与 `/api` 通过同一个网站入口访问时，来源自动校验。正式域名 `https://zhaopin.longdaoec.com` 已写入部署模板的 `ALLOWED_ORIGINS`，后续部署应保留；其他跨域前端可追加精确来源，不使用通配符。已有的 `deploy/runtime.production.env` 不会被模板覆盖，应一次性合并该值并保留其他原配置。即使白名单尚未包含当前域名，同域访问仍然受支持；无需为临时域名轮换修改配置。按业务配置 SMTP、AI、钉钉、支付、Turnstile 或对象存储。不要直接使用 Windows `.env`，也不要将真实配置写入镜像。
-- 容器由环境文件注入配置。在服务器修改配置后重建容器生效，不依赖后台修改容器内的 `.env`。使用宿主机反代到 `127.0.0.1:5174`，传递 Host 和 HTTPS 协议信息，并支持 `/funasr-stream` 的 WebSocket 升级；不要把数据库、API 或模型服务直接暴露在公网。
+- 平台 AI 模型配置仅存 PostgreSQL，需先应用迁移 0110，再由系统管理员在后台保存；旧 OPENAI_* 环境变量不读取、不导入，也不再写入容器 .env。API 与 Worker 共用原 AI_CONFIG_ENCRYPTION_KEY，生产接口需配置 AI_ALLOWED_BASE_URL_ORIGINS 精确 HTTPS 白名单。保存模型后无需重建容器。其他服务器环境配置修改后仍需重建容器生效。使用宿主机反代到 `127.0.0.1:5174`，传递 Host 和 HTTPS 协议信息，并支持 `/funasr-stream` 的 WebSocket 升级；不要把数据库、API 或模型服务直接暴露在公网。
 
 来源判断同时核对协议、域名和端口，不使用 `Sec-Fetch-Site` 作为放行依据。Web 网关覆盖客户端传入的 `X-Forwarded-Host`；API 仅接受回环地址或可信代理传入的来源转发头。生产 Compose 已配置私有 Docker 网段的 `ORIGIN_TRUSTED_PROXY_IPS`，不要把公网地址加入此项。外层 HTTPS 反代须保留浏览器访问的 Host（含非默认端口），并覆盖 `X-Forwarded-Proto` 为实际协议；HTTP 与 WebSocket 均需如此。登录、企业权限及 CSRF Token 校验保持启用；更换域名后需要重新登录。
 
