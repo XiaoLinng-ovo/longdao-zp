@@ -4,11 +4,12 @@ import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from
 import InterviewSummaryDialog from './InterviewSummaryDialog.vue'
 import { authSession } from '../../auth/session'
 import { backgroundAudio } from '../utils/background-audio'
-import { loadInterviewSummary, requestInterviewSummary, type InterviewSummaryView } from '../api/summary'
+import { loadInterviewSummary, loadInterviewSummaryVersions, requestInterviewSummary, type InterviewSummaryView } from '../api/summary'
 import { loadQuestionSheets, type ApiApplicationQuestionSheets, type ApiStageReview, type InterviewStage } from '../api/question-sheets'
 
-vi.mock('../api/summary', () => ({ loadInterviewSummary: vi.fn(), requestInterviewSummary: vi.fn() }))
+vi.mock('../api/summary', () => ({ loadInterviewSummary: vi.fn(), requestInterviewSummary: vi.fn(), loadInterviewSummaryVersions: vi.fn().mockResolvedValue([]) }))
 vi.mock('../api/question-sheets', async importOriginal => ({ ...await importOriginal<typeof import('../api/question-sheets')>(), loadQuestionSheets: vi.fn() }))
+vi.mock('./TranscriptRoleCorrection.vue', () => ({ default: { template: '<section aria-label="说话人校正"></section>' } }))
 const load = vi.mocked(loadInterviewSummary), request = vi.mocked(requestInterviewSummary)
 let app: App | undefined, root: HTMLDivElement | undefined, open: Ref<boolean>
 const ready = (): InterviewSummaryView => ({ sessionId: 's', status: 'ready', revision: 1, error: null, report: {
@@ -29,6 +30,21 @@ async function mount(initial = true, props: { applicationId?: string; stage?: In
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); backgroundAudio.jobs.splice(0); authSession.user = null; vi.useRealTimers(); vi.resetAllMocks(); document.body.style.overflow = '' })
 
 describe('InterviewSummaryDialog', () => {
+  it('shows archived scores separately while the corrected current report remains stale', async () => {
+    load.mockResolvedValue({ ...ready(), stale: true })
+    vi.mocked(loadInterviewSummaryVersions).mockResolvedValue([{ id: 'v1', revision: 1, createdAt: '2026-10-16T01:00:00Z', report: ready().report! }])
+    const el = await mount()
+    expect(el.querySelector('.report-score')?.textContent).toContain('待重新评分')
+    ;[...el.querySelectorAll('button')].find(b => b.textContent === '历史评分')!.click(); await flush()
+    const version = el.querySelector<HTMLSelectElement>('.history-controls select')!
+    version.value = 'v1'; version.dispatchEvent(new Event('change', { bubbles: true })); await flush()
+    expect(el.textContent).toContain('正在查看历史报告')
+    expect(el.querySelector('.report-score')?.textContent).toContain('82')
+    expect(el.querySelector('.report-table')?.textContent).toContain('项目经验')
+    version.value = ''; version.dispatchEvent(new Event('change', { bubbles: true })); await flush()
+    expect(el.querySelector('.report-score')?.textContent).toContain('待重新评分')
+  })
+
   it('labels completed but unreviewed transcripts as awaiting human review and hides scores and recommendations', async () => {
     const data = ready()
     data.report!.reviewRequired = true
@@ -36,7 +52,7 @@ describe('InterviewSummaryDialog', () => {
     data.report!.recommendation = { outcome: 'advance', text: '不应显示的旧建议', evidence: [] }
     load.mockResolvedValue(data)
     const el = await mount()
-    expect(el.querySelector('.report-score')?.textContent).toContain('待人工复核')
+    expect(el.querySelector('.report-score')?.textContent).toContain('证据不足')
     expect(el.querySelector('.report-score')?.textContent).not.toContain('82')
     expect(el.querySelector('.report-table')).toBeNull()
     expect(el.querySelector('[aria-label="推荐建议"]')?.textContent).toContain('暂不提供推荐建议')
@@ -58,7 +74,7 @@ describe('InterviewSummaryDialog', () => {
     load.mockResolvedValue(ready())
     await vi.advanceTimersByTimeAsync(2500); await flush()
     expect(el.querySelector('.report-score')?.textContent).toContain('82')
-    expect([...el.querySelectorAll('button')].find(button => button.textContent === '重新生成')?.disabled).toBe(false)
+    expect([...el.querySelectorAll('button')].find(button => button.textContent === '重新评分')?.disabled).toBe(false)
   })
   it('presents candidate information, advantages, improvement areas and AI recommendation as separate report sections', async () => {
     const data = ready()
@@ -124,7 +140,7 @@ describe('InterviewSummaryDialog', () => {
   })
   it('polls a pending summary to completion and stops when closed', async () => {
     vi.useFakeTimers(); load.mockResolvedValueOnce({ ...ready(), status: 'pending', report: null }).mockResolvedValue(ready())
-    const el = await mount(); expect(el.textContent).toContain('总结生成中')
+    const el = await mount(); expect(el.textContent).toContain('评分中')
     await vi.advanceTimersByTimeAsync(2500); await flush()
     expect(el.querySelector('.report-score')?.textContent).toContain('82')
     el.querySelector<HTMLButtonElement>('[aria-label="关闭面试总结表"]')!.click(); await flush()
@@ -134,11 +150,11 @@ describe('InterviewSummaryDialog', () => {
   it('keeps summary context after AI failure and permits retry without stale scores', async () => {
     vi.useFakeTimers(); load.mockResolvedValue({ ...ready(), status: 'failed', error: '模型超时' })
     request.mockResolvedValue({ ...ready(), status: 'pending', report: null })
-    const el = await mount(); expect(el.textContent).toContain('模型超时'); expect(el.textContent).toContain('项目经验')
+    const el = await mount(); expect(el.textContent).toContain('模型超时'); expect(el.textContent).toContain('候选人自述完成招聘项目')
     expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
-    const button = [...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!
+    const button = [...el.querySelectorAll('button')].find(b => b.textContent === '重新评分')!
     button.click(); await flush(); expect(request).toHaveBeenCalledWith('i')
-    expect(el.querySelector('.report-score')).toBeNull(); expect(el.textContent).toContain('总结生成中')
+    expect(el.querySelector('.report-score')).toBeNull(); expect(el.textContent).toContain('评分中')
   })
   it('ignores an old response after closing the dialog', async () => {
     let resolve!: (value: InterviewSummaryView) => void
@@ -160,15 +176,15 @@ describe('InterviewSummaryDialog', () => {
     load.mockResolvedValueOnce({ ...ready(), status: 'generating' }).mockRejectedValueOnce(new Error('暂时不可用')).mockResolvedValue(ready())
     const el = await mount()
     await vi.advanceTimersByTimeAsync(2500); await flush()
-    expect(el.textContent).toContain('项目经验'); expect(el.textContent).toContain('正在自动重试')
+    expect(el.textContent).toContain('候选人自述完成招聘项目'); expect(el.textContent).toContain('正在自动重试')
     await vi.advanceTimersByTimeAsync(2500); await flush()
     expect(load).toHaveBeenCalledTimes(3); expect(el.querySelector('.report-score')?.textContent).toContain('82')
   })
   it('retains the old report during regeneration and hides the old score', async () => {
     vi.useFakeTimers(); load.mockResolvedValue(ready()); request.mockResolvedValue({ ...ready(), status: 'pending' })
     const el = await mount()
-    ;[...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!.click(); await flush()
-    expect(el.textContent).toContain('项目经验')
+    ;[...el.querySelectorAll('button')].find(b => b.textContent === '重新评分')!.click(); await flush()
+    expect(el.textContent).toContain('候选人自述完成招聘项目')
     expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
     expect(el.textContent).toContain('稍后查看结果')
   })
@@ -178,19 +194,19 @@ describe('InterviewSummaryDialog', () => {
     load.mockResolvedValueOnce(ready()).mockReturnValueOnce(new Promise(r => { resolve = r }))
     request.mockResolvedValue({ ...ready(), status: 'pending' })
     const el = await mount()
-    const regenerate = [...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!
+    const regenerate = [...el.querySelectorAll('button')].find(b => b.textContent === '重新评分')!
     ;[...el.querySelectorAll('button')].find(b => b.textContent === '刷新')!.click()
     regenerate.click(); await flush()
     resolve(ready()); await flush()
-    expect(el.textContent).toContain('总结生成中'); expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
+    expect(el.textContent).toContain('评分中'); expect(el.querySelector('.report-score')?.textContent).toBe('待评分')
   })
   it('checks server status after a generation response is lost instead of submitting again', async () => {
     vi.useFakeTimers(); load.mockResolvedValueOnce(ready()).mockResolvedValue({ ...ready(), status: 'generating' })
     request.mockRejectedValue(new Error('响应连接中断'))
     const el = await mount()
-    ;[...el.querySelectorAll('button')].find(b => b.textContent === '重新生成')!.click(); await flush()
+    ;[...el.querySelectorAll('button')].find(b => b.textContent === '重新评分')!.click(); await flush()
     await vi.advanceTimersByTimeAsync(2500); await flush()
     expect(load).toHaveBeenCalledTimes(2); expect(request).toHaveBeenCalledTimes(1)
-    expect(el.textContent).toContain('总结生成中')
+    expect(el.textContent).toContain('评分中')
   })
 })

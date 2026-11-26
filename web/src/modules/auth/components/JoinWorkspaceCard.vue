@@ -39,9 +39,9 @@ async function join() {
     preview.value = null
     try {
       await switchWorkspace(joined.workspaceId)
-      notice.value = '已加入「' + joined.workspaceName + '」，当前已切换到该企业'
+      notice.value = '已加入「' + joined.workspaceName + '」，已绑定该企业'
     } catch {
-      notice.value = '已成功加入「' + joined.workspaceName + '」，但自动切换失败。请在下方我的企业列表中点击进入，不需要再次使用邀请码。'
+      notice.value = '已成功加入「' + joined.workspaceName + '」，但自动进入失败。请在下方我的企业列表中点击进入，不需要再次使用邀请码。'
     }
     emit('joined')
   } catch (cause) { error.value = describeApiFailure(cause, '加入企业失败').message }
@@ -63,7 +63,7 @@ async function join() {
       <strong>{{ preview.workspaceName }}</strong>
       <span>{{ preview.workspaceKind === 'test' ? '测试企业' : '正式企业' }} · {{ membershipLabels[preview.membershipRole] }} · {{ businessRoleLabels[preview.businessRole] }}</span>
       <span v-if="preview.departmentName">所属部门：{{ preview.departmentName }}</span>
-      <small>有效期至 {{ new Date(preview.expiresAt).toLocaleString('zh-CN') }}；确认后加入并切换到该企业。</small>
+      <small>有效期至 {{ new Date(preview.expiresAt).toLocaleString('zh-CN') }}；确认后加入此企业。</small>
       <button type="button" :disabled="busy" @click="join">确认加入企业</button>
     </div>
   </section>

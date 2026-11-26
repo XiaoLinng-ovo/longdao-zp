@@ -99,6 +99,8 @@ chk.mjs
 /.codex-patch.txt
 /.tmp-*/
 /artifacts/superadmin/
+/artifacts/SmartRecruit-production-*.zip
+/artifacts/SmartRecruit-production-*.zip.sha256
 /docs/manual-screenshots/
 /apps/api/tmp-db-check*.mjs
 *.bak[0-9]*

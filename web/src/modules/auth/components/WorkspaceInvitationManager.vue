@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { setWorkspaceMemberStatus, transferWorkspaceOwnership, createInvitation, listInvitations, listWorkspaceMembers, listInvitationDepartments, revokeInvitation, updateWorkspaceMember, type Invitation, type MemberInput, type WorkspaceMember } from '../api/invitations'
 import { UserCheck, UserX, ArrowRightLeft } from '@lucide/vue'
-import { authSession, refreshAuthSession } from '../session'
+import { authSession } from '../session'
 import { membershipLabels, copyText, invitationLink, invitationText } from '../utils/invitations'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import type { WorkspaceSummary } from '../api'
@@ -62,7 +62,7 @@ async function confirmTransfer() {
   try {
     await transferWorkspaceOwnership(props.workspace.id, transferTarget.value.id, transferReason.value.trim(), transferPassword.value)
     transferPassword.value = ''; transferTarget.value = null
-    await refreshAuthSession(); window.location.reload()
+    window.location.reload()
   } catch (cause) { error.value = describeApiFailure(cause, '主管理员交接失败').message }
   finally { busy.value = false; transferPassword.value = '' }
 }

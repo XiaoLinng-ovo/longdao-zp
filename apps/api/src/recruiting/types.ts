@@ -166,6 +166,7 @@ export interface CandidateRecord {
 }
 
 export interface ApplicationRecord {
+  recruiterId?: string
   interviewProgress?: { id: string; round: number; stage: 'initial' | 'final'; status: 'scheduled' | 'completed'; scheduledStartAt?: string }
   analysisStatus?: AnalysisTaskStatus
   analysisProgress?: number
@@ -272,7 +273,7 @@ export interface OnboardingReport {
   integrationStatus: Record<OnboardingIntegrationStatus, number>
   highRiskItems: Array<{ onboardingId: string; applicationId: string; candidateName: string; jobTitle: string; plannedStartDate?: string; reasons: string[] }>
 }
-export interface InterviewParticipant { userId: string; name?: string; role: 'interviewer' | 'coordinator' | 'observer'; required: boolean }
+export interface InterviewParticipant { lead?: boolean; sheetTypes?: import('./interview-responsibilities.js').AssignedSheetType[]; userId: string; name?: string; role: 'interviewer' | 'coordinator' | 'observer'; required: boolean }
 export interface InterviewRecord { id: string; code: string; applicationId: string; round: number; stage?: 'initial' | 'final'; type: InterviewType; title: string; status: InterviewStatus; scheduledStartAt?: string; scheduledEndAt?: string; timezone?: string; location?: string; meetingUrl?: string; participants: InterviewParticipant[]; createdAt: string; updatedAt: string }
 export interface InterviewFeedbackRecord { id: string; interviewId: string; interviewerId: string; status: InterviewFeedbackStatus; overallScore?: number; recommendation?: 'strong_yes' | 'yes' | 'mixed' | 'no' | 'strong_no'; ratings: Record<string, number>; strengths: string[]; concerns: string[]; notes?: string; submittedAt?: string; lockedAt?: string }
 

@@ -6,6 +6,7 @@ import { RecruitingWorkflowError } from '../workflow.js'
 import { isOnboardingEditable } from '../onboarding-workbench.js'
 import { interviewOutcome, summaryScore, validateInterviewOutcome, type InterviewResult } from '../interview-result.js'
 import { prepareInterviewScheduleUpdate } from '../interview-schedule.js'
+import { normalizeInterviewParticipants } from '../interview-responsibilities.js'
 import { OFFER_ELIGIBILITY_SQL } from '../offer-eligibility.js'
 import { applyResumeReview, type ResumeReviewInput } from '../resume-scoring.js'
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg'
@@ -1208,7 +1209,7 @@ export class NormalizedRecruitingRepository {
     const where = this.interviewWhere(values, ['i.id = ANY($1::uuid[])'])
     const result = await this.pool.query(
       `SELECT i.id, conclusion.metadata->>'outcome' AS outcome,
-              live.status AS session_status, live.summary_status, live.summary_report
+              live.status AS session_status, live.summary_status, live.summary_report, live.summary_stale
        FROM interviews i JOIN applications a ON a.id = i.application_id AND a.organization_id = i.organization_id
        LEFT JOIN LATERAL (
          SELECT e.metadata FROM workflow_events e
@@ -1216,13 +1217,13 @@ export class NormalizedRecruitingRepository {
          ORDER BY e.created_at DESC, e.id DESC LIMIT 1
        ) conclusion ON true
        LEFT JOIN LATERAL (
-         SELECT s.status, s.summary_status, s.summary_report FROM interview_live_sessions s
+         SELECT s.status, s.summary_status, s.summary_report, s.summary_stale FROM interview_live_sessions s
          WHERE s.interview_id = i.id ORDER BY s.started_at DESC, s.id DESC LIMIT 1
        ) live ON true ` + where, values)
     return new Map(result.rows.map(row => [String(row.id), {
       outcome: interviewOutcome(row.outcome),
-      aiScore: row.session_status === 'completed' ? summaryScore(row.summary_status, row.summary_report) : null,
-      aiScoreStatus: typeof row.summary_status === 'string' ? row.summary_status : 'none',
+      aiScore: row.session_status === 'completed' && !row.summary_stale ? summaryScore(row.summary_status, row.summary_report) : null,
+      aiScoreStatus: row.summary_stale && !['pending','generating','failed'].includes(String(row.summary_status)) ? 'stale' : row.summary_status === 'ready' && summaryScore(row.summary_status, row.summary_report) === null ? 'insufficient' : typeof row.summary_status === 'string' ? row.summary_status : 'none',
     }]))
   }
 
@@ -1285,6 +1286,23 @@ export class NormalizedRecruitingRepository {
         ? `DELETE FROM interviews WHERE id IN (SELECT i.id ${INTERVIEW_FROM} ${where}) RETURNING id`
         : 'DELETE FROM interviews WHERE id = $1::uuid RETURNING id', values)
       if (!result.rows[0]) throw new RepositoryNotFoundError(`Interview not found: ${idOrBusinessId}`)
+    })
+  }
+
+  async assignInterviewResponsibilities(idOrBusinessId: string, input: unknown, actorId: string): Promise<InterviewDbRecord> {
+    return this.transaction(async client => {
+      const reference = normalizeReference(required(idOrBusinessId, 'interview id'), 'INT', 'int')
+      const values: unknown[] = [reference]
+      const where = this.interviewWhere(values, [whereReference('i.id', 'i.interview_no', reference, 1)])
+      const current = mapInterview(await queryOne<InterviewRow>(client, `${INTERVIEW_SELECT} ${where} FOR UPDATE OF i`, values))
+      if (current.status === 'cancelled') throw new RepositoryValidationError('已取消的面试不能重新分配')
+      const participants = await Promise.all(normalizeInterviewParticipants(input, current.stage ?? (current.round >= 2 ? 'final' : 'initial')).map(async person => ({
+        ...person, userId: await resolveActorId(client, person.userId, {required: true, organizationId: this.organizationId}) as string,
+      })))
+      if (!participants.some(person => person.lead)) throw new RepositoryValidationError('请选择面试负责人并分配评分表')
+      const row = await queryOne<InterviewRow>(client, `UPDATE interviews SET participants=$2::jsonb,updated_at=now() WHERE id=$1::uuid RETURNING ${INTERVIEW_COLUMNS}`, [current.id,JSON.stringify(participants)])
+      await this.appendWorkflowEventWithExecutor(client, { subjectType:'interview',subjectId:current.id,action:'responsibilities_assigned',actorId,metadata:{before:current.participants,after:participants} })
+      return mapInterview(row)
     })
   }
 
@@ -2285,7 +2303,7 @@ async function resolveActorId(executor: Pick<RepositoryClient, 'query'>, value: 
         : options.allowDisplayName ? 'lower(u.display_name) = lower($1)' : undefined
     const lookup = condition ? await executor.query<{ id: string }>(
       `SELECT u.id FROM users u JOIN organization_members m ON m.user_id = u.id
-       WHERE ${condition} AND m.organization_id = $2::uuid AND u.is_active = true ORDER BY u.id`,
+       WHERE ${condition} AND m.organization_id = $2::uuid AND m.is_active = true AND u.is_active = true ORDER BY u.id`,
       [reference, options.organizationId],
     ) : { rows: [] }
     if (lookup.rows.length > 1) throw new RepositoryValidationError(`面试官姓名不唯一，请填写邮箱或用户 ID：${reference}`)

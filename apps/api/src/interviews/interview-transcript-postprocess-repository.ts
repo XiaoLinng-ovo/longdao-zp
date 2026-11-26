@@ -124,7 +124,7 @@ export class InterviewTranscriptPostprocessRepository {
 
   async retry(job: TranscriptPostprocessJob, error: unknown): Promise<void> {
     const delaySeconds = Math.min(300, 5 * 2 ** Math.min(Math.max(0, job.attempts - 1), 6))
-    await this.pool.query(`UPDATE interview_transcript_postprocess_jobs SET status='pending',claim=NULL,
+    await this.pool.query(`UPDATE interview_transcript_postprocess_jobs SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,claim=NULL,
       error=$3,available_at=now()+$4*interval '1 second',updated_at=now()
       WHERE session_id=$1::uuid AND claim=$2::uuid AND status='processing'`,
     [job.sessionId, job.claim, (error instanceof Error ? error.message : String(error)).slice(0, 1000), delaySeconds])
@@ -195,6 +195,9 @@ export class InterviewTranscriptPostprocessRepository {
       await client.query(`UPDATE interview_transcript_postprocess_jobs SET status='completed',phase='publishing',claim=NULL,
         input_fingerprint=$2,error=NULL,warnings=$3::jsonb,completed_at=now(),updated_at=now()
         WHERE session_id=$1::uuid`, [job.sessionId, expectedFingerprint, JSON.stringify(input.warnings)])
+      if (current.ended_at && current.session_status === 'paused') {
+        await client.query("UPDATE interview_live_sessions SET status='completed',updated_at=now() WHERE id=$1::uuid AND status='paused'", [job.sessionId])
+      }
       await client.query('COMMIT')
       return 'published'
     } catch (error) {

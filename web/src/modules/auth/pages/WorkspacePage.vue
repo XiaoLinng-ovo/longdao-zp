@@ -6,6 +6,7 @@ import { safeAuthRedirect } from '../utils/redirect'
 import { createWorkspace, listWorkspaces, type WorkspaceKind, type WorkspaceSummary } from '../api'
 import { authSession, logoutCurrentUser, switchWorkspace } from '../session'
 import EnterpriseEntitlements from '../../platform/components/EnterpriseEntitlements.vue'
+import EnterpriseMembership from '../components/EnterpriseMembership.vue'
 import JoinWorkspaceCard from '../components/JoinWorkspaceCard.vue'
 
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
@@ -17,7 +18,7 @@ const entitlementWorkspace = ref<WorkspaceSummary | null>(null)
 
 const workspaces = ref<WorkspaceSummary[]>([])
 const name = ref('')
-const kind = ref<WorkspaceKind>('test')
+const kind = ref<WorkspaceKind>('production')
 const loading = ref(true)
 const submitting = ref(false)
 const switchingId = ref('')
@@ -48,7 +49,7 @@ async function create() {
     workspaces.value = loaded
     authSession.workspaces = loaded
     await switchWorkspace(workspace.id)
-    notice.value = `${workspace.name} 已创建，当前已切换到该工作空间`
+    notice.value = `${workspace.name} 已创建，已绑定此企业`
     window.location.assign(destination.value)
   } catch (cause) { error.value = describeApiFailure(cause, '创建企业失败').message } finally { submitting.value = false }
 }
@@ -86,9 +87,9 @@ onMounted(load)
       <header class="workspace-header">
         <div class="workspace-header-copy">
           <router-link v-if="authSession.user?.isSystemAdmin === true" to="/platform/customers">进入平台企业客户管理 →</router-link>
-          <span class="workspace-kicker">SMART RECRUIT · WORKSPACES</span>
-          <h1>企业工作空间</h1>
-          <p>新企业默认试用 14 天，现有企业保持启用。创建自己的企业，或粘贴管理员发来的邀请码加入。企业成员关系与账号类型分别管理，加入后可以切换工作空间。</p>
+          <span class="workspace-kicker">SMART RECRUIT</span>
+          <h1>{{ workspaces.length ? '企业信息' : '创建或加入企业' }}</h1>
+
         </div>
         <router-link v-if="activeWorkspace" class="workspace-logout" to="/">
           <span aria-hidden="true">←</span>返回招聘工作台
@@ -108,14 +109,14 @@ onMounted(load)
       <div v-if="error" class="workspace-message error" role="alert">{{ error }}</div>
       <div v-if="notice" class="workspace-message success">{{ notice }}</div>
 
-      <JoinWorkspaceCard @joined="load" />
+      <JoinWorkspaceCard v-if="!loading && !workspaces.length" @joined="load" />
 
-      <section class="workspace-create" aria-labelledby="workspace-create-title">
+      <section v-if="!loading && !workspaces.length" class="workspace-create" aria-labelledby="workspace-create-title">
         <div class="workspace-create-copy">
           <span class="workspace-create-icon" aria-hidden="true">＋</span>
           <div>
-            <strong id="workspace-create-title">新建工作空间</strong>
-            <span>测试企业适合体验，正式企业用于日常招聘；创建者自动成为企业所有者。</span>
+            <strong id="workspace-create-title">创建企业</strong>
+
           </div>
         </div>
         <form class="workspace-create-form" @submit.prevent="create">
@@ -132,7 +133,7 @@ onMounted(load)
 
       <div class="workspace-list-title">
         <div><strong>我的企业</strong><span>{{ workspaces.length }} 个</span></div>
-        <span class="workspace-list-caption">选择一个工作空间开始管理</span>
+        <span class="workspace-list-caption"></span>
       </div>
       <div v-if="loading" class="workspace-empty">正在加载企业列表…</div>
       <div v-else-if="!workspaces.length" class="workspace-empty">还没有企业。可以粘贴邀请码加入，或创建自己的企业。</div>
@@ -145,16 +146,17 @@ onMounted(load)
           </div>
           <div class="workspace-row-actions">
 
-            <button v-if="workspace.status === 'active'" class="workspace-action" type="button" @click="entitlementWorkspace = entitlementWorkspace?.id === workspace.id ? null : workspace">查看套餐权益</button>
+            <button v-if="workspace.status === 'active' && workspace.membershipActive !== false" class="workspace-action" type="button" @click="entitlementWorkspace = entitlementWorkspace?.id === workspace.id ? null : workspace">查看套餐权益</button>
 
 
             <span v-if="activeWorkspace === workspace.id" class="workspace-current">当前</span>
-            <button v-if="workspace.status === 'active'" class="workspace-open" type="button" :disabled="!isWorkspaceAvailable(workspace) || Boolean(switchingId)" @click="choose(workspace)">{{ !isWorkspaceAvailable(workspace) ? workspaceServiceLabel(workspace) : switchingId === workspace.id ? '切换中…' : '进入工作空间' }}</button>
+            <button v-if="workspace.status === 'active'" class="workspace-open" type="button" :disabled="!isWorkspaceAvailable(workspace) || Boolean(switchingId)" @click="choose(workspace)">{{ !isWorkspaceAvailable(workspace) ? workspaceServiceLabel(workspace) : switchingId === workspace.id ? '进入中…' : '进入企业' }}</button>
 
 
           </div>
         </article>
       </div>
+      <EnterpriseMembership v-for="workspace in workspaces" :key="workspace.id" :workspace="workspace" />
       <EnterpriseEntitlements v-if="entitlementWorkspace" :key="entitlementWorkspace.id" :organization-id="entitlementWorkspace.id" :name="entitlementWorkspace.name" />
 
     </section>
@@ -186,8 +188,8 @@ onMounted(load)
 .workspace-card::before { position: absolute; top: 0; right: 0; left: 0; height: 4px; background: linear-gradient(90deg, #5fc5b7, #65a6e9, #a0a7ec); content: ''; }
 .workspace-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 36px; }
 .workspace-header-copy { min-width: 0; }
-.workspace-kicker { display: inline-flex; color: #63a8ad; font-size: 10px; font-weight: 800; letter-spacing: .15em; }
-.workspace-header h1 { margin: 9px 0 0; color: #214c64; font-size: clamp(27px, 4vw, 34px); letter-spacing: -.05em; }
+.workspace-kicker { display: inline-flex; color: #63a8ad; font-size: 10px; font-weight: 800; letter-spacing: 0; }
+.workspace-header h1 { margin: 9px 0 0; color: #214c64; font-size: 24px; letter-spacing: 0; }
 .workspace-header p { max-width: 700px; margin: 12px 0 0; color: #7893a1; font-size: 12px; line-height: 1.8; }
 .workspace-logout { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 5px; margin-top: 4px; padding: 8px 11px; border: 1px solid #dcebef; border-radius: 10px; background: rgba(248, 253, 254, .78); color: #568294; font: inherit; font-size: 11px; text-decoration: none; cursor: pointer; transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; }
 .workspace-logout:focus-visible { outline: 3px solid rgba(78, 145, 223, .35); outline-offset: 2px; }

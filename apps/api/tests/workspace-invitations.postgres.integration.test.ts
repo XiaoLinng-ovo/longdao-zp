@@ -40,7 +40,7 @@ test('shared invitations: concurrent multi-user joins, registration rollback, sc
   const email='invited-'+randomUUID()+'@example.invalid',codeHash='a'.repeat(64)
   await sessions.createEmailVerificationChallenge({purpose:'registration',email,codeHash,expiresInMs:600000,maxAttempts:5})
   const registered=await sessions.registerUserWithVerification({name:'受邀注册用户',email,password:'strong-password',companyName:'',invitationCode:invite.code!},{codeHash})
-  assert.equal(registered.workspace.id,org);assert.equal(registered.workspace.role,'member')
+  assert.equal(registered.workspace!.id,org);assert.equal(registered.workspace!.role,'member')
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM organizations')).rows[0].n,before)
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM organization_invitation_joins WHERE invitation_id=$1',[invite.id])).rows[0].n,3)
   const replaced=await service.create(org,owner,{replace:true})

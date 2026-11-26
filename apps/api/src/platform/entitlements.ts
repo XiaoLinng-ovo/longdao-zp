@@ -45,7 +45,7 @@ export class EntitlementService {
   }
   async readEnterprise(actorId: string,organizationId: string) {
     // No global role fallback, and no implicit platform membership.
-    const result=await this.pool.query(`SELECT m.user_id FROM organization_members m JOIN organizations o ON o.id=m.organization_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND u.is_active=true AND o.status='active'`,[id(organizationId),actorId])
+    const result=await this.pool.query(`SELECT m.user_id FROM organization_members m JOIN organizations o ON o.id=m.organization_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND m.is_active AND m.ended_at IS NULL AND u.is_active=true AND o.status='active'`,[id(organizationId),actorId])
     if (!result.rows[0]) throw new HttpError(403,'WORKSPACE_MEMBER_REQUIRED','只能查看你所属企业的套餐权益')
     return this.read(organizationId)
   }

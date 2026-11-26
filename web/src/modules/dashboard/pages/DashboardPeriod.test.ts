@@ -58,14 +58,14 @@ it.each(['2026-10-30T00:15:00', '2026-10-30T23:59:00', '2027-01-01T00:01:00'])('
     expect(recentButton.getAttribute('aria-pressed')).toBe('true')
     const end = new Date(day + 'T00:00:00'); end.setDate(end.getDate() + 1)
     expect(loadDashboard).toHaveBeenCalledTimes(1)
-    expect(loadDashboard).toHaveBeenLastCalledWith({ from: start.toISOString(), to: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    expect(loadDashboard).toHaveBeenLastCalledWith({ from: start.toISOString(), to: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, 'mine')
   } finally { vi.useRealTimers() }
 })
 
 it('queries a same-day selection from local midnight through the whole end date', async () => {
   await mount(); vi.mocked(loadDashboard).mockResolvedValue(ranged)
   await range()
-  expect(loadDashboard).toHaveBeenLastCalledWith({ from: new Date('2026-10-29T00:00').toISOString(), to: new Date('2026-10-30T00:00').toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+  expect(loadDashboard).toHaveBeenLastCalledWith({ from: new Date('2026-10-29T00:00').toISOString(), to: new Date('2026-10-30T00:00').toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, 'mine')
   expect(root.querySelectorAll('[data-date-picker-trigger]')).toHaveLength(2)
   expect(root.querySelectorAll('input[type="date"]')).toHaveLength(0)
   expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
@@ -73,12 +73,12 @@ it('queries a same-day selection from local midnight through the whole end date'
   expect(root.textContent).not.toContain('时段数据变化')
   expect(root.querySelector('.metric-card strong')?.textContent).toBe('3')
   expect(root.textContent).toContain('较前段 +3')
-  expect(root.textContent).toContain('待办事项')
+  expect(root.textContent).toContain('我的待办')
   expect(root.textContent).not.toContain('时段内更新的待办')
   expect(root.textContent).not.toContain('当前整体转化率')
   const reset = root.querySelector<HTMLButtonElement>('[aria-label="恢复全部时间"]')!
   vi.mocked(loadDashboard).mockResolvedValue(base); reset.click(); await flush()
-  expect(loadDashboard).toHaveBeenLastCalledWith(undefined)
+  expect(loadDashboard).toHaveBeenLastCalledWith(undefined, 'mine')
   expect(root.querySelector('[aria-label="时段数据变化"]')).toBeNull()
 })
 

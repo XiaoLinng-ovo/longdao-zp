@@ -22,7 +22,6 @@ const invited = computed(() => invitationContext.value !== undefined)
 const inviteCode = computed(() => extractInvitationCode(invitationContext.value ?? ''))
 const invitation = ref<SharedInvitationSummary | null>(null)
 const invitationLoading = ref(false)
-const companyName = ref('')
 const name = ref('')
 const email = ref('')
 const phone = ref('')
@@ -62,11 +61,10 @@ function startCountdown(seconds: number) {
 
 function validateAccountFields(): boolean {
   if (invited.value && !invitation.value) { error.value = '邀请尚未验证或已失效，请重新打开邀请链接'; return false }
-  if ((!invited.value && !companyName.value.trim()) || !name.value.trim() || !email.value.trim() || !password.value) {
-    error.value = invited.value ? '请填写姓名、邮箱和密码' : '请填写企业名称、姓名、邮箱和密码'
+  if (!name.value.trim() || !email.value.trim() || !password.value) {
+    error.value = '请填写姓名、邮箱和密码'
     return false
   }
-  if (!invited.value && companyName.value.trim().length < 2) { error.value = '企业名称至少需要 2 个字符'; return false }
   if (password.value.length < 8) { error.value = '密码至少需要 8 个字符'; return false }
   if (password.value !== confirmPassword.value) { error.value = '两次输入的密码不一致'; return false }
   return true
@@ -104,7 +102,7 @@ async function submitRegistration() {
   submitting.value = true
   try {
     const registered = await register({
-      companyName: invited.value ? '' : companyName.value.trim(),
+      companyName: '',
       ...(invited.value ? {invitationCode:inviteCode.value} : {}),
       name: name.value.trim(),
       email: email.value.trim(),
@@ -116,13 +114,13 @@ async function submitRegistration() {
     confirmTurnstileToken.value = ''
     const workspaces = syncAuthenticatedSession(registered)
     const redirect = typeof route.query.redirect === 'string' && /^\/workspaces(?:[?#]|$)/.test(route.query.redirect) ? route.query.redirect : undefined
-    if (invited.value) {
+    if (invited.value && registered.workspace) {
       try { await switchWorkspace(registered.workspace.id); window.location.assign('/') }
       catch { await router.push({name:'invitation-join',query:{invite:inviteCode.value}}) }
     } else if (redirect) {
       await router.push(redirect)
-    } else if (workspaces.length === 1 && workspaces[0]?.id === registered.workspace.id) {
-      await switchWorkspace(registered.workspace.id)
+    } else if (workspaces.length === 1 && workspaces[0]?.id === registered.workspace?.id) {
+      await switchWorkspace(workspaces[0]!.id)
       await router.push('/')
     } else {
       await router.push('/workspaces')
@@ -175,18 +173,17 @@ onBeforeUnmount(() => {
 <template>
   <main class="register-shell">
     <section class="register-card">
-      <div class="register-brand"><span>龙道</span><div><b>{{ invited ? '注册并加入企业' : '注册企业账号' }}</b><small>{{ invited ? invitation?.workspaceName : '注册账号并创建企业工作区' }}</small></div></div>
+      <div class="register-brand"><span>龙道</span><div><b>{{ invited ? '注册并加入企业' : '注册账号' }}</b><small>{{ invited ? invitation?.workspaceName : '龙道智能招聘' }}</small></div></div>
       <div class="register-heading">
         <div class="register-step-label">步骤 {{ step }} / 2</div>
-        <h1>{{ step === 1 ? (invited ? '注册并加入企业' : '创建企业账号') : '验证你的邮箱' }}</h1>
-        <p>{{ step === 1 ? (invited ? '填写个人信息，验证邮箱后加入受邀企业。' : '填写企业和个人信息，我们会向邮箱发送一次性验证码。') : `验证码已发送至 ${email}。` }}</p>
+        <h1>{{ step === 1 ? (invited ? '注册并加入企业' : '创建账号') : '验证你的邮箱' }}</h1>
+        <p>{{ step === 1 ? (invited ? '填写个人信息，验证邮箱后加入受邀企业。' : '填写个人信息，验证邮箱后继续。') : `验证码已发送至 ${email}。` }}</p>
       </div>
       <div class="register-progress" aria-hidden="true"><span :class="{ complete: step === 2 }"></span><i></i><span :class="{ active: step === 2 }"></span></div>
       <div v-if="error" class="register-error" role="alert">{{ error }}</div>
       <div v-if="notice" class="register-notice" role="status">{{ notice }}</div>
       <form v-if="step === 1" class="register-form" @submit.prevent="sendCode(false)">
         <div v-if="invited" class="register-account-summary">{{ invitationLoading ? '正在验证企业邀请...' : invitation ? '加入企业：' + invitation.workspaceName : '邀请不可用' }}</div>
-        <label v-else>企业名称<input v-model="companyName" autocomplete="organization" placeholder="例如：龙道科技" /></label>
         <label>姓名<input v-model="name" autocomplete="name" placeholder="请输入姓名" /></label>
         <label>邮箱<input v-model="email" type="email" autocomplete="email" placeholder="name@company.com" /></label>
         <label>手机号（可选）<input v-model="phone" type="tel" autocomplete="tel" placeholder="用于账号支持" /></label>
@@ -197,7 +194,7 @@ onBeforeUnmount(() => {
       </form>
       <form v-else class="register-form register-code-form" @submit.prevent="submitRegistration">
         <div class="register-account-summary">
-          <span>{{ invited ? invitation?.workspaceName : companyName }} · {{ name }}</span>
+          <span>{{ name }}</span>
           <button type="button" @click="editAccount">修改资料</button>
         </div>
         <label>邮箱验证码<input v-model="verificationCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入 6 位验证码" /></label>
@@ -205,7 +202,7 @@ onBeforeUnmount(() => {
         <button class="register-submit" type="submit" :disabled="submitting">{{ submitting ? '正在完成注册...' : invited ? '验证并加入企业' : '验证并完成注册' }}</button>
         <button class="resend-code" type="button" :disabled="sendingCode || countdown > 0" @click="sendCode(true)">{{ codeButtonLabel }}</button>
       </form>
-      <div class="register-flow"><span>{{ invited ? '填写个人信息' : '填写企业信息' }}</span><i>→</i><span>验证邮箱</span><i>→</i><span>{{ invited ? '加入企业' : '创建企业' }}</span></div>
+      <div class="register-flow"><span>填写个人信息</span><i>→</i><span>验证邮箱</span><i>→</i><span>{{ invited ? '加入企业' : '完成注册' }}</span></div>
       <router-link class="back-login" :to="{ name: 'login', query: invited ? {redirect:'/join?invite=' + encodeURIComponent(inviteCode)} : route.query.redirect ? { redirect: route.query.redirect } : {} }">已有账号？返回登录</router-link>
     </section>
   </main>

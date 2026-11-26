@@ -21,5 +21,8 @@ export function interviewResult(row: InterviewView): InterviewResultKey {
 
 export function aiScoreLabel(row: InterviewView): string {
   if (row.aiScore !== null && row.aiScore !== undefined && Number.isFinite(row.aiScore)) return row.aiScore.toFixed(1)
+  if (row.aiScoreStatus === 'failed') return '分析失败'
+  if (row.aiScoreStatus === 'stale') return '待重新评分'
+  if (row.aiScoreStatus === 'insufficient') return '证据不足'
   return row.aiScoreStatus === 'pending' || row.aiScoreStatus === 'generating' ? '分析中' : '暂无评分'
 }

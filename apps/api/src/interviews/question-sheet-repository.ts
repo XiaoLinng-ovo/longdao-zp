@@ -405,7 +405,7 @@ export class QuestionSheetRepository {
     const result = await this.pool.query(
       `WITH session_scores AS (
        SELECT i.stage,
-              CASE WHEN live.summary_status = 'ready'
+              CASE WHEN live.summary_status = 'ready' AND NOT live.summary_stale
                          AND live.summary_report->>'version' = 'whole-dialogue-v2'
                          AND jsonb_typeof(live.summary_report->'overallScore') = 'number'
                    THEN (live.summary_report->>'overallScore')::numeric END AS score

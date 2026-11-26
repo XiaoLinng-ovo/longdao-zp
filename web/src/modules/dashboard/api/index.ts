@@ -3,7 +3,7 @@ import type { Metric, Requisition } from '../../../shared/types/recruiting'
 
 export interface DashboardTodo {
   id: string
-  category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding'
+  category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding' | 'membership'
   actionKey?: 'confirm-job-spec' | 'confirm-job-jd' | 'publish-job'
   title: string
   description: string
@@ -88,8 +88,8 @@ function toRequisition(row: DashboardSummaryContract['pendingApprovals'][number]
   }
 }
 
-export async function loadDashboard(period?: DashboardPeriod): Promise<DashboardData> {
-  const query = period ? '?' + new URLSearchParams({ from: period.from, to: period.to, timeZone: period.timeZone }).toString() : ''
+export async function loadDashboard(period?: DashboardPeriod, scope: 'mine' | 'enterprise' | 'unassigned' = 'mine'): Promise<DashboardData> {
+  const query = '?' + new URLSearchParams({ ...(period ?? {}), scope }).toString()
   const response = await apiClient.getJson<DashboardSummaryContract>('/dashboard/summary' + query)
   const funnel = response.data.funnel.map((step) => ({ label: step.stage, value: step.count, conversionRate: step.conversionRate }))
   const total = funnel[0]?.value ?? 0

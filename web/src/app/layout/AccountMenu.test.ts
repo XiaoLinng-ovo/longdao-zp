@@ -2,6 +2,7 @@
 import { createApp, nextTick, type App } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AccountMenu from './AccountMenu.vue'
+vi.mock('./NotificationBell.vue', () => ({default: {template:'<div />'}}))
 import { authSession } from '../../modules/auth/session'
 import { listSavedAccounts, listWorkspaces } from '../../modules/auth/api'
 vi.mock('../../modules/auth/api', () => ({ listSavedAccounts: vi.fn(), listWorkspaces: vi.fn() }))
@@ -117,7 +118,7 @@ describe('account popover', () => {
     expect(root.querySelector('.account-workspace-row')?.textContent).toContain('当前企业空间')
     expect(root.querySelector('.account-workspace-row')?.textContent).toContain('龙道科技')
     expect(root.querySelector('.account-workspace-kind')?.textContent).toBe('试用中')
-    expect(root.querySelector('.account-workspace-row')?.textContent).toContain('企业所有者')
+    expect(root.querySelector('.account-workspace-row')?.textContent).toContain('企业主管理员')
 
     const profileLink = root.querySelector<HTMLAnchorElement>('.account-profile-entry')!
     expect(profileLink.getAttribute('href')).toBe('/profile')

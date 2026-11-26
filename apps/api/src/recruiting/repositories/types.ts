@@ -302,6 +302,8 @@ export interface JobDescriptionVersionCreateInput {
 
 // ===== 面试（interviews / interview_feedback）=====
 export interface InterviewParticipantDbRecord {
+  lead?: boolean
+  sheetTypes?: import('../interview-responsibilities.js').AssignedSheetType[]
   userId: string
   name?: string
   role: string

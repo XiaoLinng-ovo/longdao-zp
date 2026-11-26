@@ -37,7 +37,7 @@ const mockedScore = vi.mocked(scoreQuestion)
 const mockedSaveWeights = vi.mocked(updateStageWeights)
 const mockedDecision = vi.mocked(recordStageDecision)
 const { push } = vi.hoisted(() => ({ push: vi.fn() }))
-vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push }), useRoute: () => ({query:{}}) }))
 
 const defaultTiers = [
   { tier: 'excellent' as const, min: 90, max: 100, description: '超出预期' },
@@ -101,6 +101,7 @@ function buildView(status: ApiQuestionSheet['status'] = 'submitted'): ApiApplica
   const recording = 79 // 独立的整场对话总结分，与参考题逐题分数无关
   return {
     applicationId: 'app-1',
+    permissions: [{stage:'initial',lead:true,sheetTypes:['hr_screen','hiring_department']},{stage:'final',lead:true,sheetTypes:['business','hr','boss']}],
     sheets,
     reviews: [],
     stages: [
@@ -149,6 +150,16 @@ afterEach(() => {
 })
 
 describe('QuestionSheetPanel', () => {
+  it('disables unassigned sheets and lead actions while keeping the assigned sheet editable', async () => {
+    const view = buildView('scoring')
+    view.permissions = [{stage:'initial',lead:false,sheetTypes:['hiring_department']}]
+    const element = await mount(view)
+    expect(element.querySelector<HTMLButtonElement>('#sheet-hr_screen button')!.disabled).toBe(true)
+    expect(element.querySelector<HTMLInputElement>('#sheet-hiring_department input[type="number"]')!.disabled).toBe(false)
+    expect(element.querySelector<HTMLInputElement>('#sheet-hr_screen input[type="number"]')!.disabled).toBe(true)
+    expect(element.querySelector<HTMLInputElement>('.weight-table input')!.disabled).toBe(true)
+    expect(buttonByText(element,'保存权重').disabled).toBe(true)
+  })
   it('按阶段展示该阶段的表，并直接展示综合分公式', async () => {
     const element = await mount()
     expect(mockedLoad).toHaveBeenCalledWith('app-1')

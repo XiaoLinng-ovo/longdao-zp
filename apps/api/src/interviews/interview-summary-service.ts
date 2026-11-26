@@ -37,9 +37,11 @@ export class InterviewSummaryService {
     const previousReport = job.previousReport
     let report = previousReport ?? createUnscoredSummary([])
     try {
-      const { segments, transcriptWarnings = [], transcriptRoleReviewRequired = false } = await this.sessions.get(job.sessionId)
+      const { segments, completionReview, transcriptWarnings = [], transcriptRoleReviewRequired = false } = await this.sessions.get(job.sessionId)
       report = createUnscoredSummary(segments)
       report.warnings.push(...transcriptWarnings)
+      const uncertain = report.transcript.filter(turn => turn.role === 'unknown')
+      if (uncertain.length) report.warnings.push('本次评分仅依据可靠候选人证据；' + uncertain.length + ' 段角色不确定内容未纳入，未覆盖内容不按零分处理。')
       report.warnings = [...new Set(report.warnings)]
       if (!report.transcript.length) {
         report.summary = '本场尚无已保存的语音转写，无法进行有证据的评分。'
@@ -50,8 +52,10 @@ export class InterviewSummaryService {
           report.reviewRequired = true
           report.summary = quality.warning ?? '面试转写证据不足，暂不评分。'
           report.warnings.push(report.summary)
-          report.warnings.push('请核实说话人和重叠发言后重新生成总结，不要求与参考问题逐题配对。')
+          report.warnings.push('不确定和混合发言已排除；可选择在面试结束后校正说话人并重新评分。')
           report.warnings = [...new Set(report.warnings)]
+          report.sourceRevision = job.revision
+          if (completionReview?.versionId) report.sourceTranscriptVersionId = completionReview.versionId
           await this.repository.save(job, report, null)
           return true
         }
@@ -60,10 +64,12 @@ export class InterviewSummaryService {
         const env = await this.resolveAiEnv(job.applicationId)
         const config = loadQuestionSheetGeneratorConfig(env)
         // A full interview needs a larger budget than a short question-sheet request.
-        // Two bounded attempts still finish before the repository's 15-minute claim lease.
+        // The generator also enforces a whole-session deadline shorter than its worker lease.
         const timeoutMs = Math.min(300000, Math.max(config.timeoutMs, report.transcript.length >= 100 ? 300000 : 180000))
         report = await meterAiOperation(env, 'interview_summary', 'summary:' + job.sessionId + ':' + job.revision, { sessionId: job.sessionId, revision: job.revision }, () => createInterviewSummaryGenerator({ ...config, timeoutMs }, createBillingFetch(env, this.fetchImpl)).generate({ ...report, model: config.model }, context), 1, 'background')
       }
+      report.sourceRevision = job.revision
+      if (completionReview?.versionId) report.sourceTranscriptVersionId = completionReview.versionId
       await this.repository.save(job, report, null)
     } catch (error) {
       if (isExecutionBusy(error) && this.repository.defer) { await this.repository.defer(job); return true }

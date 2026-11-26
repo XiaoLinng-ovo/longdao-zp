@@ -371,7 +371,7 @@ export class AdminService {
          JOIN organizations o ON o.id = m.organization_id AND o.status = 'active'
          JOIN users u ON u.id = m.user_id
          LEFT JOIN departments d ON d.id = m.department_id
-        WHERE m.organization_id = $1::uuid AND u.is_active = true
+        WHERE m.organization_id = $1::uuid AND m.is_active AND m.ended_at IS NULL AND u.is_active = true
         ORDER BY u.display_name, u.email`, [organizationId]
     )
     return result.rows.map((row) => ({
@@ -584,9 +584,9 @@ export class AdminService {
              WHERE u.department_id = $1
                AND NOT EXISTS (
                  SELECT 1 FROM organization_members current_member
-                  WHERE current_member.user_id = u.id AND current_member.organization_id = $2::uuid
+                  WHERE current_member.user_id = u.id AND current_member.organization_id = $2::uuid AND current_member.ended_at IS NULL
                ))::int AS users,
-           (SELECT count(*) FROM organization_members WHERE department_id = $1 AND organization_id = $2::uuid)::int AS members,
+           (SELECT count(*) FROM organization_members WHERE department_id = $1 AND organization_id = $2::uuid AND ended_at IS NULL)::int AS members,
            (SELECT count(*) FROM organization_invitations WHERE department_id = $1 AND organization_id = $2::uuid AND accepted_at IS NULL AND revoked_at IS NULL)::int AS invitations,
            (SELECT count(*) FROM recruitment_requests WHERE department_id = $1 AND organization_id = $2::uuid)::int AS requests,
            (SELECT count(*) FROM jobs WHERE department_id = $1 AND organization_id = $2::uuid)::int AS jobs,
@@ -596,7 +596,7 @@ export class AdminService {
       : await this.pool.query(
         `SELECT
            (SELECT count(*) FROM users WHERE department_id = $1)::int AS users,
-           (SELECT count(*) FROM organization_members WHERE department_id = $1)::int AS members,
+           (SELECT count(*) FROM organization_members WHERE department_id = $1 AND ended_at IS NULL)::int AS members,
            (SELECT count(*) FROM organization_invitations WHERE department_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL)::int AS invitations,
            (SELECT count(*) FROM recruitment_requests WHERE department_id = $1)::int AS requests,
            (SELECT count(*) FROM jobs WHERE department_id = $1)::int AS jobs,

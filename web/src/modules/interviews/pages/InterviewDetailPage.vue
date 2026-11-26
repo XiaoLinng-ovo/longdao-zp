@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiClient } from '../../../shared/api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 import QuestionSheetDialog from '../components/QuestionSheetDialog.vue'
+import InterviewResponsibilities from '../components/InterviewResponsibilities.vue'
+import { authSession } from '../../auth/session'
 import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
-import InterviewSummaryDialog from '../components/InterviewSummaryDialog.vue'
+import InterviewSummaryPanel from '../components/InterviewSummaryPanel.vue'
+import type { InterviewSummaryView } from '../api/summary'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
-import { stageOfRound } from '../api/question-sheets'
+import { stageOfRound, SHEET_TYPE_LABEL } from '../api/question-sheets'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import {
   completeInterview,
@@ -27,6 +30,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const detail = ref<ApiInterviewDetail | null>(null)
+const canLead = computed(() => ['owner','admin'].includes(authSession.workspaces.find(workspace => workspace.id === authSession.user?.workspaceId)?.role ?? '') || detail.value?.participants.some(person => person.userId === authSession.user?.id && person.lead))
 const candidateName = ref('')
 const jobTitle = ref('')
 const loading = ref(true)
@@ -127,7 +131,13 @@ async function saveSchedule() {
 const showComplete = ref(false)
 const completeError = ref('')
 const showSheets = ref(false)
-const showSummary = ref(false)
+const summarySection = ref<HTMLElement | null>(null)
+const summaryView = ref<InterviewSummaryView | null>(null)
+async function locateSummary() {
+  await nextTick()
+  if (route.query.openSummary === '1') summarySection.value?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
+function summaryUpdated(value: InterviewSummaryView | null) { summaryView.value = value }
 const completeOutcome = ref<'continue' | 'offer' | 'reject' | 'cancelled'>('continue')
 const showCorrectConclusion = ref(false)
 const correctingConclusion = ref(false)
@@ -138,6 +148,15 @@ const auditEvents = ref<WorkflowEvent[]>([])
 const loadingAudit = ref(false)
 const completeFinal = computed(() => detail.value?.stage === 'final' || (detail.value?.round ?? 0) >= 2)
 const completeAiScore = computed(() => {
+  const current = summaryView.value
+  if (current) {
+    if (current.status === 'failed') return '分析失败'
+    if (current.status === 'pending' || current.status === 'generating' || ['transcribing', 'role_review'].includes(current.phase ?? '')) return '分析中'
+    if (current.stale) return '待重新评分'
+    if (current.report?.reviewRequired) return '证据不足'
+    const score = current.status === 'ready' && current.report?.version === 'whole-dialogue-v2' ? current.report.overallScore : null
+    return score !== null && score !== undefined && Number.isFinite(score) ? score.toFixed(1) : '暂无评分'
+  }
   const score = detail.value?.aiScore
   if (score !== null && score !== undefined && Number.isFinite(score)) return score.toFixed(1)
   return ['pending', 'generating'].includes(detail.value?.aiScoreStatus ?? '') ? '分析中' : '暂无评分'
@@ -269,8 +288,9 @@ async function loadRoute() {
   showSchedule.value = false
   showComplete.value = false
   if (route.query.openQuestionSheet === '1') showSheets.value = true
-  if (route.query.openSummary === '1') showSummary.value = true
+  summaryView.value = null
   await load()
+  await locateSummary()
   if (!error.value && detail.value?.status === 'scheduled' && route.query.arrange === '1') {
     if (needsFinalSchedule.value) arrangeFinal()
     else openSchedule()
@@ -280,6 +300,8 @@ async function loadRoute() {
 }
 onMounted(loadRoute)
 watch(() => route.params.id, () => { void loadRoute() })
+watch(() => route.query.openQuestionSheet, value => { if (value === '1') showSheets.value = true })
+watch(() => route.query.openSummary, () => { void locateSummary() })
 </script>
 
 <template>
@@ -300,6 +322,7 @@ watch(() => route.params.id, () => { void loadRoute() })
       </button>
     </template>
     <div class="inline-actions">
+      <InterviewResponsibilities v-if="detail" :interview="detail" @saved="load" />
       <ApplicationResumeButton v-if="detail" :application-id="detail.applicationId" />
       <button v-if="detail?.status === 'scheduled' && needsFinalSchedule" class="btn btn-primary" type="button" @click="arrangeFinal">安排复试</button>
       <button v-if="detail?.status === 'scheduled' && !needsFinalSchedule" class="btn btn-ghost" type="button" :disabled="acting || savingSchedule" @click="openSchedule">编辑安排</button>
@@ -312,8 +335,7 @@ watch(() => route.params.id, () => { void loadRoute() })
       <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSheets = true">
         考察点评分
       </button>
-      <button v-if="detail && detail.status !== 'cancelled'" class="btn btn-primary" type="button" @click="showSummary = true">面试总结表</button>
-      <button v-if="detail && detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openComplete">
+      <button v-if="canLead && detail && detail.status === 'scheduled'" class="btn btn-ghost" type="button" :disabled="acting" @click="openComplete">
         完成面试
       </button>
       <button class="btn btn-ghost" type="button" @click="router.push('/interviews')">返回面试中心</button>
@@ -349,14 +371,33 @@ watch(() => route.params.id, () => { void loadRoute() })
           <dd class="meeting-details"><span v-if="detail.location">{{ detail.location }}</span><a v-if="detail.meetingUrl" :href="detail.meetingUrl" target="_blank" rel="noreferrer">{{ detail.meetingUrl }}</a><span v-if="!detail.location && !detail.meetingUrl">未设置</span></dd>
         </div>
         <div><dt>参与人</dt><dd>{{ participantText }}</dd></div>
+        <div><dt>面试负责人</dt><dd>{{ detail.participants.find(person => person.lead)?.name || '待分配' }}</dd></div>
+        <div v-for="person in detail.participants.filter(person => person.sheetTypes?.length)" :key="person.userId"><dt>{{ person.name || person.userId }}</dt><dd>{{ person.sheetTypes?.map(type => SHEET_TYPE_LABEL[type]).join('、') }}</dd></div>
       </dl>
-      <div v-if="detail.outcome" class="conclusion-actions">
+      <div v-if="canLead && detail.outcome" class="conclusion-actions">
         <button class="btn btn-primary conclusion-correction-button" type="button" :disabled="correctingConclusion" @click="openConclusionCorrection">修改面试结论</button>
       </div>
     </section>
 
-    <section v-if="detail.feedback.length" class="form-panel">
-      <div class="section-title">面试反馈</div>
+    <div id="interview-summary-report" ref="summarySection" class="summary-anchor">
+      <InterviewSummaryPanel
+        :key="detail.id"
+        :interview-id="detail.id"
+        :application-id="detail.applicationId"
+        :stage="detail.stage ?? stageOfRound(detail.round)"
+        :candidate-name="candidateName"
+        :job-title="jobTitle"
+        :interview-date="detail.scheduledStartAt"
+        @updated="summaryUpdated"
+      >
+        <template #empty-action>
+          <button v-if="detail.status === 'scheduled' && !needsFinalSchedule" class="btn btn-primary" type="button" :disabled="enteringLive" @click="enterLiveRoom">{{ enteringLive ? '正在进入...' : '进入 AI 面试室' }}</button>
+        </template>
+      </InterviewSummaryPanel>
+    </div>
+
+    <details v-if="detail.feedback.length" class="form-panel feedback-details">
+      <summary class="section-title">面试官反馈</summary>
       <div class="feedback-list">
         <article v-for="item in detail.feedback" :key="item.id" class="feedback-item">
           <div class="feedback-head">
@@ -376,7 +417,7 @@ watch(() => route.params.id, () => { void loadRoute() })
           </div>
         </article>
       </div>
-    </section>
+    </details>
 
     <details class="form-panel audit-details">
       <summary>流程审计 <span class="list-muted">{{ auditEvents.length }} 条</span></summary>
@@ -467,17 +508,6 @@ watch(() => route.params.id, () => { void loadRoute() })
     </form>
   </div>
 
-  <InterviewSummaryDialog
-    v-if="detail"
-    :open="showSummary"
-    :interview-id="detail.id"
-    :application-id="detail.applicationId"
-    :stage="detail.stage ?? stageOfRound(detail.round)"
-    :candidate-name="candidateName"
-    :job-title="jobTitle"
-    :interview-date="detail.scheduledStartAt"
-    @close="showSummary = false"
-  />
   <QuestionSheetDialog
     v-if="detail"
     :open="showSheets"
@@ -488,6 +518,8 @@ watch(() => route.params.id, () => { void loadRoute() })
 </template>
 
 <style scoped>
+.summary-anchor { min-width: 0; scroll-margin-top: 24px; }
+.feedback-details > summary { cursor: pointer; }
 .completion-score {
   display: flex;
   align-items: center;

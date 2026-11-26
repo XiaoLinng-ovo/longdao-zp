@@ -4,6 +4,7 @@ import type { Interview } from '../../../shared/types/recruiting'
 import { notifyTrialQuotaChanged } from '../../../shared/api/trial-usage'
 import type { QuestionPreparation } from './question-preparation'
 
+export type InterviewSheetType = 'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'
 export type InterviewType = 'phone_screen' | 'technical' | 'behavioral' | 'case_study' | 'onsite' | 'other'
 export type FeedbackRecommendation = 'strong_yes' | 'yes' | 'mixed' | 'no' | 'strong_no'
 
@@ -23,7 +24,7 @@ export interface ApiInterview {
   timezone?: string
   location?: string
   meetingUrl?: string
-  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required: boolean }>
+  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required: boolean; lead?: boolean; sheetTypes?: InterviewSheetType[] }>
   feedbackStatus: 'draft' | 'submitted' | 'locked' | 'pending'
   outcome?: 'continue' | 'offer' | 'reject' | 'cancelled' | null
   aiScore?: number | null
@@ -52,7 +53,7 @@ export interface CreateInterviewInput {
   timezone?: string
   location?: string
   meetingUrl?: string
-  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean }>
+  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean; lead?: boolean; sheetTypes?: InterviewSheetType[] }>
 }
 
 export interface SubmitFeedbackInput {
@@ -298,7 +299,7 @@ export interface TranscriptRefinement { text: string; corrections: Array<{ origi
 export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string; questionQuote?: string; evidence?: string[] }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none'; transcriptRefinement?: TranscriptRefinement; sourceSegments?: AnalysisSourceSegment[] }
 export interface LiveInterviewSegment { roleReview?: { method: 'semantic_context'; status: 'inferred' | 'uncertain' | 'mixed'; confidence: number; reason: string; model: string; promptVersion: string }; transcriptComparison?: { streamingText: string; offlineText: string; streamingComplete: boolean; selectedSource: 'streaming' | 'offline'; startMs: number; endMs: number }; audioSource?: 'microphone' | 'meeting'; speakerConfirmed?: boolean; id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
 export interface LiveInterviewSession { completionReview?: CompletionReview; id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string; questionSheetGeneration?: { queued: boolean; reason?: string }; summaryGeneration?: { queued: boolean; reason?: string } }
-export interface CompletionReview { phase: 'processing' | 'review_required' | 'ready' | 'completed'; unresolvedCount: number; unresolvedIds: string[]; limit: number; versionId?: string }
+export interface CompletionReview { phase: 'processing' | 'review_required' | 'ready' | 'completed' | 'failed'; error?: string; unresolvedCount: number; unresolvedIds: string[]; limit: number; versionId?: string }
 export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[]; completionReview?: CompletionReview }
 export interface LiveInterviewTranscription extends LiveInterviewView { pendingCount: number; retryingCount: number }
 export async function getLiveInterviewTranscription(sessionId: string): Promise<LiveInterviewTranscription> {

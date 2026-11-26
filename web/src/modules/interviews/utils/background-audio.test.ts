@@ -44,13 +44,13 @@ afterEach(() => { queues.forEach(item => item.dispose()); vi.useRealTimers(); vi
 describe('background interview audio', () => {
   it('retains completion intent through processing and review and recovers it after reload', async () => {
     vi.mocked(endLiveInterviewSession).mockResolvedValueOnce({ status: 'paused', completionReview: { phase: 'processing' } } as never)
-      .mockResolvedValue({ status: 'paused', completionReview: { phase: 'review_required', unresolvedCount: 31, limit: 30 } } as never)
+      .mockResolvedValue({ status: 'paused', completionReview: { phase: 'failed', error: '语音处理失败' } } as never)
     const previous = queue(); previous.adopt(finish(), [entry()]); await flush()
     expect(previous.jobs[0]!.phase).toBe('processing')
     expect(finishes.size).toBe(1); expect(chunks.size).toBe(0)
     await vi.advanceTimersByTimeAsync(15000); await flush()
     expect(previous.jobs[0]!.phase).toBe('review_required')
-    expect(previous.jobs[0]!.message).toContain('31')
+    expect(previous.jobs[0]!.message).toContain('重新评分')
     await vi.advanceTimersByTimeAsync(60000); await flush()
     expect(endLiveInterviewSession).toHaveBeenCalledTimes(2)
     expect(removePendingFinish).not.toHaveBeenCalled()

@@ -171,3 +171,21 @@ test('semantic role inference resolves role review without pretending human conf
   assert.notEqual(turns[0]?.speakerConfirmed, true)
   assert.match(transcriptRoleReviewWarning(manifest, [{ ...turns[0]!, role: 'unknown' }]) ?? '', /暂不评分/)
 })
+
+test('sends opening context and explicit HR, paraphrase and candidate-counterquestion rules for every batch', async () => {
+  const texts = ['我是HR，先介绍一下公司，请你自我介绍。','我之前负责检索系统开发。','也就是说你负责了检索模块，那你怎么验证效果？','我建立了测试集并评估召回率。','团队目前使用什么技术栈？','我们主要使用Python。','明白了。','项目上线后我负责维护。','所以你还做了维护，遇到过什么故障？']
+  const expected = ['interviewer','candidate','interviewer','candidate','candidate','interviewer','candidate','candidate','interviewer']
+  const requests: Record<string, any>[] = []
+  const reviewer = new SemanticRoleReviewer(async (_url, init) => {
+    const request = JSON.parse(String(init?.body)); requests.push(request)
+    const input = JSON.parse(request.messages[1].content)
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ turns: input.turnsToReview.map((row: any) => decision(row.turnId, expected[Number(row.turnId) - 1])) }) } }] })
+  })
+  const result = await reviewer.review(texts.map((text, index) => turn(String(index + 1), text)), env)
+  assert.deepEqual(result.turns.map(row => row.role), expected)
+  assert.equal(requests.length, 2)
+  for (const request of requests) {
+    assert.match(request.messages[0].content, /HR/); assert.match(request.messages[0].content, /复述、概括/); assert.match(request.messages[0].content, /候选人反问/)
+    assert.equal(JSON.parse(request.messages[1].content).openingContext[0].text, texts[0])
+  }
+})

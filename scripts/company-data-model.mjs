@@ -8,6 +8,7 @@ export const owners = {
   interview_audio_transcription_jobs: ['interview_live_sessions', 'session_id', 'id'],
   interview_question_preparations: ['interviews', 'interview_id', 'id'],
   interview_transcript_versions: ['interview_live_sessions', 'session_id', 'id'],
+  interview_summary_versions: ['interview_live_sessions', 'session_id', 'id'],
   interview_transcript_postprocess_jobs: ['interview_live_sessions', 'session_id', 'id'],
 }
 export const workflowSubjects = { recruitment_request: 'recruitment_requests', job: 'jobs', candidate: 'candidates', application: 'applications', interview: 'interviews', offer: 'offers', onboarding: 'onboarding_records', onboarding_record: 'onboarding_records', resume: 'resumes' }
@@ -41,11 +42,21 @@ export async function legacyBaseline(client, organizationId, tables) {
 export async function legacyBaselineMatches(client, organizationId, tables, expected) {
   const current = await legacyBaseline(client, organizationId, tables)
   if (sameSnapshot(current, expected)) return true
-  if (!tables.includes('enterprise_ai_settings')) return false
-  // 0107 adds only default false to frozen rows; preserve pre-0107 receipts without hiding enabled settings or other changes.
-  const selection = await legacySelection(client, 'enterprise_ai_settings')
-  const previous = (await client.query("SELECT count(*)::text AS rows,encode(sha256(convert_to(COALESCE(string_agg(digest,'' ORDER BY digest),''),'UTF8')),'hex') AS sha256 FROM (SELECT encode(sha256(convert_to((CASE WHEN to_jsonb(t)->'self_service_enabled'='false'::jsonb THEN to_jsonb(t)-'self_service_enabled' ELSE to_jsonb(t) END)::text,'UTF8')),'hex') AS digest FROM (" + selection + ') t) hashes', [organizationId])).rows[0]
-  return sameSnapshot(current.map(entry => entry.table === 'enterprise_ai_settings' ? { table: entry.table, ...previous } : entry), expected)
+  // Only documented default-false additions may be projected out of older receipts.
+  // Nondefault values and every pre-existing field remain part of the fingerprint.
+  const additions = { enterprise_ai_settings: 'self_service_enabled', interview_live_sessions: 'summary_stale' }
+  const compatible = [...current]
+  for (const [table, column] of Object.entries(additions)) {
+    const index = compatible.findIndex(entry => entry.table === table)
+    if (index < 0) continue
+    const expectedEntry = expected.find(entry => entry.table === table)
+    if (!expectedEntry) return false
+    if (sameSnapshot(compatible[index], expectedEntry)) continue
+    const selection = await legacySelection(client, table)
+    const previous = (await client.query("SELECT count(*)::text AS rows,encode(sha256(convert_to(COALESCE(string_agg(digest,'' ORDER BY digest),''),'UTF8')),'hex') AS sha256 FROM (SELECT encode(sha256(convert_to((CASE WHEN to_jsonb(t)->'" + column + "'='false'::jsonb THEN to_jsonb(t)-'" + column + "' ELSE to_jsonb(t) END)::text,'UTF8')),'hex') AS digest FROM (" + selection + ') t) hashes', [organizationId])).rows[0]
+    compatible[index] = { table, ...previous }
+  }
+  return sameSnapshot(compatible, expected)
 }
 export async function readCutover(client, organizationId) {
   const installed = (await client.query("SELECT to_regprocedure('public.read_company_data_cutover(uuid)') IS NOT NULL AS installed")).rows[0].installed

@@ -103,10 +103,13 @@ export function createBackgroundAudioQueue(context: () => QueueContext) {
         const ended = await endLiveInterviewSession(item.state.id)
         if (!current(item, revision)) return
         if (ended.status !== 'completed') {
-          item.state.phase = ended.completionReview?.phase === 'review_required' ? 'review_required' : 'processing'
-          item.state.message = item.state.phase === 'review_required'
-            ? '还有 ' + ended.completionReview!.unresolvedCount + ' 条说话角色待确认，请进入面试室复核。'
-            : '录音已保存，正在自动整理转写和说话角色。'
+          if (ended.completionReview?.phase === 'failed') {
+            item.state.phase = 'review_required'
+            item.state.message = '录音已保存，自动处理失败；请在面试总结点击重新评分以重试。'
+            return
+          }
+          item.state.phase = 'processing'
+          item.state.message = '录音已保存，正在自动整理转写和说话角色。'
           // Keep the durable finish intent until the server confirms final completion.
           if (item.state.phase === 'processing') schedule(item)
           return

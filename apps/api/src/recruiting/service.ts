@@ -29,6 +29,7 @@ import { buildDashboardTodos, type DashboardTodo } from './dashboard-todos.js'
 import { dashboardActivity, parseDashboardPeriod, type DashboardActivity } from './dashboard-period.js'
 import type { DashboardInterviewReview } from '../interviews/question-sheet-repository.js'
 import { interviewProgressByApplication } from './interview-progress.js'
+import { normalizeInterviewParticipants, type AssignedParticipant } from './interview-responsibilities.js'
 import { prepareInterviewScheduleUpdate } from './interview-schedule.js'
 import { applyResumeReview, resumeScoreSummary, type ResumeReviewInput } from './resume-scoring.js'
 import { buildOnboardingReminderSchedule, buildOnboardingReport, buildOnboardingWorkbenchItem, isClockTime, isIsoDate, isOnboardingEditable, missingSchedulingFields, onboardingCancellationReasons, onboardingNoShowReasons } from './onboarding-workbench.js'
@@ -184,7 +185,7 @@ function validateOnboardingReason(kind: 'cancel' | 'no_show', value: unknown): {
   return { ...(reason.code ? { reasonCode: reason.code } : {}), ...(reason.notes ? { notes: reason.notes } : {}), auditReason }
 }
 type CreateResumeInput = { candidateId: string; applicationId?: string; originalFilename: string; mimeType?: string; content: string; encoding?: 'utf8' | 'base64' }
-type CreateInterviewInput = { applicationId: string; round?: number; type?: InterviewType; title: string; scheduledStartAt?: string; scheduledEndAt?: string; timezone?: string; location?: string; meetingUrl?: string; participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean }> }
+type CreateInterviewInput = { applicationId: string; round?: number; type?: InterviewType; title: string; scheduledStartAt?: string; scheduledEndAt?: string; timezone?: string; location?: string; meetingUrl?: string; participants: Array<Omit<AssignedParticipant, 'role' | 'required'> & { role?: AssignedParticipant['role']; required?: boolean }> }
 type FeedbackInput = { interviewerId: string; overallScore?: number; recommendation?: InterviewFeedbackRecord['recommendation']; ratings?: Record<string, number>; strengths?: string[]; concerns?: string[]; notes?: string }
 function normalizeOfferInvoiceField(value: unknown, label: string, maxLength: number): string | undefined {
   if (value === undefined) return undefined
@@ -757,7 +758,7 @@ export class RecruitingService {
       recruitmentRequests: requests.map((item) => this.mapRepositoryRequest(item)),
       jobs: mappedJobs,
       candidates: candidates.map((item) => ({ id: item.id, code: item.businessId, fullName: item.name, ...(item.email ? { email: item.email } : {}), ...(item.phone ? { phone: item.phone } : {}), ...(item.source ? { source: item.source } : {}), status: item.consentStatus === 'do_not_contact' ? 'do_not_contact' : 'active', createdAt: item.createdAt, updatedAt: item.updatedAt })),
-      applications: applications.map((item) => ({ id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', appliedAt: item.appliedAt, ...(item.rejectedReason ? { rejectionReason: item.rejectedReason } : {}), updatedAt: item.updatedAt })),
+      applications: applications.map((item) => ({ id: item.id, code: item.businessId, candidateId: item.candidateId, jobId: item.jobId, status: item.status as ApplicationRecord['status'], ...(item.source ? { source: item.source } : {}), aiStatus: 'pending', ...(item.recruiterId ? { recruiterId: item.recruiterId } : {}), appliedAt: item.appliedAt, ...(item.rejectedReason ? { rejectionReason: item.rejectedReason } : {}), updatedAt: item.updatedAt })),
       resumes: resumes.map((item) => ({ id: item.id, candidateId: item.candidateId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), storageKey: item.storageKey, originalFilename: item.originalFilename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, contentHash: item.contentHash ?? '', scanStatus: item.scanStatus as ResumeRecord['scanStatus'], createdAt: item.createdAt })),
       analysisTasks: tasks.map((item) => ({ id: item.id, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), status: item.status as AnalysisTaskRecord['status'], attempts: item.attempts, idempotencyKey: item.idempotencyKey, ...(item.lastError ? { lastError: item.lastError } : {}), availableAt: item.availableAt, ...(item.startedAt ? { startedAt: item.startedAt } : {}), ...(item.completedAt ? { completedAt: item.completedAt } : {}), createdAt: item.createdAt })),
       analysisResults: results.map((item) => ({ id: item.id, analysisTaskId: item.analysisTaskId, resumeId: item.resumeId, ...(item.applicationId ? { applicationId: item.applicationId } : {}), result: item.result, analyzerVersion: item.analyzerVersion ?? '', inputHash: item.inputHash ?? '', humanReviewStatus: item.humanReviewStatus as AnalysisResultRecord['humanReviewStatus'], createdAt: item.createdAt })),
@@ -795,7 +796,7 @@ export class RecruitingService {
   }
 
   private mapRepositoryInterview(item: RepositoryInterview): InterviewRecord {
-    return { id: item.id, code: item.businessId, applicationId: item.applicationId, round: item.round, stage: item.stage, type: item.type as InterviewType, title: item.title, status: item.status as InterviewRecord['status'], ...(item.scheduledStartAt ? { scheduledStartAt: item.scheduledStartAt } : {}), ...(item.scheduledEndAt ? { scheduledEndAt: item.scheduledEndAt } : {}), ...(item.timezone ? { timezone: item.timezone } : {}), ...(item.location ? { location: item.location } : {}), ...(item.meetingUrl ? { meetingUrl: item.meetingUrl } : {}), participants: item.participants.map((participant) => ({ userId: participant.userId, ...(participant.name ? { name: participant.name } : {}), role: (participant.role || 'interviewer') as InterviewParticipant['role'], required: participant.required ?? true })), createdAt: item.createdAt, updatedAt: item.updatedAt }
+    return { id: item.id, code: item.businessId, applicationId: item.applicationId, round: item.round, stage: item.stage, type: item.type as InterviewType, title: item.title, status: item.status as InterviewRecord['status'], ...(item.scheduledStartAt ? { scheduledStartAt: item.scheduledStartAt } : {}), ...(item.scheduledEndAt ? { scheduledEndAt: item.scheduledEndAt } : {}), ...(item.timezone ? { timezone: item.timezone } : {}), ...(item.location ? { location: item.location } : {}), ...(item.meetingUrl ? { meetingUrl: item.meetingUrl } : {}), participants: item.participants.map((participant) => ({ ...participant, userId: participant.userId, ...(participant.name ? { name: participant.name } : {}), role: (participant.role || 'interviewer') as InterviewParticipant['role'], required: participant.required ?? true })), createdAt: item.createdAt, updatedAt: item.updatedAt }
   }
 
   private mapRepositoryFeedback(item: RepositoryInterviewFeedback): InterviewFeedbackRecord {
@@ -1565,7 +1566,7 @@ export class RecruitingService {
     if (this.repository) {
       const applicationRow = await this.repository.getApplication(required(input.applicationId, '申请'))
       if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(applicationRow.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试')
-      const participants = (input.participants ?? []).map((item) => ({ userId: required(item.userId, '面试官'), ...(item.name ? { name: clean(item.name) } : {}), role: item.role ?? 'interviewer', required: item.required ?? true }))
+      const participants = normalizeInterviewParticipants(input.participants ?? [], input.round && input.round >= 2 ? 'final' : 'initial')
       const existing = await this.repository.listInterviews(applicationRow.id)
       const round = input.round ?? existing.length + 1
       if (!Number.isInteger(round) || round < 1 || round > 2) throw new RecruitingWorkflowError('INTERVIEW_ROUND_LIMIT', '系统仅支持初试和复试两轮面试', 400)
@@ -1576,7 +1577,7 @@ export class RecruitingService {
       if (['pending_analysis', 'analysis_queued', 'human_review'].includes(applicationRow.status)) await this.repository.updateApplicationStatus(applicationRow.id, 'interviewing')
       return this.mapRepositoryInterview(created)
     }
-    return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const existing = state.interviews.filter((x) => x.applicationId === application.id); const round = input.round ?? existing.length + 1; if (!Number.isInteger(round) || round < 1 || round > 2) throw new RecruitingWorkflowError('INTERVIEW_ROUND_LIMIT', '系统仅支持初试和复试两轮面试', 400); if (existing.some((item) => item.round === round)) throw new RecruitingWorkflowError('INTERVIEW_ROUND_EXISTS', `${round === 1 ? '初试' : '复试'}已经存在，不能重复创建`, 409); const participants = (input.participants ?? []).map((p) => ({ userId: required(p.userId, '面试官'), ...(p.name ? { name: clean(p.name) } : {}), role: p.role ?? 'interviewer', required: p.required ?? true })); if (round !== 1 && !participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'pending_analysis' || application.status === 'analysis_queued' || application.status === 'human_review') application.status = 'interviewing'; application.updatedAt = timestamp; return interview }) }
+    return this.store.transaction((state) => { const application = applicationOrThrow(state, required(input.applicationId, '申请')); if (['rejected', 'offer_declined', 'offer_cancelled', 'offer_expired', 'onboarding_archived'].includes(application.status)) throw new RecruitingWorkflowError('APPLICATION_NOT_INTERVIEWABLE', '当前申请不能安排面试'); const timestamp = LocalRecruitingStore.timestamp(); const existing = state.interviews.filter((x) => x.applicationId === application.id); const round = input.round ?? existing.length + 1; if (!Number.isInteger(round) || round < 1 || round > 2) throw new RecruitingWorkflowError('INTERVIEW_ROUND_LIMIT', '系统仅支持初试和复试两轮面试', 400); if (existing.some((item) => item.round === round)) throw new RecruitingWorkflowError('INTERVIEW_ROUND_EXISTS', `${round === 1 ? '初试' : '复试'}已经存在，不能重复创建`, 409); const participants = normalizeInterviewParticipants(input.participants ?? [], round >= 2 ? 'final' : 'initial'); if (round !== 1 && !participants.some((p) => p.role === 'interviewer')) throw new RecruitingWorkflowError('INTERVIEWER_REQUIRED', '至少需要一名面试官'); const interview: InterviewRecord = { id: randomUUID(), code: `INT-${state.nextInterviewNumber++}`, applicationId: application.id, round, type: input.type ?? 'other', title: required(input.title, '面试标题'), status: 'scheduled', ...(input.scheduledStartAt ? { scheduledStartAt: input.scheduledStartAt } : {}), ...(input.scheduledEndAt ? { scheduledEndAt: input.scheduledEndAt } : {}), ...(input.timezone ? { timezone: clean(input.timezone) } : {}), ...(input.location ? { location: clean(input.location) } : {}), ...(input.meetingUrl ? { meetingUrl: clean(input.meetingUrl) } : {}), participants, createdAt: timestamp, updatedAt: timestamp }; state.interviews.push(interview); addEvent(state, { subjectType: 'interview', subjectId: interview.id, action: 'create', actorId }); if (application.status === 'pending_analysis' || application.status === 'analysis_queued' || application.status === 'human_review') application.status = 'interviewing'; application.updatedAt = timestamp; return interview }) }
 
   async submitFeedback(id: string, input: FeedbackInput, actorId = 'user-demo'): Promise<InterviewFeedbackRecord> {
     if (this.repository) {
@@ -1722,7 +1723,37 @@ export class RecruitingService {
     })
   }
 
-  async getDashboardSummary(departmentId?: string, loadReviews?: (interviewIds: string[]) => Promise<DashboardInterviewReview[]>, input: { from?: string | undefined; to?: string | undefined; timeZone?: string | undefined } = {}): Promise<DashboardSummary> {
+  async assignInterviewResponsibilities(id: string, input: unknown, actorId: string): Promise<InterviewRecord> {
+    if (this.repository) return this.mapRepositoryInterview(await this.repository.assignInterviewResponsibilities(id,input,actorId))
+    return this.store.transaction(state => {
+      const current = state.interviews.find(row => row.id === id || row.code === id)
+      if (!current) throw new RecruitingNotFoundError('未找到面试')
+      if (current.status === 'cancelled') throw new RecruitingWorkflowError('VALIDATION_ERROR','已取消的面试不能重新分配',400)
+      const participants = normalizeInterviewParticipants(input,current.stage ?? (current.round >= 2 ? 'final' : 'initial'))
+      if (!participants.some(person => person.lead)) throw new RecruitingWorkflowError('VALIDATION_ERROR','请选择面试负责人并分配评分表',400)
+      current.participants = participants; current.updatedAt = new Date().toISOString()
+      return current
+    })
+  }
+
+  async interviewResponsibilities(applicationId: string, userId: string, admin = false) {
+    const interviews = (await this.listInterviews(applicationId)).filter(row => row.status !== 'cancelled').sort((a,b) => b.round-a.round || b.createdAt.localeCompare(a.createdAt))
+    return (['initial','final'] as const).map(stage => {
+      const participants = interviews.find(row => (row.stage ?? (row.round >= 2 ? 'final' : 'initial')) === stage)?.participants ?? []
+      return { stage, lead: admin || participants.some(person => person.userId === userId && person.lead),
+        sheetTypes: admin ? stage === 'initial' ? ['hr_screen','hiring_department'] : ['business','hr','boss'] : participants.filter(person => person.userId === userId && person.role === 'interviewer').flatMap(person => person.sheetTypes ?? []) }
+    })
+  }
+
+  async assertInterviewResponsibility(applicationId: string, stage: 'initial' | 'final', userId: string, sheetType?: string): Promise<void> {
+    const interviews = (await this.listInterviews(applicationId)).filter(row => row.status !== 'cancelled' && (row.stage ?? (row.round >= 2 ? 'final' : 'initial')) === stage)
+      .sort((a, b) => b.round - a.round || b.createdAt.localeCompare(a.createdAt))
+    const participants = interviews[0]?.participants ?? []
+    const assigned = participants.filter(person => person.role === 'interviewer' && (sheetType ? person.sheetTypes?.includes(sheetType as import('./interview-responsibilities.js').AssignedSheetType) : person.lead))
+    if (!assigned.some(person => person.userId === userId)) throw new RecruitingWorkflowError('INTERVIEW_RESPONSIBILITY_REQUIRED', '此事项未分配给你，请联系面试负责人或企业管理员', 403)
+  }
+
+  async getDashboardSummary(departmentId?: string, loadReviews?: (interviewIds: string[]) => Promise<DashboardInterviewReview[]>, input: { from?: string | undefined; to?: string | undefined; timeZone?: string | undefined; userId?: string; todoScope?: 'mine' | 'enterprise' | 'unassigned'; ownership?: {activeUserIds:string[];fallbackUserId?:string | undefined} | undefined } = {}): Promise<DashboardSummary> {
     const period = parseDashboardPeriod(input)
     const state = await this.stateView(departmentId)
     let activity: DashboardActivity | undefined
@@ -1732,7 +1763,7 @@ export class RecruitingService {
     }
     const reviews = loadReviews ? await loadReviews(state.interviews.filter(row => row.status !== 'cancelled').map(row => row.id)) : []
     // Todos represent outstanding work, not activity during the selected reporting period.
-    const todos = buildDashboardTodos(state, reviews)
+    const todos = buildDashboardTodos(state, reviews, input.userId ? { userId: input.userId, scope: input.todoScope ?? 'mine' } : undefined, input.ownership)
     const applications = state.applications
     const count = (statuses: string[]) => applications.filter((item) => statuses.includes(item.status)).length
     const counts = activity ? [activity.counts.applications, activity.counts.screened, activity.counts.interviews, activity.counts.offers, activity.counts.onboarded] : [applications.length, count(['human_review', 'interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['interviewing', 'offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['offer_approval', 'offer_sent', 'offer_accepted', 'onboarding_archived']), count(['onboarding_archived'])]
@@ -1744,7 +1775,7 @@ export class RecruitingService {
       { label: '发出 Offer', value: counts[3]!, detail: activity ? '所选时段实际发出 Offer 的人数' : (funnel[3]!.conversionRate ?? 0) + '% 转化率' },
     ]
     const pendingApprovals = state.recruitmentRequests
-      .filter((request) => request.status === 'pending_approval')
+      .filter((request) => request.status === 'pending_approval' && todos.some(todo => todo.id === `request-${request.id}`))
       .slice()
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     const pendingInterviews = state.interviews

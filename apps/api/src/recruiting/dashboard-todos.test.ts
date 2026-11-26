@@ -20,6 +20,48 @@ function lockedSheets(stage: 'initial' | 'final'): DashboardInterviewReview['she
 }
 const sheetTodos = (state: ReturnType<typeof createSeedState>, reviews: DashboardInterviewReview[]) => buildDashboardTodos(state, reviews).filter(row => row.id.startsWith('sheets-'))
 
+describe('dashboard personal todo ownership', () => {
+  it('routes disabled and departed assignees to an active enterprise administrator', () => {
+    const {state,interview,review}=fixture()
+    interview.participants=[{userId:'departed',role:'interviewer',required:true,lead:true,sheetTypes:['hr_screen','hiring_department']}]
+    const ownership={activeUserIds:['admin','other'],fallbackUserId:'admin'}
+    const mine=(userId:string)=>buildDashboardTodos(state,[review],{userId},ownership).filter(row=>row.id.startsWith('sheet-'))
+    assert.equal(mine('admin').length,2)
+    assert.equal(mine('other').length,0)
+    assert.equal(mine('departed').length,0)
+  })
+  it('shows each scorer only their sheet and never broadcasts to unrelated members', () => {
+    const {state,interview,review} = fixture()
+    interview.participants = [{userId:'a',role:'interviewer',required:true,lead:true,sheetTypes:['hr_screen']},{userId:'b',role:'interviewer',required:true,lead:false,sheetTypes:['hiring_department']}]
+    const mine = (userId: string) => buildDashboardTodos(state,[review],{userId}).filter(row => row.id.startsWith('sheet-'))
+    assert.deepEqual(mine('a').map(row => row.id),['sheet-interview-1-hr_screen-score'])
+    assert.deepEqual(mine('b').map(row => row.id),['sheet-interview-1-hiring_department-score'])
+    assert.deepEqual(mine('c'),[])
+    review.sheets = [{sheetType:'hiring_department',status:'submitted',totalQuestions:2,scoredQuestions:2}]
+    assert.deepEqual(mine('b'),[])
+    assert.ok(mine('a').some(row => row.id === 'sheet-interview-1-hiring_department-lock'))
+    review.sheets = lockedSheets('initial')
+    assert.ok(buildDashboardTodos(state,[review],{userId:'a'}).some(row => row.id === 'decision-interview-1'))
+    assert.ok(!buildDashboardTodos(state,[review],{userId:'b'}).some(row => row.id === 'decision-interview-1'))
+    review.decision = 'rejected'; assert.equal(mine('a').length,0)
+  })
+  it('includes assigned offline completed interview scoring even without live recordings', () => {
+    const {state,interview,review} = fixture(); review.hasCompletedLive=false
+    interview.participants=[{userId:'a',role:'interviewer',required:true,lead:true,sheetTypes:['hr_screen','hiring_department']}]
+    assert.equal(buildDashboardTodos(state,[review],{userId:'a'}).filter(row=>row.id.startsWith('sheet-')).length,2)
+  })
+  it('keeps historical unassigned work separate from personal work', () => {
+    const {state,review} = fixture()
+    const relevant = (scope: 'mine'|'enterprise'|'unassigned') => buildDashboardTodos(state,[review],{userId:'admin',scope}).filter(row => row.id.startsWith('sheet-'))
+    assert.equal(relevant('mine').length,0); assert.equal(relevant('enterprise').length,2)
+    assert.equal(relevant('unassigned').length,2); assert.ok(relevant('unassigned').every(row => row.unassigned))
+  })
+  it('removes cancelled interviews from all scopes', () => {
+    const {state,interview,review} = fixture(); interview.status = 'cancelled'
+    assert.equal(buildDashboardTodos(state,[review],{userId:'a',scope:'enterprise'}).filter(row => row.id.startsWith('sheet-')).length,0)
+  })
+})
+
 describe('dashboard actionable todos', () => {
   it('includes completed online interviews even before question sheets exist', () => {
     const { state, review } = fixture()
@@ -90,7 +132,7 @@ describe('dashboard actionable todos', () => {
     const completion = todos.filter(row => row.id.startsWith('complete-'))
     assert.deepEqual(completion.map(row => row.id), ['complete-interview-1'])
     assert.equal(completion[0]!.title, '面试待完成')
-    assert.equal(completion[0]!.actionLabel, '去完成')
+    assert.equal(completion[0]!.actionLabel, '查看安排')
     assert.equal(completion[0]!.path, '/interviews/interview-1')
     assert.ok(!todos.some(row => row.id.startsWith('feedback-') || row.id.startsWith('conclude-')))
 

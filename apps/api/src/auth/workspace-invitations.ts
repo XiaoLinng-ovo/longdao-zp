@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
+import { assertSingleEnterprise } from './single-enterprise.js'
 import { requireReadyWorkspaceSchema, type WorkspaceSchemaRegistry } from './workspace-context.js'
 
 export const INVITABLE_ROLES = ['recruiter'] as const
@@ -65,12 +66,12 @@ export async function joinSharedInvitation(db: WorkspaceSchemaRegistry, value: u
   const org = await db.query('SELECT * FROM organizations WHERE id=$1 AND organization_service_available(id) FOR UPDATE', [initial.organization_id])
   if (!org.rows[0]) fail('INVITATION_UNAVAILABLE', '企业不可用，无法加入', 410)
   const row = await readSharedInvitation(db, value, true)
-  const user = await db.query('SELECT id FROM users WHERE id=$1 AND is_active=true FOR SHARE', [userId])
-  if (!user.rows[0]) fail('AUTHENTICATION_REQUIRED', '账号不可用，请重新登录', 401)
-  const existing = await db.query('SELECT is_active FROM organization_members WHERE organization_id=$1 AND user_id=$2 FOR UPDATE', [row.organization_id,userId])
+  await assertSingleEnterprise(db, userId, row.organization_id)
+  const existing = await db.query('SELECT is_active FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND ended_at IS NULL FOR UPDATE', [row.organization_id,userId])
   if (existing.rows[0] && !existing.rows[0].is_active) fail('MEMBERSHIP_DISABLED', '你在此企业的成员身份已停用，请联系企业管理员恢复', 403)
   if (!existing.rows[0]) {
-    await db.query(`INSERT INTO organization_members (organization_id,user_id,role,business_role,department_id) VALUES ($1,$2,'member','recruiter',NULL)`, [row.organization_id,userId])
+    await db.query(`INSERT INTO organization_members (organization_id,user_id,role,business_role,department_id) VALUES ($1,$2,'member','recruiter',NULL)
+      ON CONFLICT (organization_id,user_id) DO UPDATE SET role='member',business_role='recruiter',department_id=NULL,is_active=true,ended_at=NULL,joined_at=now()`, [row.organization_id,userId])
     await db.query('INSERT INTO organization_invitation_joins (invitation_id,user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [row.id,userId])
     await writeInvitationAudit(db, routeSchemas, row.organization_id,userId,'workspace.invitation.accept',row.id,{ membershipRole:'member', shared:true })
   }
@@ -117,10 +118,10 @@ export class WorkspaceInvitationsService {
     finally { client.release() }
   }
 
-  private async admin(db: Pool | PoolClient, workspaceId: string, userId: string, lock = false): Promise<string> {
+  private async admin(db: Pool | PoolClient, workspaceId: string, userId: string, lock = false, requireService = true): Promise<string> {
     const result = await db.query(
       `SELECT m.role FROM organizations o JOIN organization_members m ON m.organization_id=o.id
-        WHERE o.id=$1 AND organization_service_available(o.id) AND m.user_id=$2 AND m.is_active AND m.role IN ('owner','admin') AND EXISTS(SELECT 1 FROM users u WHERE u.id=m.user_id AND u.is_active)
+        WHERE o.id=$1 AND (${requireService ? 'organization_service_available(o.id)' : 'true'}) AND m.user_id=$2 AND m.is_active AND m.role IN ('owner','admin') AND EXISTS(SELECT 1 FROM users u WHERE u.id=m.user_id AND u.is_active)
         ${lock ? 'FOR SHARE OF o, m' : ''}`, [uuid(workspaceId), userId])
     if (!result.rows[0]) fail('WORKSPACE_ADMIN_REQUIRED', '仅企业管理员可以管理本企业成员和邀请', 403)
     return result.rows[0].role
@@ -182,13 +183,13 @@ export class WorkspaceInvitationsService {
   }
 
   async members(workspaceId: string, actorId: string) {
-    await this.admin(this.pool, workspaceId, actorId)
+    await this.admin(this.pool, workspaceId, actorId, false, false)
     const result = await this.pool.query(
       `SELECT u.id,u.display_name AS name,u.email,m.role AS membership_role,
          m.business_role,
          m.department_id,d.name AS department_name,m.joined_at,m.is_active,u.is_active AS account_active
       FROM organization_members m JOIN users u ON u.id=m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id
-       WHERE m.organization_id=$1 ORDER BY m.joined_at`, [workspaceId])
+       WHERE m.organization_id=$1 AND m.ended_at IS NULL ORDER BY m.joined_at`, [workspaceId])
       return result.rows.map(row => ({id:row.id,name:row.name,email:row.email,membershipRole:row.membership_role,businessRole:'recruiter' as const,departmentId:row.department_id,departmentName:row.department_name,joinedAt:date(row.joined_at),isActive:row.is_active,accountActive:row.account_active}))
   }
 
@@ -198,7 +199,7 @@ export class WorkspaceInvitationsService {
       await db.query('SELECT id FROM organizations WHERE id=$1 FOR UPDATE', [uuid(workspaceId)])
       const role = await this.admin(db, workspaceId, actorId, true)
       if (actorId === userId) fail('FORBIDDEN', '不能修改自己的企业权限', 403)
-      const target = await db.query('SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2 FOR UPDATE', [workspaceId, uuid(userId)])
+      const target = await db.query('SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND ended_at IS NULL FOR UPDATE', [workspaceId, uuid(userId)])
       if (!target.rows[0]) fail('NOT_FOUND', '成员不存在', 404)
       if (target.rows[0].role === 'owner') fail('FORBIDDEN', '主管理员身份只能通过交接变更', 403)
       if (role !== 'owner' && (target.rows[0].role !== 'member' || data.membershipRole !== 'member')) fail('FORBIDDEN', '只有企业主管理员可以任免或修改子管理员', 403)
@@ -219,7 +220,7 @@ export class WorkspaceInvitationsService {
     return this.transaction(async db => {
       await db.query('SELECT id FROM organizations WHERE id=$1 FOR UPDATE', [uuid(workspaceId)])
       const role = await this.admin(db, workspaceId, actorId, true)
-      const target = await db.query('SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2 FOR UPDATE', [workspaceId, uuid(userId)])
+      const target = await db.query('SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND ended_at IS NULL FOR UPDATE', [workspaceId, uuid(userId)])
       if (!target.rows[0]) fail('NOT_FOUND', '成员不存在', 404)
       if (actorId === userId || target.rows[0].role === 'owner' || (role !== 'owner' && target.rows[0].role !== 'member')) fail('FORBIDDEN', '不能停用自己或主管理员，子管理员只能管理普通成员', 403)
       await db.query('UPDATE organization_members SET is_active=$3 WHERE organization_id=$1 AND user_id=$2', [workspaceId, userId, input.isActive])

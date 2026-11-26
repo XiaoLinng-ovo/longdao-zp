@@ -67,8 +67,8 @@ async function fillSchedule() {
   const meeting = root!.querySelector('input[placeholder="https://..."]') as HTMLInputElement
   meeting.value = 'https://meeting.example.com/final'
   meeting.dispatchEvent(new Event('input'))
-  const interviewer = root!.querySelector('select[aria-label="面试官"]') as HTMLSelectElement
-  interviewer.value = '77777777-7777-4777-8777-777777777777'
+  const interviewer = root!.querySelector('input[type="checkbox"][value="77777777-7777-4777-8777-777777777777"]') as HTMLInputElement
+  interviewer.checked = true
   interviewer.dispatchEvent(new Event('change'))
   await flush()
 }
@@ -91,6 +91,24 @@ afterEach(() => {
 })
 
 describe('InterviewListPage', () => {
+  it('restores every selected interviewer and saves distinct scorer assignments with one lead', async () => {
+    const a = '77777777-7777-4777-8777-777777777777', b = '88888888-8888-4888-8888-888888888888'
+    mockedLoadInterviews.mockResolvedValue([finalInterview({interviewerIds:[a,b],participants:[
+      {userId:a,name:'林晓',role:'interviewer',required:true,lead:false,sheetTypes:['business']},
+      {userId:b,name:'赵明',role:'interviewer',required:true,lead:true,sheetTypes:['hr','boss']},
+    ]})])
+    mockedLoadApplications.mockResolvedValue({candidates:[],jobs:[],applications:[],interviewers:[{id:a,displayName:'林晓'},{id:b,displayName:'赵明'}]})
+    mockedUpdateSchedule.mockResolvedValue({} as never)
+    await mountPage('/interviews?applicationId=app-1&interviewId=final-1&stage=final')
+    expect([...root!.querySelectorAll<HTMLInputElement>('.interviewer-options input:checked')].map(item=>item.value)).toEqual([a,b])
+    expect(root!.querySelector<HTMLSelectElement>('#interview-lead')!.value).toBe(b)
+    expect(root!.querySelector<HTMLSelectElement>('#sheet-owner-business')!.value).toBe(a)
+    await fillSchedule();button('确认安排复试').click();await flush()
+    expect(mockedUpdateSchedule).toHaveBeenCalledWith('final-1',expect.objectContaining({participants:[
+      expect.objectContaining({userId:a,lead:false,sheetTypes:['business']}),
+      expect.objectContaining({userId:b,lead:true,sheetTypes:['hr','boss']}),
+    ]}))
+  })
   it('disables scheduling inputs until asynchronous defaults have loaded', async () => {
     mockedLoadInterviews.mockResolvedValue([finalInterview()])
     let finish!: (value: Awaited<ReturnType<typeof loadInterviewScheduleData>>) => void
@@ -329,8 +347,8 @@ describe('InterviewListPage', () => {
     const time = root!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!
     expect(new Date(time.value).toISOString()).toBe('2026-11-19T02:00:00.000Z')
     expect(root!.querySelector<HTMLInputElement>('input[placeholder="https://..."]')!.value).toBe('https://meeting.example.com/retained')
-    const interviewer = root!.querySelector<HTMLSelectElement>('select[aria-label="面试官"]')!
-    interviewer.value = '77777777-7777-4777-8777-777777777777'
+    const interviewer = root!.querySelector<HTMLInputElement>('input[type="checkbox"][value="77777777-7777-4777-8777-777777777777"]')!
+    interviewer.checked = true
     interviewer.dispatchEvent(new Event('change'))
     await flush()
     button('确认安排复试').click()
@@ -366,7 +384,7 @@ describe('InterviewListPage', () => {
     }))
   })
 
-  it('allows creating an initial interview before an interviewer has been assigned', async () => {
+  it('requires an interviewer when creating a scheduled initial invitation', async () => {
     mockedLoadInterviews.mockResolvedValue([])
     mockedLoadApplications.mockResolvedValue({
       candidates: [{ id: 'candidate-1', code: 'CAN-1', fullName: '王五' }],
@@ -376,13 +394,17 @@ describe('InterviewListPage', () => {
     })
     mockedCreateInterview.mockResolvedValue({} as never)
     await mountPage('/interviews?applicationId=app-1&stage=initial')
-    expect(root!.textContent).toContain('面试官（选填）')
-    await fillSchedule()
+    expect(root!.textContent).toContain('面试官 · 已选 0 人')
+    const time = root!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!
+    time.value = '2026-11-01T10:00'; time.dispatchEvent(new Event('input'))
+    const meeting = root!.querySelector<HTMLInputElement>('input[placeholder="https://..."]')!
+    meeting.value = 'https://meeting.example.com/initial'; meeting.dispatchEvent(new Event('input'))
+    await flush()
     button('创建初试邀约').click()
     await flush()
 
-    expect(mockedCreateInterview).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', round: 1, participants: [] }))
-    expect(root!.querySelector('[role="alert"]')).toBeNull()
+    expect(mockedCreateInterview).not.toHaveBeenCalled()
+    expect(root!.textContent).toContain('请至少选择一名有效面试官')
   })
 
   it('opens the matching final interview from a task link and updates its schedule without creating records', async () => {
@@ -402,7 +424,7 @@ describe('InterviewListPage', () => {
     expect(mockedUpdateSchedule).toHaveBeenCalledWith('final-1', {
       scheduledStartAt: new Date('2026-11-01T10:00').toISOString(), location: null,
       meetingUrl: 'https://meeting.example.com/final',
-      participants: [support, { userId: '77777777-7777-4777-8777-777777777777', name: '林晓', role: 'interviewer', required: true }],
+      participants: [support, { userId: '77777777-7777-4777-8777-777777777777', name: '林晓', role: 'interviewer', required: true, lead: true, sheetTypes: ['business','hr','boss'] }],
     })
     expect(mockedCreateInterview).not.toHaveBeenCalled()
     expect(mockedCreateApplication).not.toHaveBeenCalled()

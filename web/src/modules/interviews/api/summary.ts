@@ -16,9 +16,11 @@ export interface InterviewSummaryReport {
   reviewRequired?: boolean
   pairs: ActualInterviewPair[]; transcript: TranscriptTurn[]; advisoryOnly: true; applicationStatusMutation: 'none'
 }
+export async function loadInterviewSummaryVersions(interviewId: string): Promise<Array<{ id: string; revision: number; report: InterviewSummaryReport; createdAt: string }>> { return (await apiClient.getJson<Array<{ id: string; revision: number; report: InterviewSummaryReport; createdAt: string }>>('/interviews/' + interviewId + '/summary/versions')).data }
+
 export interface InterviewSummaryView {
   sessionId: string; status: 'none' | 'pending' | 'generating' | 'ready' | 'failed'
-  report: InterviewSummaryReport | null; error: string | null; revision: number
+  report: InterviewSummaryReport | null; error: string | null; revision: number; stale?: boolean; phase?: 'transcribing' | 'role_review' | 'scoring' | 'failed' | 'ready' | 'idle'
 }
 export async function loadInterviewSummary(interviewId: string): Promise<InterviewSummaryView | null> {
   return (await apiClient.getJson<InterviewSummaryView | null>(`/interviews/${interviewId}/summary`)).data

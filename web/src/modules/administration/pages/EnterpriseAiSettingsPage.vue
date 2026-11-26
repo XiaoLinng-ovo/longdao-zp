@@ -4,6 +4,8 @@ import { Check, PlugZap, RefreshCw, Save, Trash2, X } from '@lucide/vue'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import { authSession } from '../../auth/session'
+import DocumentGenerationSkills from '../components/DocumentGenerationSkills.vue'
+import ResumeScoringSkills from '../components/ResumeScoringSkills.vue'
 import AiModelSelector from '../components/AiModelSelector.vue'
 import { getEnterpriseAiSettings, selectEnterpriseAiSource, saveEnterpriseAiSettings, testEnterpriseAiConnection, type AiSettings, type AiConnectionTestResult } from '../api'
 
@@ -137,6 +139,10 @@ onMounted(load)
       </div>
     </form>
     </template>
+  </section>
+  <section class="section enterprise-skills">
+    <DocumentGenerationSkills />
+    <ResumeScoringSkills />
   </section>
 </template>
 

@@ -44,7 +44,7 @@ const status = ref<'idle' | 'starting' | 'recording' | 'paused' | 'manual' | 'st
 const completionReview = ref<CompletionReview>()
 const unresolvedTurnIds = computed(() => new Set(completionReview.value?.unresolvedIds ?? []))
 function needsRoleReview(segment: LiveInterviewSegment & { sourceIds?: string[] }) {
-  return status.value === 'reviewing' && (segment.sourceIds ?? [segment.id]).some(id => unresolvedTurnIds.value.has(id))
+  return ['reviewing', 'completed'].includes(status.value) && (segment.sourceIds ?? [segment.id]).some(id => unresolvedTurnIds.value.has(id))
 }
 const savingRole = ref(false)
 const finalizing = ref(false)
@@ -135,6 +135,7 @@ const captureActive = ref(false)
 const pausing = ref(false)
 const interviewCompleted = computed(() => detail.value?.status === 'completed')
 const interviewCancelled = computed(() => detail.value?.status === 'cancelled')
+const canCorrectTranscript = computed(() => !interviewCancelled.value && !!completionReview.value?.versionId && ['completed','reviewing'].includes(status.value))
 const interviewReadOnly = computed(() => interviewCompleted.value || interviewCancelled.value || status.value === 'completed')
 const canStartLiveInterview = computed(() => detail.value?.status === 'scheduled' && status.value !== 'completed' && status.value !== 'reviewing')
 const audioSettingsLocked = computed(() => interviewReadOnly.value || pausing.value || ['starting', 'recording', 'manual', 'stopping', 'completed'].includes(status.value) || (captureActive.value && status.value !== 'paused'))
@@ -328,8 +329,9 @@ async function recoverAudio() {
   void requestWakeLock()
 
 }
-function reconnectAudio() {
-  void recoverAudio()
+async function reconnectAudio() {
+  await recoverAudio()
+  if (disposed || status.value !== 'recording') return
   Object.values(sourceStreaming).forEach(channel => channel.reconnect())
 }
 function beforeUnload(event: BeforeUnloadEvent) {
@@ -964,14 +966,15 @@ async function stop() {
   } finally { stopStreamingAudio() }
 }
 async function setRole(segment:LiveInterviewSegment & {sourceIds?:string[]},role:'interviewer'|'candidate'){
-  if(interviewReadOnly.value || savingRole.value)return
-  if (status.value === 'reviewing') {
+  if(interviewCancelled.value || savingRole.value || (interviewReadOnly.value && !canCorrectTranscript.value))return
+  if (status.value === 'reviewing' || status.value === 'completed') {
     const versionId = completionReview.value?.versionId
     if (!versionId || completionReview.value?.phase === 'processing') return
     savingRole.value = true
     transcriptEditRevision++
     try {
       applyReviewView(await correctTranscriptRoles(sessionId.value, versionId, segment.sourceIds ?? [segment.id], role))
+      await refreshFinalInterviewScore()
     } catch (cause) { error.value = describeApiFailure(cause, '修正说话人失败，请刷新后重试').message }
     finally { transcriptEditRevision++; savingRole.value = false; scheduleTranscriptionPoll(0) }
     return
@@ -1145,7 +1148,8 @@ onUnmounted(() => {
       <div v-if="error" class="error-note" role="alert">{{ error }}</div>
       <div v-if="status === 'reviewing'" class="loading-note" role="status">
         <template v-if="!completionReview || completionReview.phase === 'processing'">录音正在保存或自动整理，尚未最终结束。</template>
-        <template v-else>待确认说话角色：{{ completionReview.unresolvedCount }} 条（最多允许 {{ completionReview.limit }} 条）。<span v-if="completionReview.phase === 'review_required'">请回听并选择下方发言的说话角色。</span><span v-else>可以确认结束面试。</span></template>
+        <template v-else-if="completionReview.phase === 'failed'">处理失败：{{ completionReview.error }}。可在面试总结中重新评分以重试。</template>
+        <template v-else>角色自动识别已完成，{{ completionReview.unresolvedCount }} 条不确定发言将保留原文但不作为评分证据，不影响结束面试。</template>
       </div>
       <div v-if="uploadRetryNotice" class="loading-note" role="status">{{ uploadRetryNotice }}</div>
       <div v-if="pendingAudioCount || localCacheWarning" class="loading-note" role="status">
@@ -1175,17 +1179,6 @@ onUnmounted(() => {
           <label v-if="!authorizationDialogOpen" class="recording-consent"><input v-model="recordingConsent" type="checkbox" :disabled="audioSettingsLocked" /><span>已告知参与者并取得录音、转写及 AI 辅助分析同意</span></label>
           <span class="audio-mode-badge">{{ audioMode === 'meeting' ? '双路采集' : '仅麦克风' }}</span>
         </div>
-        <details class="source-role-settings">
-          <summary>{{ activeSources.some(source => !sourceSettings[source].multipleSpeakers && sourceSettings[source].role !== 'unknown') ? '已设置单人音轨角色' : '说话人自动识别' }} <span>手动设置（可选）</span></summary>
-          <div v-for="source in activeSources" :key="source" class="source-role-row">
-            <strong>{{ sourceLabels[source] }}</strong>
-            <label><span>识别方式</span><select v-model="sourceSettings[source].role" :aria-label="sourceLabels[source] + '角色'" :disabled="audioSettingsLocked">
-              <option value="unknown">自动识别（推荐）</option><option value="interviewer">面试官</option><option value="candidate">候选人</option>
-            </select></label>
-            <label class="source-multiple"><input v-model="sourceSettings[source].multipleSpeakers" type="checkbox" :aria-label="sourceLabels[source] + '包含多人'" :disabled="audioSettingsLocked">该路包含多人</label>
-            <small v-if="sourceSettings[source].multipleSpeakers && sourceSettings[source].role !== 'unknown'" class="source-multiple">多人音轨仍会自动识别每位说话人；仅一人且需指定角色时，请取消勾选。</small>
-          </div>
-        </details>
         <div class="audio-source-status" aria-live="polite">
           <div class="audio-source">
             <span class="audio-source-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8" /></svg></span>
@@ -1228,7 +1221,7 @@ onUnmounted(() => {
             <div v-if="!utterances.length && !streamingText" class="room-empty">{{ interviewCancelled ? '面试已取消，不能创建实时面试会话。' : interviewCompleted ? '该面试已完成，暂无实时面试记录，不能重新创建实时会话。' : '暂无转写记录' }}</div>
             <article v-for="segment in utterances" :key="segment.id" class="utterance" :data-role="segment.role">
               <div class="utterance-head"><strong>{{ segment.role==='candidate'?'候选人':segment.role==='interviewer'?'面试官':'待确认' }}<span class="utterance-source">{{ segment.audioSource ? sourceLabels[segment.audioSource] : '历史记录 / 手动记录' }}</span></strong><small>{{ formatTimestamp(segment.startMs) }}–{{ formatTimestamp(segment.endMs) }} · {{ segment.final?'发言已结束':'正在继续...' }}</small></div>
-              <div class="utterance-identity"><span :title="segment.roleReview?.reason">{{ speakerLabel(segment) }}</span><strong v-if="needsRoleReview(segment)" class="role-review-badge">说话角色待确认</strong><span v-if="segment.sourceIds.length > 1">已合并 {{ segment.sourceIds.length }} 段</span><span v-if="segment.role !== 'unknown' && segment.confidence < 1">角色为自动识别，可人工校正</span><span v-if="segment.overlapping" class="overlap-badge">重叠发言</span></div>
+              <div class="utterance-identity"><span :title="segment.roleReview?.reason">{{ speakerLabel(segment) }}</span><strong v-if="needsRoleReview(segment)" class="role-review-badge">角色不确定</strong><span v-if="segment.sourceIds.length > 1">已合并 {{ segment.sourceIds.length }} 段</span><span v-if="segment.role !== 'unknown' && segment.confidence < 1">角色为自动识别，可人工校正</span><span v-if="segment.overlapping" class="overlap-badge">重叠发言</span></div>
               <template v-if="applicableAnalyses[segment.id]?.transcriptRefinement">
                 <TranscriptRefinementEditor :segment-id="segment.id" :refinement="applicableAnalyses[segment.id]!.transcriptRefinement!" :source-segments="analysisSourceSegments(segment)" :label="segment.role === 'interviewer' ? '整理后的发言' : '整理后的回答'" :disabled="analyzingId === segment.id" @editing-change="editingRefinements[segment.id] = $event" @saved="analyses[segment.id] = { ...analyses[segment.id]!, transcriptRefinement: $event }" />
                 <details class="answer-original">
@@ -1242,7 +1235,7 @@ onUnmounted(() => {
               </template>
               <p v-else>{{ segment.text }}</p>
               <small v-if="segment.role === 'unknown' && segment.speakerId?.includes(':stream_')" class="stream-source">流式全文保留 · 说话人待确认</small>
-              <div class="utterance-actions"><button v-if="!segment.speakerId?.startsWith('manual_')" type="button" title="从本段开始回听整场录音" @click="openAudio(segment.sessionId, segment.startMs)">回听本段</button><button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为面试官" @click="setRole(segment,'interviewer')">面试官</button><button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为候选人" @click="setRole(segment,'candidate')">候选人</button><button v-if="status !== 'reviewing' && !segment.id.startsWith('turn-') && hasSubstantiveAnswer(segment.text) && segment.final && segment.role!=='unknown' && segment.confidence>=.6" class="analyze-button" type="button" :disabled="!!analyzingId || editingRefinements[segment.id] || !!blockedAnalysisReasons[segment.id]" :aria-busy="analyzingId === segment.id" :title="blockedAnalysisReasons[segment.id] || (editingRefinements[segment.id] ? '请先保存或取消编辑' : analyzingId && analyzingId !== segment.id ? '请等待当前回答分析完成' : segment.role === 'interviewer' ? '整理面试官完整发言，不参与候选人评分' : '分析整段回答')" @click="analyze(segment)">{{ analyzingId===segment.id?'分析中...':analysisFeedback[segment.id]?'重新分析完整回答':'分析完整回答' }}</button></div>
+              <div class="utterance-actions"><button v-if="!segment.speakerId?.startsWith('manual_')" type="button" title="从本段开始回听整场录音" @click="openAudio(segment.sessionId, segment.startMs)">回听本段</button><button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为面试官" @click="setRole(segment,'interviewer')">面试官</button><button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为候选人" @click="setRole(segment,'candidate')">候选人</button><button v-if="status !== 'reviewing' && !segment.id.startsWith('turn-') && hasSubstantiveAnswer(segment.text) && segment.final && segment.role!=='unknown' && segment.confidence>=.6" class="analyze-button" type="button" :disabled="!!analyzingId || editingRefinements[segment.id] || !!blockedAnalysisReasons[segment.id]" :aria-busy="analyzingId === segment.id" :title="blockedAnalysisReasons[segment.id] || (editingRefinements[segment.id] ? '请先保存或取消编辑' : analyzingId && analyzingId !== segment.id ? '请等待当前回答分析完成' : segment.role === 'interviewer' ? '整理面试官完整发言，不参与候选人评分' : '分析整段回答')" @click="analyze(segment)">{{ analyzingId===segment.id?'分析中...':analysisFeedback[segment.id]?'重新分析完整回答':'分析完整回答' }}</button></div>
               <div v-if="analyzingId === segment.id" class="answer-analysis-feedback" role="status">正在整理并分析完整回答…</div>
               <div v-else-if="segment.final && blockedAnalysisReasons[segment.id]" class="answer-analysis-feedback review" role="status">待核实：{{ blockedAnalysisReasons[segment.id] }}</div>
               <div v-else-if="analysisFeedback[segment.id] && analysisFeedback[segment.id]!.kind !== 'review'" class="answer-analysis-feedback" :class="analysisFeedback[segment.id]!.kind" :role="analysisFeedback[segment.id]!.kind === 'error' ? 'alert' : 'status'">{{ analysisFeedback[segment.id]!.message }}</div>
@@ -1253,8 +1246,8 @@ onUnmounted(() => {
                   <p>{{ source.text }}</p>
                   <div class="utterance-actions">
                     <button v-if="!source.speakerId?.startsWith('manual_')" type="button" title="回听此原始分段" @click="openAudio(source.sessionId, source.startMs)">回听分段</button>
-                    <button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="仅将此分段标记为面试官" @click="setRole(source, 'interviewer')">面试官</button>
-                    <button v-if="!interviewReadOnly" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="仅将此分段标记为候选人" @click="setRole(source, 'candidate')">候选人</button>
+                    <button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="仅将此分段标记为面试官" @click="setRole(source, 'interviewer')">面试官</button>
+                    <button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="仅将此分段标记为候选人" @click="setRole(source, 'candidate')">候选人</button>
                   </div>
                 </div>
               </details>
@@ -1285,19 +1278,7 @@ onUnmounted(() => {
           </select>
         </label>
         <p class="recording-dialog-auto-role">默认结合开场问答自动识别面试官与候选人，无需预先选择角色；不确定的片段可在转写后校正。</p>
-        <details class="recording-dialog-role-options">
-          <summary>手动设置说话人（可选）</summary>
-          <div class="recording-dialog-roles">
-            <div v-for="source in activeSources" :key="source" class="recording-dialog-source">
-              <label class="audio-setting-field"><span>{{ sourceLabels[source] }}角色</span>
-                <select v-model="sourceSettings[source].role" :aria-label="'授权弹窗：' + sourceLabels[source] + '角色'" :disabled="status === 'starting'">
-                  <option value="unknown">自动识别（推荐）</option><option value="interviewer">面试官</option><option value="candidate">候选人</option>
-                </select>
-              </label>
-              <label class="recording-dialog-multiple"><input v-model="sourceSettings[source].multipleSpeakers" type="checkbox" :aria-label="'授权弹窗：' + sourceLabels[source] + '包含多人'" :disabled="status === 'starting'" />该路包含多人</label>
-            </div>
-          </div>
-        </details>
+
         <label class="recording-consent recording-dialog-consent">
           <input v-model="recordingConsent" type="checkbox" :disabled="status === 'starting'" />
           <span>我已告知参与者并取得录音、转写及 AI 辅助分析同意</span>

@@ -30,11 +30,11 @@ it('marks a failed regeneration as failed when the retained report has no score 
   assert.equal(f.calls[0]?.values[4], JSON.stringify(report))
 })
 
-it('keeps a previously evidenced report ready when regeneration fails', async () => {
+it('preserves a previously evidenced report but exposes failed regeneration', async () => {
   const f = fixture()
   const report = { overallScore: 82 } as unknown as InterviewSummaryReport
   assert.equal(await f.repository.save(job, report, '模型输出不完整'), true)
-  assert.equal(f.calls[0]?.values[3], 'ready')
+  assert.equal(f.calls[0]?.values[3], 'failed')
 })
 
 it('marks a successful summary ready even when it is intentionally unscored', async () => {
@@ -51,5 +51,5 @@ it('defers busy work without discarding its report or changing the revision', as
   assert.match(f.calls[0]!.sql, /summary_status='pending',summary_claim=NULL/)
   assert.doesNotMatch(f.calls[0]!.sql.split('WHERE')[0]!, /summary_report|summary_revision/)
   await f.repository.claim()
-  assert.match(f.calls[1]!.sql, /interval '5 seconds'/)
+  assert.ok(f.calls.some(call => /interval '5 seconds'/.test(call.sql)))
 })

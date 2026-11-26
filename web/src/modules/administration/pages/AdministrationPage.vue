@@ -2,11 +2,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { authSession } from '../../auth/session'
 import { useRoute, useRouter } from 'vue-router'
-import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, testDingTalkConnection, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, getAiSharingSettings, updateAiSharingSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, listAiPromptSkills, createAiPromptSkill, updateAiPromptSkill, deleteAiPromptSkill, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type DingTalkConnectionTestResult, type AiSettings, type AiConnectionTestResult, type AiSharingSettings, type AdminAnalysisTask, type AdminAuditLog, type AdminAiPromptSkill, type AiPromptSkillTarget } from '../api'
+import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, testDingTalkConnection, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, getAiSharingSettings, updateAiSharingSettings, listFailedAnalysisTasks, listAdminAuditLogs, updateAdminUser, type AdminCheckRow, type WorkflowEvent, type AdminUser, type AdminRole, type AdminDepartment, type AdminSettings, type DingTalkEnvSettings, type DingTalkConnectionTestResult, type AiSettings, type AiConnectionTestResult, type AiSharingSettings, type AdminAnalysisTask, type AdminAuditLog } from '../api'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import StatusTag from '../../../shared/components/StatusTag.vue'
 import SecurityNotice from '../components/SecurityNotice.vue'
 import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings.vue'
+import DocumentGenerationSkills from '../components/DocumentGenerationSkills.vue'
 import ResumeScoringSkills from '../components/ResumeScoringSkills.vue'
 import AiModelSelector from '../components/AiModelSelector.vue'
 import AccountCreation from '../components/AccountCreation.vue'
@@ -92,13 +93,6 @@ const aiDraft = ref({ baseUrl: '', apiKey: '', model: '', timeoutMs: '' })
 const confirmingAiKeyClear = ref(false)
 const aiModels = ref<string[]>([])
 const aiSettingsUnavailable = ref(false)
-const aiSkills = ref<AdminAiPromptSkill[]>([])
-const documentSkills = computed(() => aiSkills.value.filter((skill) => skill.targetType !== 'resume_score'))
-const aiSkillDraft = ref({ name: '', targetType: 'both' as AiPromptSkillTarget, content: '' })
-const editingAiSkillId = ref<string | null>(null)
-const savingAiSkill = ref(false)
-const deletingAiSkillId = ref<string | null>(null)
-const aiSkillsError = ref('')
 /** 下拉候选：测试连接拉到的全部模型，外加已保存的模型（可能不在返回列表里）。 */
 const aiModelOptions = computed(() => {
   const configured = aiSettings.value?.env.OPENAI_MODEL.value.trim()
@@ -156,12 +150,10 @@ async function refresh() {
 
   if (props.enterpriseAiOnly) {
     // Customers must not probe or receive global users, roles, integrations, or audit configuration.
-    const [configResult, skillsResult] = await Promise.allSettled([getAiSettings(), listAiPromptSkills()])
+    const [configResult] = await Promise.allSettled([getAiSettings()])
     aiDraft.value.apiKey = ''; aiModels.value = []; aiTestResult.value = null; confirmingAiKeyClear.value = false
     if (configResult.status === 'fulfilled') applyAiSettings(configResult.value)
     else { aiSettings.value = null; aiSettingsUnavailable.value = true; error.value = configResult.reason instanceof Error ? configResult.reason.message : '无法读取企业 AI 配置' }
-    if (skillsResult.status === 'fulfilled') { aiSkills.value = skillsResult.value; aiSkillsError.value = '' }
-    else { aiSkills.value = []; aiSkillsError.value = skillsResult.reason instanceof Error ? skillsResult.reason.message : '无法读取企业 Skill' }
     loading.value = false
     return
   }
@@ -205,9 +197,6 @@ async function refresh() {
   const tasks = read<AdminAnalysisTask[]>(9, '失败分析任务')
   const logs = read<AdminAuditLog[]>(10, '管理审计日志')
   const sharing = read<AiSharingSettings>(12, 'AI 共享设置')
-  const skills: AdminAiPromptSkill[] | undefined = undefined
-  if (results[11]?.status === 'rejected') aiSkillsError.value = results[11].reason instanceof Error ? results[11].reason.message : '暂时无法读取 Skill'
-  else aiSkillsError.value = ''
 
   if (checks) rows.value = checks
   if (audit) { events.value = audit; eventsPage.value = 1 }
@@ -229,7 +218,6 @@ async function refresh() {
   if (tasks) failedTasks.value = tasks
   if (logs) { auditLogs.value = logs; auditPage.value = 1 }
   if (sharing) aiSharingSettings.value = sharing
-  if (skills) aiSkills.value = skills
 
   if (failures.length) {
     error.value = `部分系统配置暂时无法读取：${failures.join('；')}`
@@ -314,55 +302,7 @@ async function clearAiApiKey() {
   }
 }
 
-function resetAiSkillDraft() {
-  aiSkillDraft.value = { name: '', targetType: 'both', content: '' }
-  editingAiSkillId.value = null
-}
 
-function editAiSkill(skill: AdminAiPromptSkill) {
-  editingAiSkillId.value = skill.id
-  aiSkillDraft.value = { name: skill.name, targetType: skill.targetType, content: skill.content }
-  aiSkillsError.value = ''
-}
-
-async function saveAiSkill() {
-  const name = aiSkillDraft.value.name.trim()
-  const content = aiSkillDraft.value.content.trim()
-  if (!name || !content) { aiSkillsError.value = '请输入 Skill 名称和内容'; return }
-  savingAiSkill.value = true
-  aiSkillsError.value = ''
-  try {
-    const saved = editingAiSkillId.value
-      ? await updateAiPromptSkill(editingAiSkillId.value, { name, targetType: aiSkillDraft.value.targetType, content })
-      : await createAiPromptSkill({ name, targetType: aiSkillDraft.value.targetType, content })
-    aiSkills.value = editingAiSkillId.value
-      ? aiSkills.value.map((item) => item.id === saved.id ? saved : item)
-      : [saved, ...aiSkills.value]
-    resetAiSkillDraft()
-  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '保存 Skill 失败' }
-  finally { savingAiSkill.value = false }
-}
-
-async function toggleAiSkill(skill: AdminAiPromptSkill) {
-  savingAiSkill.value = true
-  aiSkillsError.value = ''
-  try {
-    const saved = await updateAiPromptSkill(skill.id, { isActive: !skill.isActive })
-    aiSkills.value = aiSkills.value.map((item) => item.id === saved.id ? saved : item)
-  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '更新 Skill 状态失败' }
-  finally { savingAiSkill.value = false }
-}
-
-async function removeAiSkill(skill: AdminAiPromptSkill) {
-  deletingAiSkillId.value = skill.id
-  aiSkillsError.value = ''
-  try {
-    await deleteAiPromptSkill(skill.id)
-    aiSkills.value = aiSkills.value.filter((item) => item.id !== skill.id)
-    if (editingAiSkillId.value === skill.id) resetAiSkillDraft()
-  } catch (cause) { aiSkillsError.value = cause instanceof Error ? cause.message : '删除 Skill 失败' }
-  finally { deletingAiSkillId.value = null }
-}
 
 async function saveUser(user: AdminUser) {
   savingUser.value = user.id; error.value = ''
@@ -640,64 +580,7 @@ onMounted(refresh)
           <span class="switch-label">{{ aiSharingSettings.enabled ? '已开启' : '已关闭' }}</span>
         </label>
       </div>
-    <div class="ai-skills-panel">
-      <div class="section-heading">
-        <div>
-          <h3 class="section-title">岗位文档生成 Skill</h3>
-          <p class="muted">本企业的写作规则独立保存为 Skill，生成岗位说明书或 JD 时可复用；不会展示其他企业或未归属的历史 Skill。</p>
-        </div>
-        <button v-if="editingAiSkillId" class="btn btn-ghost" type="button" @click="resetAiSkillDraft">新建 Skill</button>
-      </div>
-
-      <div v-if="aiSkillsError" class="error-note" role="alert">{{ aiSkillsError }}</div>
-
-      <div class="form-panel ai-skill-editor">
-        <div class="form-grid ai-skill-editor-grid">
-          <div class="form-field">
-            <label for="ai-skill-name">Skill 名称</label>
-            <input id="ai-skill-name" v-model="aiSkillDraft.name" maxlength="80" placeholder="例如：专业简洁型 JD" />
-          </div>
-          <div class="form-field">
-            <label for="ai-skill-target">适用范围</label>
-            <select id="ai-skill-target" v-model="aiSkillDraft.targetType">
-              <option value="both">岗位说明书和 JD</option>
-              <option value="job_spec">仅岗位说明书</option>
-              <option value="jd">仅 JD</option>
-            </select>
-          </div>
-        </div>
-        <div class="form-field">
-          <label for="ai-skill-content">Skill 内容</label>
-          <textarea id="ai-skill-content" v-model="aiSkillDraft.content" rows="5" maxlength="8000" placeholder="例如：使用专业、清晰、可执行的语言；职责按重要性排序；避免空泛形容词；尽量补充可衡量的结果指标。"></textarea>
-          <small class="muted">把你希望模型长期遵循的写作风格、结构和限制写在这里，最多 8000 个字符。</small>
-        </div>
-        <div class="inline-actions">
-          <button class="btn btn-primary" type="button" :disabled="savingAiSkill" @click="saveAiSkill">{{ savingAiSkill ? '保存中...' : (editingAiSkillId ? '保存修改' : '创建 Skill') }}</button>
-          <button v-if="editingAiSkillId" class="btn btn-ghost" type="button" :disabled="savingAiSkill" @click="resetAiSkillDraft">取消编辑</button>
-        </div>
-      </div>
-
-      <div class="table-wrap ai-skills-table">
-        <table>
-          <thead><tr><th>名称</th><th>适用范围</th><th>状态</th><th>内容</th><th class="col-actions">操作</th></tr></thead>
-          <tbody>
-            <tr v-for="skill in documentSkills" :key="skill.id">
-              <td><strong>{{ skill.name }}</strong></td>
-              <td>{{ skill.targetType === 'both' ? '岗位说明书和 JD' : skill.targetType === 'job_spec' ? '仅岗位说明书' : '仅 JD' }}</td>
-              <td><span :class="skill.isActive ? 'skill-status active' : 'skill-status'">{{ skill.isActive ? '启用' : '停用' }}</span></td>
-              <td><span class="skill-content-preview">{{ skill.content }}</span></td>
-              <td class="row-actions">
-                <button class="btn btn-ghost btn-sm" type="button" @click="editAiSkill(skill)">编辑</button>
-                <button class="btn btn-ghost btn-sm" type="button" :disabled="savingAiSkill" @click="toggleAiSkill(skill)">{{ skill.isActive ? '停用' : '启用' }}</button>
-                <button class="btn btn-danger btn-sm" type="button" :disabled="deletingAiSkillId === skill.id" @click="removeAiSkill(skill)">{{ deletingAiSkillId === skill.id ? '删除中...' : '删除' }}</button>
-              </td>
-            </tr>
-            <tr v-if="!documentSkills.length"><td colspan="5" class="table-empty">暂无 Skill，请先创建一个可复用的生成规则。</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
+    <DocumentGenerationSkills :refresh-key="loading" />
     <ResumeScoringSkills :refresh-key="loading" />
     </section>
 
@@ -895,15 +778,6 @@ onMounted(refresh)
 @media (max-width: 1180px) { .ai-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .ai-grid { grid-template-columns: 1fr; } }
 
-.ai-skills-panel { margin-top: 18px; padding-top: 18px; border-top: 1px solid #e5eef2; }
-.ai-skill-editor { margin-top: 12px; }
-.ai-skill-editor-grid { grid-template-columns: minmax(0, 1.4fr) minmax(220px, .8fr); }
-.ai-skill-editor textarea { width: 100%; min-height: 116px; resize: vertical; }
-.ai-skills-table { margin-top: 14px; }
-.skill-status { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; }
-.skill-status.active { background: #dcfce7; color: #166534; }
-.skill-content-preview { display: -webkit-box; overflow: hidden; max-width: 360px; color: #64748b; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-@media (max-width: 760px) { .ai-skill-editor-grid { grid-template-columns: 1fr; } .ai-skills-table { overflow-x: auto; } }
 
 .table-subtitle { display: block; margin-top: 3px; color: #7890a4; font-size: 11px; }
 </style>

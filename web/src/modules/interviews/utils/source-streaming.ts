@@ -14,6 +14,7 @@ export function createSourceStreaming(options: {
   let disposed = false
   let inputStream: MediaStream | undefined
   let streamingVersion = 0
+  let manualReconnectVersion = -1
   let state: SourceStreamingState = 'idle'
   const streamingState = { get value() { return state }, set value(value: SourceStreamingState) { state = value; options.onState(value) } }
   const streamingWarning = { set value(value: string) { options.onWarning(value) } }
@@ -274,7 +275,13 @@ function scheduleStreamingReconnect() {
 
   return {
     start(stream: MediaStream) { inputStream = stream; paused = false; retryAllowed = true; streamRetryAttempt = 0; restartStreamingAudio() },
-    reconnect() { retryAllowed = true; streamRetryAttempt = 0; restartStreamingAudio() },
+    reconnect() {
+      if (disposed || !options.isRecording()) return
+      if (state === 'ready') { void this.resume(); return }
+      if (manualReconnectVersion === streamingVersion && (state === 'connecting' || state === 'loading')) return
+      paused = false; retryAllowed = true; streamRetryAttempt = 0; restartStreamingAudio()
+      manualReconnectVersion = streamingVersion
+    },
     pause() {
       paused = true; streamAudioReady = false
       if (audioWorklet) {

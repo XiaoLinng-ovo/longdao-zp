@@ -167,9 +167,9 @@ describe('登录页教程布局', () => {
     expect(loginWithEmail).not.toHaveBeenCalled()
   })
 
-  it('排除不可用企业后自动进入唯一可用企业，保留模块目标', async () => {
+  it('自动进入唯一绑定的可用企业，保留模块目标', async () => {
     route.query = { redirect: '/jobs?status=active' }
-    loginWithWorkspaces([usableWorkspace, { ...usableWorkspace, id: 'expired', serviceStatus: 'trial', trialEndsAt: '2020-01-01', serviceAvailable: false }, { ...usableWorkspace, id: 'archived', status: 'archived' }])
+    loginWithWorkspaces([usableWorkspace])
     vi.mocked(switchWorkspace).mockImplementation(async id => { session.user = { workspaceId: id } })
     await submitCredentials(await mount())
     expect(switchWorkspace).toHaveBeenCalledWith('workspace-1')
@@ -181,28 +181,14 @@ describe('登录页教程布局', () => {
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(push).toHaveBeenCalledWith('/workspaces')
   })
-  it('多个企业先选择再进入原模块，选择失败可重试而不是退回登录', async () => {
-    route.query = { redirect: '/interviews' }
-    loginWithWorkspaces([usableWorkspace, { ...usableWorkspace, id: 'workspace-2', name: '另一企业' }])
-    const element = await mount()
-    await submitCredentials(element)
+  it.each([undefined,'workspace-1'])('历史多企业绑定不能继续选择或使用旧当前企业 %s',async current=>{
+    route.query={redirect:'/interviews'}
+    loginWithWorkspaces([usableWorkspace,{...usableWorkspace,id:'workspace-2'}],current)
+    const element=await mount();await submitCredentials(element)
     expect(push).not.toHaveBeenCalled()
-    expect(element.querySelectorAll('.workspace-choice-item')).toHaveLength(2)
-    vi.mocked(switchWorkspace).mockRejectedValueOnce(new Error('进入企业失败，请重试'))
-    element.querySelector<HTMLButtonElement>('.workspace-choice-item')!.click()
-    await flush()
-    expect(element.querySelector('[role="alert"]')?.textContent).toContain('进入企业失败')
-    expect(element.querySelector('.workspace-choice')).not.toBeNull()
-    element.querySelector<HTMLButtonElement>('.workspace-choice-item')!.click()
-    await flush()
-    expect(push).toHaveBeenCalledWith('/interviews')
-  })
-  it('已有当前企业时不重复要求多企业选择', async () => {
-    loginWithWorkspaces([usableWorkspace, { ...usableWorkspace, id: 'workspace-2' }], 'workspace-1')
-    const element = await mount()
-    await submitCredentials(element)
-    expect(push).toHaveBeenCalledWith('/')
+    expect(switchWorkspace).not.toHaveBeenCalled()
     expect(element.querySelector('.workspace-choice')).toBeNull()
+    expect(element.querySelector('[role="alert"]')?.textContent).toContain('多个企业绑定')
   })
   it('不展示企业职位绑定和回车登录的辅助说明', async () => {
     const element = await mount()

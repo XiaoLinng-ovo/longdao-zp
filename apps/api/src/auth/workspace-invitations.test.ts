@@ -61,7 +61,7 @@ test('generation fixes 72 hour validity and member role, replace revokes old cod
 })
 test('joining creates fixed member permissions and leaves shared invitation unconsumed',async()=>{
  for(const userId of ['first','second']) {
-  const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:userId}],[],[],[],[],[]])
+  const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:userId}],[],[],[],[],[],[]])
   const result=await new WorkspaceInvitationsService(db,false).accept(code,userId)
   assert.equal(result.alreadyMember,false)
   assert.deepEqual(Object.keys(result).sort(),['alreadyMember','workspaceId','workspaceName'])
@@ -75,12 +75,12 @@ test('joining creates fixed member permissions and leaves shared invitation unco
  }
 })
 test('existing active membership is idempotent and roles never downgraded',async()=>{
- const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[{is_active:true}],[]])
+ const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[{organization_id:org.id,is_active:true}],[{is_active:true}],[]])
  assert.equal((await new WorkspaceInvitationsService(db,false).accept(code,'user')).alreadyMember,true)
  assert.ok(!calls.some(c=>c.sql.includes('INSERT INTO')||c.sql.includes('UPDATE organization_members')))
 })
 test('disabled membership cannot be reactivated by an invitation',async()=>{
- const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[{is_active:false}]])
+ const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[{organization_id:org.id,is_active:false}],[{is_active:false}]])
  await assert.rejects(new WorkspaceInvitationsService(db,false).accept(code,'user'),denied('MEMBERSHIP_DISABLED'))
  assert.ok(calls.some(c=>c.sql==='ROLLBACK'))
 })
@@ -91,7 +91,7 @@ test('revocation while waiting for organization lock is rechecked',async()=>{
 })
 test('tenant join audits preserve mirroring before cutover',async()=>{
  const schema=organizationSchemaName(org.id)
- const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[],[],[],[{schema_name:schema,status:'ready',structure_ready:true}],[],[]])
+ const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[],[],[],[],[{schema_name:schema,status:'ready',structure_ready:true}],[],[]])
  await new WorkspaceInvitationsService(db,true).accept(code,'user')
  const audit=calls.find(c=>c.sql.includes('INSERT INTO public.audit_logs'))!
  assert.ok(audit.sql.includes('INSERT INTO "'+schema+'".audit_logs'))
@@ -99,7 +99,7 @@ test('tenant join audits preserve mirroring before cutover',async()=>{
  assert.ok(calls.indexOf(audit)<calls.findIndex(c=>c.sql==='COMMIT'))
 })
 test('missing tenant schema rolls back membership and join record',async()=>{
- const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[],[],[],[]])
+ const {db,calls}=fakePool([[],[invitation],[org],[invitation],[{id:'user'}],[],[],[],[],[]])
  await assert.rejects(new WorkspaceInvitationsService(db,true).accept(code,'user'),{code:'WORKSPACE_SCHEMA_UNAVAILABLE'})
  assert.ok(calls.some(c=>c.sql==='ROLLBACK'))
  assert.ok(!calls.some(c=>c.sql==='COMMIT'))

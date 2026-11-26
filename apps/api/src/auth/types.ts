@@ -18,6 +18,7 @@ export interface WorkspaceSummary {
   serviceStatus?: ServiceStatus
   trialEndsAt?: string | null
   serviceAvailable?: boolean
+  membershipActive?: boolean
   archivedAt?: string
 }
 
@@ -68,7 +69,7 @@ export interface RegisterInput {
   name: string
   email: string
   password: string
-  companyName: string
+  companyName?: string
   invitationCode?: string
   phone?: string
   ipAddress?: string
@@ -78,7 +79,7 @@ export interface RegisterInput {
 
 export interface RegisterResult {
   user: SessionUser
-  workspace: WorkspaceSummary
+  workspace?: WorkspaceSummary
 }
 
 export interface AuthenticatedRegisterResult extends RegisterResult {

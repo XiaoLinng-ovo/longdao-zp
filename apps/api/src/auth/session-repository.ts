@@ -23,6 +23,7 @@ import type {
 } from './types.js'
 import { hashPassword, verifyPassword } from './password.js'
 import { normalizeRegistrationInput } from './registration.js'
+import { assertSingleEnterprise } from './single-enterprise.js'
 import { joinSharedInvitation } from './workspace-invitations.js'
 import { safeHashEqual } from './verification-code.js'
 import { organizationSchemaName } from '../db/tenant-context.js'
@@ -449,6 +450,12 @@ export class PostgresSessionRepository implements SessionRepository {
             workspace: { id:workspace.id,name:workspace.name,kind:workspace.kind,status:workspace.status,role:'member',createdAt:iso(workspace.created_at),serviceStatus:workspace.service_status,trialEndsAt:workspace.trial_ends_at ? iso(workspace.trial_ends_at):null,serviceAvailable:true },
           } satisfies RegisterResult } as const
         }
+        if (!data.companyName) {
+          await client.query("INSERT INTO user_roles (user_id,role_id) SELECT $1,id FROM roles WHERE code='recruiter' ON CONFLICT DO NOTHING", [user.id])
+          await client.query('INSERT INTO registration_attempts (email,ip_address,succeeded) VALUES ($1,$2::inet,true)', [data.email,input.ipAddress ?? null])
+          await client.query("INSERT INTO platform_audit_logs (actor_user_id,action,metadata) VALUES ($1,'platform.user.registered',$2::jsonb)", [user.id,JSON.stringify({source:'unbound_registration',emailVerified:true})])
+          return { result: { user: { id:user.id, name:user.display_name, email:user.email, role:'recruiter', departmentId:'', ...(user.user_no ? {userNo:user.user_no}: {}) } } satisfies RegisterResult } as const
+        }
         const workspaceResult = await client.query<any>(
           `INSERT INTO organizations (name,kind,created_by,service_status)
            VALUES ($1,'production',$2::uuid,'trial')
@@ -739,9 +746,9 @@ export class PostgresSessionRepository implements SessionRepository {
   async listWorkspaces(userId: string): Promise<WorkspaceSummary[]> {
     const result = await this.db.query<any>(
       `SELECT o.id,o.name,o.kind,o.status,o.created_at,o.archived_at,o.service_status,o.trial_ends_at,
-              organization_service_available(o.id) AS service_available,om.role
+              organization_service_available(o.id) AND om.is_active AS service_available,om.role,om.is_active AS membership_active
          FROM organizations o JOIN organization_members om ON om.organization_id=o.id
-        WHERE om.user_id=$1::uuid AND om.is_active ORDER BY o.status='active' DESC,o.created_at DESC`,
+        WHERE om.user_id=$1::uuid AND om.ended_at IS NULL ORDER BY o.status='active' DESC,o.created_at DESC`,
       [userId],
     )
     return result.rows.map((row) => ({
@@ -754,6 +761,7 @@ export class PostgresSessionRepository implements SessionRepository {
       serviceStatus: row.service_status,
       trialEndsAt: row.trial_ends_at ? iso(row.trial_ends_at) : null,
       serviceAvailable: row.service_available,
+      membershipActive: row.membership_active,
       ...(row.archived_at ? { archivedAt: iso(row.archived_at) } : {}),
     }))
   }
@@ -767,6 +775,7 @@ export class PostgresSessionRepository implements SessionRepository {
     let row: any
     try {
       await client.query('BEGIN')
+      await assertSingleEnterprise(client, userId)
       const result = await client.query<any>(
         `WITH created AS (
            INSERT INTO organizations (name,kind,created_by,service_status)

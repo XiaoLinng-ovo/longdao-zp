@@ -1,5 +1,6 @@
 import type { WorkspaceSummary } from '../api'
 export function workspaceServiceBadge(workspace: WorkspaceSummary): string {
+  if (workspace.membershipActive === false) return '成员已停用'
   if (workspace.status === 'archived') return '已归档'
   if (workspace.serviceStatus === 'suspended') return '已暂停'
   if (workspace.serviceStatus === 'trial') return isWorkspaceAvailable(workspace) ? '试用中' : '试用已到期'
@@ -8,10 +9,11 @@ export function workspaceServiceBadge(workspace: WorkspaceSummary): string {
   return '服务状态待确认'
 }
 export function isWorkspaceAvailable(workspace: WorkspaceSummary, now = Date.now()): boolean {
-  return workspace.status === 'active' && workspace.serviceAvailable !== false && workspace.serviceStatus !== 'suspended' &&
+  return workspace.membershipActive !== false && workspace.status === 'active' && workspace.serviceAvailable !== false && workspace.serviceStatus !== 'suspended' &&
     (workspace.serviceStatus !== 'trial' || Boolean(workspace.trialEndsAt && Date.parse(workspace.trialEndsAt) > now))
 }
 export function workspaceServiceLabel(workspace: WorkspaceSummary): string {
+  if (workspace.membershipActive === false) return '成员已停用'
   if (workspace.status === 'archived') return '已归档'
   if (workspace.serviceStatus === 'suspended') return '服务已暂停'
   if (!isWorkspaceAvailable(workspace)) return workspace.serviceStatus === 'trial' ? '试用已到期' : '暂不可用'

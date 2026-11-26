@@ -23,7 +23,7 @@ export class BillingSandboxService {
    await db.query('BEGIN')
    await db.query('SELECT id FROM organizations WHERE id=$1 FOR NO KEY UPDATE',[org])
    const available = (await db.query('SELECT organization_service_available($1::uuid) AS available',[org])).rows[0]
-   const member = (await db.query('SELECT m.role FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND u.is_active FOR SHARE OF m,u',[org,actor])).rows[0]
+   const member = (await db.query('SELECT m.role FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND m.is_active AND m.ended_at IS NULL AND u.is_active FOR SHARE OF m,u',[org,actor])).rows[0]
    if (!member || !['owner','admin'].includes(member.role)) throw new HttpError(403,'WORKSPACE_ADMIN_REQUIRED','仅企业所有者或管理员可管理模拟订单')
    if (!available?.available) throw new HttpError(403,'WORKSPACE_SERVICE_UNAVAILABLE','企业当前不可使用模拟订单')
    const value = await work(db); await db.query('COMMIT'); return value

@@ -23,6 +23,8 @@ export interface InterviewSummaryReport {
   strengths: SummaryFinding[]; concerns: SummaryFinding[]; unassessed: string[]; warnings: string[]
   recommendation?: SummaryRecommendation | null
   reviewRequired?: boolean
+  sourceTranscriptVersionId?: string
+  sourceRevision?: number
   pairs: ActualInterviewPair[]; transcript: TranscriptTurn[]
   advisoryOnly: true; applicationStatusMutation: 'none'
 }
@@ -74,30 +76,11 @@ export function reliableCandidateTurns(transcript: TranscriptTurn[]): Transcript
     other.role !== 'candidate' && other.startMs < turn.endMs && other.endMs > turn.startMs))
 }
 
-/**
- * A little uncertain speech is expected in live recordings. Do not send a transcript
- * to scoring when speaker review is pending or uncertainty dominates by text
- * volume or by the share of original segments, before adjacent turns are merged.
- */
-export function assessTranscriptQuality(transcript: TranscriptTurn[], roleReviewRequired = false): { usable: boolean; warning?: string } {
-  if (roleReviewRequired) return { usable: false, warning: '多人混合或来源未明确的音轨角色尚待人工复核，暂不评分。请回听原始录音并确认角色后重新生成总结。' }
+/** Uncertain turns are excluded individually, never a whole-interview manual gate. */
+export function assessTranscriptQuality(transcript: TranscriptTurn[], _roleReviewRequired = false): { usable: boolean; warning?: string } {
   const reliable = reliableCandidateTurns(transcript)
-  if (!reliable.length) return { usable: false, warning: '没有可确认归属的候选人发言，暂不评分。' }
   const reliableChars = reliable.reduce((sum, turn) => sum + turn.text.replace(/\s/gu, '').length, 0)
-  const uncertain = transcript.filter(turn => {
-    if (turn.role === 'unknown') return true
-    if (turn.role !== 'candidate') return false
-    return !reliable.includes(turn)
-  })
-  const segmentCount = (turns: TranscriptTurn[]) => turns.reduce((sum, turn) => sum + Math.max(1, turn.segmentIds.length), 0)
-  const uncertainSegments = segmentCount(uncertain)
-  if (uncertainSegments >= 3 && uncertainSegments / Math.max(1, segmentCount(transcript)) >= .3) {
-    return { usable: false, warning: '未知或混合发言占原始片段的比例达到30%，角色证据不足，暂不评分。请人工确认角色后重新生成总结。' }
-  }
-  const uncertainChars = uncertain.reduce((sum, turn) => sum + turn.text.replace(/\s/gu, '').length, 0)
-  if (uncertainChars >= 20 && uncertainChars >= reliableChars) {
-    return { usable: false, warning: '未知或混合发言中的候选人内容不少于可信候选人证据，暂不评分。请核实说话人或回听原始录音后重新生成。' }
-  }
+  if (!reliable.length || reliableChars < 12) return { usable: false, warning: '可靠的候选人回答证据不足，暂无法评分；可在面试结束后校正说话人并重新评分。' }
   return { usable: true }
 }
 
@@ -399,8 +382,16 @@ function recoverTruncatedAdvice(content: unknown): unknown {
 }
 
 export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorConfig, fetchImpl: typeof fetch = fetch,
-  wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))) {
+  wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  now: () => number = Date.now) {
   return { async generate(base: InterviewSummaryReport, job: { jobTitle: string; requirements: string[]; skills: string[] }): Promise<InterviewSummaryReport> {
+    // Finish before the 15-minute worker lease, including every classification batch and retry.
+    const deadline = now() + 12 * 60 * 1000
+    const remaining = () => {
+      const ms = deadline - now()
+      if (ms <= 0) throw new QuestionSheetGenerationError('MODEL_REQUEST_FAILED', '整场面试评分已达到处理时限，完整转写已保留，请稍后重新评分。')
+      return ms
+    }
     const { input, turnIds, pairIds } = summaryModelInput(base, job)
     if (input.length > 160000) throw new QuestionSheetGenerationError('INVALID_INPUT', '本场实际问答超出模型安全处理长度，已保留完整转写；请分场核实，未截断或生成片面评分。')
 
@@ -408,7 +399,7 @@ export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorCo
       recovery?: 'classification' | 'summary' | 'advice'): Promise<unknown> => {
       let response: Response
       let envelope: any
-      const signal = AbortSignal.timeout(config.timeoutMs)
+      const signal = AbortSignal.timeout(Math.max(1, Math.min(config.timeoutMs, remaining())))
       try {
         response = await fetchImpl(`${config.baseUrl.replace(/\/$/u, '')}/chat/completions`, {
           method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
@@ -480,7 +471,7 @@ export function createInterviewSummaryGenerator(config: QuestionSheetGeneratorCo
           }
           if (!(error instanceof SummaryRequestError) || !error.retryable) throw error
           if (transientFailures >= maxRequestAttempts - 1) throw error
-          await wait(1000 * 2 ** transientFailures)
+          await wait(Math.min(1000 * 2 ** transientFailures, remaining()))
           transientFailures++
         }
       }

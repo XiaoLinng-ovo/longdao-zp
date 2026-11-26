@@ -82,7 +82,7 @@ describe('WorkspacePage 返回登录', () => {
     mockedListWorkspaces.mockResolvedValue([{ id: 'w1', name: '企业', kind: 'test', status: 'active', role, createdAt: '2026-10-01T00:00:00Z', serviceStatus: 'enabled', serviceAvailable: true }])
     const mountedRoot = await mount(WorkspacePage)
     const actions = mountedRoot.querySelector('.workspace-row-actions')!
-    expect(Array.from(actions.querySelectorAll('button')).map(button => button.textContent)).toEqual(['查看套餐权益', '进入工作空间'])
+    expect(Array.from(actions.querySelectorAll('button')).map(button => button.textContent)).toEqual(['查看套餐权益', '进入企业'])
     expect(actions.querySelectorAll('a')).toHaveLength(0)
     expect(mountedRoot.textContent).not.toContain('成员与邀请')
     expect(mountedRoot.textContent).not.toContain('重新开始')

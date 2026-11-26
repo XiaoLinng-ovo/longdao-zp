@@ -10,6 +10,7 @@ import { OperationalRecoveryService } from './admin/operational-recovery.js';
 
 import { mapTrialQuotaError, TrialQuotaService } from './platform/trial-quota.js';
 import { EnterpriseAiStore, PlatformAiStore, EnterpriseAiError, validateEnterpriseAiPatch, validateSelfServiceAiPatch, SELF_SERVICE_AI_BASE_URL, assertAiEndpointAllowed, meterAiOperation, createBillingFetch } from '@smartrecruit-pro/enterprise-ai';
+import { TodoNotifications } from './recruiting/todo-notifications.js';
 import { testAiConnection } from './admin/ai-settings.js';
 import { decodePdfAttachment, readSmtpEnvSettings, renderRichEmailHtml, renderMarkdownEmail, sendSmtpMail, testSmtpConnection, updateSmtpEnvSettings } from './integrations/email/smtp.js';
 import type { Middleware } from './http.js';
@@ -29,6 +30,7 @@ import { MemoryResumeImportStore, PostgresResumeImportStore, ResumeImportError, 
 import type { AuthService } from './auth/auth-service.js';
 import { requireSystemAdministrator } from './auth/system-administrator.js';
 import { isWorkspaceScopedPath } from './auth/workspace-context.js';
+import { WorkspaceOffboardingService } from './auth/workspace-offboarding.js';
 import { WorkspaceInvitationsService, InvitationError } from './auth/workspace-invitations.js';
 import { readSavedAccountSessions, buildSavedAccountsCookie } from './auth/saved-accounts.js';
 import { resolveAuthClientIp } from './auth/client-ip.js';
@@ -56,6 +58,7 @@ import { MemoryInterviewQuestionSetRepository, PostgresInterviewQuestionSetRepos
 import type { GeneratedInterviewQuestion } from './interviews/question-generator.js';
 import { createConfiguredQuestionSheetService } from './interviews/question-sheet-runtime.js';
 import { createConfiguredQuestionPreparationService } from './interviews/question-preparation-runtime.js';
+import { InterviewSummaryRepository } from './interviews/interview-summary-repository.js';
 import { createConfiguredInterviewSummaryService } from './interviews/interview-summary-service.js';
 import { createLiveInterviewAudioStorage } from './interviews/live-audio-storage.js';
 import { InterviewAudioRecordingRepository } from './interviews/audio-recording-repository.js';
@@ -113,6 +116,7 @@ const interviewAudioRecordings = new InterviewAudioRecordingRepository(pool);
 const liveAudioTranscriptions = new LiveAudioTranscriptionRepository(pool);
 const adminService = new AdminService(pool);
 const workspaceInvitations = new WorkspaceInvitationsService(pool);
+const workspaceOffboarding = new WorkspaceOffboardingService(pool);
 const dingTalkJobSync = new DingTalkJobSyncService(
   process.env.NODE_ENV === 'test' ? new MemoryDingTalkJobSyncRepository() : new PostgresDingTalkJobSyncRepository(pool),
   { platformBaseUrl: process.env.PLATFORM_BASE_URL || 'http://127.0.0.1:5174' },
@@ -544,7 +548,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     return;
   }
 
-  const invitationManagement = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/(invitations|members)(?:\/([^/]+))?(?:\/(status|transfer))?$/)
+  const invitationManagement = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/(invitations|members|exit-requests)(?:\/([^/]+))?(?:\/(status|transfer|depart))?$/)
   if (path === '/api/v1/workspace-invitations/summary' && method === 'POST') {
     if (!usePostgres) throw new HttpError(503, 'POSTGRES_REQUIRED', '企业邀请需要 PostgreSQL 数据库')
     const origin = typeof context.req.headers.origin === 'string' ? context.req.headers.origin : undefined
@@ -574,12 +578,17 @@ const routeMiddleware: Middleware = async (context, next) => {
       }
       if (invitationManagement) {
         const workspaceId = invitationManagement[1]!, resource = invitationManagement[2]!, id = invitationManagement[3]
+        if (resource === 'exit-requests') {
+          if (!id && method === 'GET') { sendSuccess(context,await workspaceOffboarding.list(workspaceId,auth.user.id)); return }
+          if (!id && method === 'POST') { sendSuccess(context,await workspaceOffboarding.request(workspaceId,auth.user.id,await readJson(context)),201); return }
+        }
         if (resource === 'invitations') {
           if (!id && method === 'GET') { sendSuccess(context, await workspaceInvitations.list(workspaceId, auth.user.id)); return }
           if (!id && method === 'POST') { sendSuccess(context, await workspaceInvitations.create(workspaceId, auth.user.id, await readJson(context)), 201); return }
           if (id && method === 'DELETE') { sendSuccess(context, await workspaceInvitations.revoke(workspaceId, auth.user.id, id)); return }
         }
         if (resource === 'members') {
+          if (id && invitationManagement[4] === 'depart' && method === 'POST') { sendSuccess(context,await workspaceOffboarding.resolve(workspaceId,auth.user.id,id,await readJson(context))); return }
           if (!id && method === 'GET') { sendSuccess(context, await workspaceInvitations.members(workspaceId, auth.user.id)); return }
           if (id && invitationManagement[4] === 'status' && method === 'PATCH') { sendSuccess(context, await workspaceInvitations.setMemberStatus(workspaceId, auth.user.id, id, await readJson(context))); return }
           if (id && invitationManagement[4] === 'transfer' && method === 'POST') {
@@ -592,7 +601,7 @@ const routeMiddleware: Middleware = async (context, next) => {
       }
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', '此邀请接口不支持该请求方法')
     } catch (error) {
-      if (error instanceof InvitationError) throw new HttpError(error.status, error.code, error.message)
+      if (error instanceof InvitationError || (error instanceof Error && 'status' in error && 'code' in error)) throw new HttpError(Number(error.status), String(error.code), error.message)
       throw error
     }
   }
@@ -742,7 +751,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     '/api/v1/offers',
     '/api/v1/offer-templates',
     '/api/v1/onboarding',
-    '/api/v1/dashboard/summary',
+    '/api/v1/dashboard',
 
     '/api/v1/reports',
     '/api/v1/workflow-events',
@@ -776,6 +785,36 @@ const routeMiddleware: Middleware = async (context, next) => {
     const tenantSkills = () => adminService.forOrganization(auth.user.workspaceId);
     const requireAiAdmin = () => enterpriseAi.assertAdmin(auth.user.workspaceId, auth.user.id);
     const tenantAiEnv = () => enterpriseAi.runtimeEnv(auth.user.workspaceId);
+    const isWorkspaceAdmin = async () => {
+      if (!usePostgres) return auth.user.role === 'admin'
+      const result = await pool.query("SELECT 1 FROM public.organization_members WHERE organization_id=$1 AND user_id=$2 AND is_active AND role IN ('owner','admin')", [auth.user.workspaceId,auth.user.id])
+      return Boolean(result.rows[0])
+    }
+    const requireResponsibility = async (applicationId: string, stage: 'initial' | 'final', sheetType?: string) => {
+      if (await isWorkspaceAdmin()) return
+      await recruiting.assertInterviewResponsibility(applicationId, stage, auth.user.id, sheetType)
+    }
+    const todoOwnership = async () => {
+      if (!usePostgres) return undefined
+      const members=(await pool.query("SELECT m.user_id,m.role FROM public.organization_members m JOIN public.users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.ended_at IS NULL AND m.is_active AND u.is_active ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,m.user_id",[auth.user.workspaceId])).rows
+      return {activeUserIds:members.map(m=>m.user_id as string),fallbackUserId:members.find(m=>['owner','admin'].includes(m.role))?.user_id as string | undefined}
+    }
+    const personalTodos = async () => [...(await recruiting.getDashboardSummary(departmentScope(auth), ids => questionSheets.listDashboardReviews(ids), { userId: auth.user.id,ownership:await todoOwnership() })).todos,...(usePostgres ? await workspaceOffboarding.todos(auth.user.workspaceId!,auth.user.id) : [])]
+    if (path === '/api/v1/dashboard/notifications' && method === 'GET') {
+      if (!usePostgres) { sendSuccess(context, {items:[],unreadCount:0,nextBefore:null}); return }
+      const before = context.url.searchParams.get('before') ?? undefined
+      if (before && !/^[A-Za-z0-9_-]{1,300}$/.test(before)) throw new HttpError(400,'VALIDATION_ERROR','消息分页游标无效')
+      const inbox = new TodoNotifications(pool)
+      await inbox.sync(auth.user.workspaceId!,auth.user.id,personalTodos)
+      sendSuccess(context, await inbox.list(auth.user.workspaceId!,auth.user.id,context.url.searchParams.get('unread') === '1',before)); return
+    }
+    if (path === '/api/v1/dashboard/notifications/read' && method === 'POST') {
+      const body = await readJson(context)
+      if (Object.keys(body).some(key => !['all','ids'].includes(key)) || (body.all !== undefined && body.all !== true) || (body.all === true && body.ids !== undefined)) throw new HttpError(400,'VALIDATION_ERROR','消息参数无效')
+      const ids = body.all === true ? 'all' : body.ids
+      if (ids !== 'all' && (!Array.isArray(ids) || ids.length > 100 || ids.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))) throw new HttpError(400,'VALIDATION_ERROR','消息编号无效')
+      sendSuccess(context, usePostgres ? await new TodoNotifications(pool).markRead(auth.user.workspaceId!,auth.user.id,ids as string[] | 'all') : {ok:true}); return
+    }
     if (path === '/api/v1/admin/billing-sandbox' && method === 'GET') {
       requirePlatformAdmin(auth); sendSuccess(context, await billingSandboxService.read(auth.user.id, auth.user.workspaceId!, Number(context.url.searchParams.get('page') ?? 1))); return;
     }
@@ -978,7 +1017,12 @@ const routeMiddleware: Middleware = async (context, next) => {
         const value = context.url.searchParams.get(key);
         return value === null ? [] : [[key, value]];
       }));
-      sendSuccess(context, await recruiting.getDashboardSummary(departmentScope(auth), ids => questionSheets.listDashboardReviews(ids), period)); return;
+      const scope = context.url.searchParams.get('scope') ?? 'mine'
+      if (!['mine','enterprise','unassigned'].includes(scope)) throw new HttpError(400,'VALIDATION_ERROR','待办视图无效')
+      if (scope !== 'mine' && !await isWorkspaceAdmin()) throw new HttpError(403,'WORKSPACE_ADMIN_REQUIRED','仅企业管理员可查看企业待办')
+      const summary = await recruiting.getDashboardSummary(departmentScope(auth), ids => questionSheets.listDashboardReviews(ids), { ...period, userId:auth.user.id,todoScope:scope as 'mine' | 'enterprise' | 'unassigned',ownership:await todoOwnership() })
+      if (usePostgres && scope!=='unassigned') summary.todos.push(...await workspaceOffboarding.todos(auth.user.workspaceId!,auth.user.id))
+      sendSuccess(context,summary); return;
     }
     if (path === '/api/v1/reports' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); sendSuccess(context, await recruiting.getReports(departmentScope(auth), Object.fromEntries(['from', 'to', 'jobId', 'channel', 'status'].map((key) => [key, context.url.searchParams.get(key) || undefined])))); return; }
     if (path === '/api/v1/reports/funnel' && method === 'GET') { if (!(await reportsEnabledForRequest())) throw reportsDisabledError(); const filters = Object.fromEntries(['from', 'to', 'jobId', 'channel', 'status'].map((key) => [key, context.url.searchParams.get(key) || undefined])); sendSuccess(context, (await recruiting.getReports(departmentScope(auth), filters)).funnel); return; }
@@ -1426,6 +1470,12 @@ const routeMiddleware: Middleware = async (context, next) => {
         : await questionPreparations.status(preparationMatch[1]!, context.url.searchParams.get('materials') === '1');
       sendSuccess(context, result, method === 'POST' && ['queued', 'generating'].includes(result.status) ? 202 : 200); return;
     }
+    const summaryHistoryMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/summary\/versions$/);
+    if (summaryHistoryMatch && method === 'GET') {
+      requireRole(auth, INTERVIEW_WRITE_ROLES);
+      await recruiting.assertInterviewInScope(summaryHistoryMatch[1]!, departmentScope(auth));
+      sendSuccess(context, await new InterviewSummaryRepository(pool).history(summaryHistoryMatch[1]!)); return;
+    }
     const summaryMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/summary$/);
     if (summaryMatch && (method === 'GET' || method === 'POST')) {
       requireRole(auth, INTERVIEW_WRITE_ROLES)
@@ -1520,7 +1570,7 @@ const routeMiddleware: Middleware = async (context, next) => {
       liveInterviewVoices.forget(liveSessionPath.sessionId)
       let summaryGeneration: { queued: boolean; reason?: string } = { queued: false }
       try {
-        if (session.status === 'completed') {
+        if (session.status === 'completed' && current.session.status !== 'completed') {
         await interviewSummaries.request(current.session.interviewId, auth.user.id)
         summaryGeneration = { queued: true }
         }
@@ -1688,6 +1738,8 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (correctConclusionMatch && method === 'POST') {
       requireRole(auth, INTERVIEW_WRITE_ROLES);
       await recruiting.assertInterviewInScope(correctConclusionMatch[1]!, departmentScope(auth));
+      const correctingInterview = await recruiting.getInterview(correctConclusionMatch[1]!)
+      await requireResponsibility(correctingInterview.applicationId,correctingInterview.stage ?? (correctingInterview.round >= 2 ? 'final' : 'initial'))
       const body = await readJson(context);
       if (typeof body.outcome !== 'string' || !['continue', 'offer', 'reject', 'cancelled'].includes(body.outcome)) {
         throw new HttpError(400, 'INVALID_INPUT', '请选择有效的面试结论');
@@ -1698,11 +1750,32 @@ const routeMiddleware: Middleware = async (context, next) => {
       sendSuccess(context, await recruiting.correctInterviewConclusion(correctConclusionMatch[1]!, body.outcome as 'continue' | 'offer' | 'reject' | 'cancelled', body.reason, auth.user.id));
       return;
     }
+    const responsibilityMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)\/responsibilities$/)
+    if (responsibilityMatch && method === 'PATCH') {
+      if (!await isWorkspaceAdmin()) throw new HttpError(403,'FORBIDDEN','仅企业管理员可调整面试分工')
+      await recruiting.assertInterviewInScope(responsibilityMatch[1]!,departmentScope(auth))
+      const body = await readJson(context)
+      if (Object.keys(body).some(key => key !== 'participants')) throw new HttpError(400,'VALIDATION_ERROR','只能修改面试分工')
+      sendSuccess(context,await recruiting.assignInterviewResponsibilities(responsibilityMatch[1]!,body.participants,auth.user.id)); return
+    }
     const interviewMatch = path.match(/^\/api\/v1\/interviews\/([^/]+)(?:\/(feedback|lock-feedback|conclude|complete|questions))?$/);
     if (interviewMatch && method === 'GET' && !interviewMatch[2]) { await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.getInterview(interviewMatch[1]!)); return; }
-    if (interviewMatch && method === 'PATCH' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.updateInterviewSchedule(interviewMatch[1]!, await readJson(context), auth.user.id)); return; }
+    if (interviewMatch && method === 'PATCH' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES);
+      const editingInterview = await recruiting.getInterview(interviewMatch[1]!)
+      await requireResponsibility(editingInterview.applicationId,editingInterview.stage ?? (editingInterview.round >= 2 ? 'final' : 'initial'))
+ await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); sendSuccess(context, await recruiting.updateInterviewSchedule(interviewMatch[1]!, await readJson(context), auth.user.id)); return; }
     if (interviewMatch && method === 'DELETE' && !interviewMatch[2]) { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); await recruiting.deleteInterview(interviewMatch[1]!, auth.user.id); sendSuccess(context, { deleted: true }); return; }
-    if (interviewMatch && method === 'POST') { requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'complete') sendSuccess(context, await recruiting.completeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') {
+    if (interviewMatch && method === 'POST') {
+      if (['complete','conclude'].includes(interviewMatch[2] ?? '')) {
+        const interview = await recruiting.getInterview(interviewMatch[1]!)
+        await requireResponsibility(interview.applicationId, interview.stage ?? (interview.round >= 2 ? 'final' : 'initial'))
+      }
+      if (['feedback','lock-feedback'].includes(interviewMatch[2] ?? '')) {
+        const body = await readJson(context)
+        const interview = await recruiting.getInterview(interviewMatch[1]!)
+        if (!await isWorkspaceAdmin() && (body.interviewerId !== auth.user.id || !interview.participants.some(person => person.role === 'interviewer' && person.userId === auth.user.id))) throw new HttpError(403,'INTERVIEW_RESPONSIBILITY_REQUIRED','只能提交本人的面试反馈')
+      }
+      requireRole(auth, INTERVIEW_WRITE_ROLES); await recruiting.assertInterviewInScope(interviewMatch[1]!, departmentScope(auth)); const body = await readJson(context); if (interviewMatch[2] === 'feedback') sendSuccess(context, await recruiting.submitFeedback(interviewMatch[1]!, body as never, auth.user.id)); else if (interviewMatch[2] === 'lock-feedback') sendSuccess(context, await recruiting.lockFeedback(interviewMatch[1]!, String(body.interviewerId ?? ''), auth.user.id)); else if (interviewMatch[2] === 'complete') sendSuccess(context, await recruiting.completeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'conclude') sendSuccess(context, await recruiting.concludeInterview(interviewMatch[1]!, String(body.outcome) as never, auth.user.id)); else if (interviewMatch[2] === 'questions') {
       if (body.refinement !== undefined) {
         const rawRefinement = body.refinement;
         if (!rawRefinement || typeof rawRefinement !== 'object' || Array.isArray(rawRefinement)) throw new HttpError(400, 'INVALID_INPUT', 'refinement 格式无效');
@@ -1809,13 +1882,14 @@ const routeMiddleware: Middleware = async (context, next) => {
     const sheetListMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/question-sheets$/);
     if (sheetListMatch && method === 'GET') {
       await recruiting.assertApplicationInScope(sheetListMatch[1]!, departmentScope(auth));
-      sendSuccess(context, await questionSheets.getApplicationView(sheetListMatch[1]!));
+      sendSuccess(context, { ...await questionSheets.getApplicationView(sheetListMatch[1]!), permissions: await recruiting.interviewResponsibilities(sheetListMatch[1]!,auth.user.id,await isWorkspaceAdmin()) });
       return;
     }
     const sheetMatch = path.match(/^\/api\/v1\/applications\/([^/]+)\/question-sheets\/(initial|final)\/(hr_screen|hiring_department|business|hr|boss)(?:\/(.*))?$/);
     if (sheetMatch) {
       const applicationId = sheetMatch[1]!; const stage = sheetMatch[2] as 'initial' | 'final'; const sheetType = sheetMatch[3] as 'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'; const suffix = sheetMatch[4] ?? '';
       await recruiting.assertApplicationInScope(applicationId, departmentScope(auth));
+      if (['POST','PATCH','DELETE'].includes(method ?? '')) await requireResponsibility(applicationId, stage, ['lock','unlock'].includes(suffix) ? undefined : sheetType)
       if (!suffix && method === 'POST') {
         requireRole(auth, INTERVIEW_WRITE_ROLES);
         sendSuccess(context, await questionSheets.requestGeneration(applicationId, stage, sheetType, auth.user.id));
@@ -1874,6 +1948,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (stageDecisionMatch && method === 'POST') {
       requireRole(auth, INTERVIEW_WRITE_ROLES);
       await recruiting.assertApplicationInScope(stageDecisionMatch[1]!, departmentScope(auth));
+      await requireResponsibility(stageDecisionMatch[1]!, stageDecisionMatch[2] as 'initial' | 'final');
       const body = await readJson(context);
       sendSuccess(context, await questionSheets.recordDecision(stageDecisionMatch[1]!, stageDecisionMatch[2] as 'initial' | 'final', String(body.decision ?? '') as never, auth.user.id));
       return;
@@ -1882,6 +1957,7 @@ const routeMiddleware: Middleware = async (context, next) => {
     if (stageWeightsMatch && method === 'PATCH') {
       requireRole(auth, INTERVIEW_WRITE_ROLES);
       await recruiting.assertApplicationInScope(stageWeightsMatch[1]!, departmentScope(auth));
+      await requireResponsibility(stageWeightsMatch[1]!, stageWeightsMatch[2] as 'initial' | 'final');
       const body = await readJson(context);
       const rawSheets = body && typeof body.sheets === 'object' && body.sheets !== null ? body.sheets as Record<string, unknown> : {};
       const sheets: Record<string, number> = {};

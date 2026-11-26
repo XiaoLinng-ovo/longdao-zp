@@ -88,7 +88,7 @@ for(const revoked of [false,true]) it('invited registration stays in one transac
   else if(sql.includes('INSERT INTO users')) rows=[{id:user.id,email:'invited@example.com',display_name:'受邀成员'}]
   else if(sql.includes('FROM organization_invitations i')) rows=[invitation]
   else if(sql.startsWith('SELECT * FROM organizations')) rows=[{id:workspaceId,name:'受邀企业',kind:'test',status:'active',created_at:now,service_status:'trial'}]
-  else if(sql.startsWith('SELECT id FROM users')) rows=[{id:user.id}]
+  else if(sql.startsWith('SELECT id FROM users') || sql.startsWith('SELECT id FROM public.users')) rows=[{id:user.id}]
   else if(sql.includes('FROM public.organization_schemas')) rows=[{schema_name:'company_'+workspaceId.replaceAll('-',''),status:'ready',structure_ready:true}]
   return {rows:rows as T[]}
  }
@@ -100,7 +100,7 @@ for(const revoked of [false,true]) it('invited registration stays in one transac
   assert.ok(calls.includes('ROLLBACK'));assert.ok(!calls.includes('COMMIT'))
  } else {
   const result=await registration
-  assert.equal(result.workspace.id,workspaceId);assert.equal(result.workspace.role,'member')
+  assert.equal(result.workspace!.id,workspaceId);assert.equal(result.workspace!.role,'member')
   assert.ok(calls.includes('COMMIT'))
   assert.ok(calls.findIndex(sql=>sql.includes('INSERT INTO organization_invitation_joins'))<calls.indexOf('COMMIT'))
  }

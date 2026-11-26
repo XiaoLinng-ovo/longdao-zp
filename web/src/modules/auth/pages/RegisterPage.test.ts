@@ -72,7 +72,7 @@ async function mount(turnstileEnabled = false) {
 }
 
 async function fillAccount(email = 'owner@example.com') {
-  const values = ['龙道科技', '陈婉清', email, '13800000000', 'strong-password', 'strong-password']
+  const values = ['陈婉清', email, '13800000000', 'strong-password', 'strong-password']
   const inputs = [...root!.querySelectorAll<HTMLInputElement>('form input')]
   inputs.forEach((input, index) => {
     input.value = values[index] ?? ''
@@ -112,6 +112,19 @@ afterEach(() => {
 })
 
 describe('注册页两步验证', () => {
+  it('普通注册只创建账号，完成后进入企业选择入口',async()=>{
+    mocks.register.mockResolvedValue({user:{id:'u',name:'陈婉清'},sessionId:'s',workspaces:[]})
+    mocks.syncAuthenticatedSession.mockReturnValue([])
+    const element=await mount()
+    expect(element.querySelector('input[autocomplete=organization]')).toBeNull()
+    await fillAccount();await submitForm()
+    const code=element.querySelector<HTMLInputElement>('input[autocomplete=one-time-code]')!
+    code.value='123456';code.dispatchEvent(new Event('input'))
+    await submitForm()
+    expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({companyName:''}))
+    expect(mocks.switchWorkspace).not.toHaveBeenCalled()
+    expect(mocks.push).toHaveBeenCalledWith('/workspaces')
+  })
   it('受邀注册不填写企业名称，验证后绑定现有企业', async () => {
     mocks.route.query={invite:'ABCDEF123456ABCDEF123456'}
     const element=await mount()
@@ -146,7 +159,7 @@ describe('注册页两步验证', () => {
   it('验证码发送成功后才进入第二步', async () => {
     const element = await mount()
     expect(element.textContent).toContain('步骤 1 / 2')
-    expect(element.querySelector('h1')?.textContent).toBe('创建企业账号')
+    expect(element.querySelector('h1')?.textContent).toBe('创建账号')
     expect(element.textContent).not.toContain('管理员')
     await fillAccount()
     await submitForm()

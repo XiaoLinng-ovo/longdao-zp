@@ -51,7 +51,7 @@ export class PlatformService {
     const values = [search || null, status]
     const count = await this.pool.query(`SELECT count(*)::integer AS total FROM organizations o WHERE ${filter}`, values)
     const rows = await this.pool.query(`SELECT o.*, organization_service_available(o.id) AS service_available,
-      (SELECT count(*) FROM organization_members m WHERE m.organization_id=o.id) AS member_count
+      (SELECT count(*) FROM organization_members m WHERE m.organization_id=o.id AND m.ended_at IS NULL) AS member_count
       FROM organizations o WHERE ${filter} ORDER BY o.created_at DESC, o.id LIMIT $3 OFFSET $4`, [...values, pageSize, (page - 1) * pageSize])
     // Deliberately excludes HR records, owner personal data, model credentials, and enterprise prompts.
     return { items: rows.rows.map(view), total: Number(count.rows[0]?.total ?? 0), page, pageSize }
@@ -69,7 +69,7 @@ export class PlatformService {
       if (Number(current.service_version) !== patch.version) throw new HttpError(409, 'VERSION_CONFLICT', '客户状态已被其他运营人员修改，请刷新后重试')
       const result = await db.query(`UPDATE organizations SET service_status=$2, trial_ends_at=$3::timestamptz,
         service_version=service_version+1 WHERE id=$1::uuid RETURNING *, organization_service_available(id) AS service_available,
-        (SELECT count(*) FROM organization_members WHERE organization_id=$1::uuid) AS member_count`, [organizationId, patch.status, patch.deadline])
+        (SELECT count(*) FROM organization_members WHERE organization_id=$1::uuid AND ended_at IS NULL) AS member_count`, [organizationId, patch.status, patch.deadline])
       // Compute availability from the returned columns: STABLE SQL function may see the statement's pre-update snapshot.
       const row = result.rows[0]!
       row.service_available = row.status === 'active' && row.service_status !== 'suspended' && (row.service_status !== 'trial' || new Date(row.trial_ends_at).getTime() > Date.now()) && (row.paid_subscription_expires_at == null || new Date(row.paid_subscription_expires_at).getTime() > Date.now())

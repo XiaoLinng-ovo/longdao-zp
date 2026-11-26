@@ -36,7 +36,7 @@ export function installAuthGuard(router: Router): void {
     if (!authSession.user.workspaceId && to.name !== 'workspaces' && to.name !== 'profile' && to.name !== 'forbidden' && !to.meta.platformOnly && !to.meta.systemAdminOnly && !to.meta.billingOnly) return { name: 'workspaces', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
     if (to.meta.billingOnly) {
       const workspaceId = typeof to.query.workspace === 'string' ? to.query.workspace : authSession.user.workspaceId
-      if (!authSession.workspaces.some(workspace => workspace.id === workspaceId && workspace.status === 'active' && ['owner','admin'].includes(workspace.role))) return { name: 'forbidden', query: { from: to.fullPath } }
+      if (!authSession.workspaces.some(workspace => workspace.id === workspaceId && workspace.status === 'active' && workspace.membershipActive !== false && ['owner','admin'].includes(workspace.role))) return { name: 'forbidden', query: { from: to.fullPath } }
     }
 
 
@@ -52,7 +52,7 @@ export function installAuthGuard(router: Router): void {
     if (to.meta.adminOnly && authSession.user.isSystemAdmin !== true) return { name: 'forbidden', query: { from: to.fullPath } }
     if (to.meta.workspaceAdminOnly) {
       const billingId = to.meta.billingOnly && typeof to.query.workspace === 'string' ? to.query.workspace : authSession.user?.workspaceId
-      const workspaceRole = authSession.workspaces.find((workspace) => workspace.id === billingId)?.role
+      const workspaceRole = authSession.workspaces.find((workspace) => workspace.id === billingId && workspace.membershipActive !== false)?.role
       if (!workspaceRole || !['owner','admin'].includes(workspaceRole)) return { name: 'forbidden', query: { from: to.fullPath } }
     }
     const allowedRoles = to.meta.roles as string[] | undefined

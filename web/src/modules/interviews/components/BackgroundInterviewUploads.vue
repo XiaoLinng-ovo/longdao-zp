@@ -14,7 +14,7 @@ const jobs = computed(() => {
 <template>
   <div v-if="jobs.length" class="background-audio" aria-label="面试录音后台保存">
     <div v-for="job in jobs" :key="job.id" class="background-audio-row" :class="{ failed: job.phase === 'failed' }" role="status">
-      <router-link :to="{ path: '/interviews/' + job.interviewId + (job.phase === 'review_required' || job.phase === 'processing' ? '/live' : ''), query: job.phase === 'completed' ? { openSummary: '1' } : {} }">{{ job.label }}</router-link>
+      <router-link :to="{ path: '/interviews/' + job.interviewId + (job.phase === 'processing' ? '/live' : ''), query: ['completed','review_required'].includes(job.phase) ? { openSummary: '1' } : {} }">{{ job.label }}</router-link>
       <span v-if="job.phase === 'completed'">录音已保存，会话已结束</span>
       <span v-else-if="job.phase === 'ending'">录音已保存，正在结束会话</span>
       <span v-else-if="job.phase === 'processing' || job.phase === 'review_required'">{{ job.message }}</span>

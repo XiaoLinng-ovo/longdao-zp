@@ -112,18 +112,18 @@ beforeEach(() => {
 afterEach(async () => { backgroundQueue.dispose(); app?.unmount(); await flush(); root?.remove(); app = undefined; root = undefined; vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals() })
 
 describe('live interview meeting audio', () => {
-  it('blocks completion at 31 unresolved turns and allows it after a canonical manual role choice', async () => {
+  it('allows completion without mandatory role confirmation and retains optional correction', async () => {
     const session = { id: 'session-1', interviewId: 'interview-1', status: 'paused', externalStatus: 'ready', startedAt: '2026-11-16T00:00:00Z', endedAt: '2026-11-16T01:00:00Z', createdBy: 'u', currentQuestion: '' }
     const segments: LiveInterviewSegment[] = Array.from({ length: 31 }, (_, index) => ({ id: 'turn-' + index,
       sessionId: session.id, speakerId: 'voice-' + index, role: 'unknown', confidence: .35, text: '纠正后的正文' + index,
       startMs: index * 2000, endMs: index * 2000 + 1000, status: 'transcribed', audioSource: 'meeting' }))
-    const review = { phase: 'review_required' as const, unresolvedCount: 31, unresolvedIds: segments.map(row => row.id), limit: 30, versionId: 'version-1' }
+    const review = { phase: 'ready' as const, unresolvedCount: 31, unresolvedIds: segments.map(row => row.id), limit: 30, versionId: 'version-1' }
     const view = { session, segments, completionReview: review }
     vi.mocked(findActiveLiveInterviewSession).mockResolvedValue(view)
     vi.mocked(getLiveInterviewTranscription).mockResolvedValue({ ...view, pendingCount: 0, retryingCount: 0 })
     await mount()
-    expect(root!.textContent).toContain('待确认说话角色：31 条')
-    expect(button('确认结束面试')).toBeUndefined()
+    expect(root!.textContent).toContain('31 条不确定发言')
+    expect(button('确认结束面试').disabled).toBe(false)
     expect(root!.querySelectorAll('.role-review-badge')).toHaveLength(31)
     const saved = { ...view, segments: segments.map((row, index) => index === 0 ? { ...row, role: 'candidate' as const, confidence: 1, speakerConfirmed: true } : row),
       completionReview: { ...review, phase: 'ready' as const, unresolvedCount: 30, unresolvedIds: review.unresolvedIds.slice(1), versionId: 'version-2' } }
@@ -214,13 +214,10 @@ describe('live interview meeting audio', () => {
     expect(settings.compareDocumentPosition(root!.querySelector('.interview-room')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(root!.querySelector('.transcript-panel')).not.toBeNull()
     expect(root!.querySelector('.analysis-panel')).not.toBeNull()
-    expect(settings.querySelectorAll('select')).toHaveLength(3)
-    expect(settings.querySelector<HTMLSelectElement>('[aria-label="本机麦克风角色"]')!.value).toBe('unknown')
-    expect(settings.querySelector<HTMLDetailsElement>('.source-role-settings')!.open).toBe(false)
-    expect(settings.querySelector('.source-role-settings summary')!.textContent).toContain('说话人自动识别')
-    expect(settings.querySelector('option[value="unknown"]')!.textContent).toBe('自动识别（推荐）')
-    expect(root!.querySelector<HTMLDetailsElement>('.recording-dialog-role-options')!.open).toBe(false)
-    expect(root!.querySelector('.recording-dialog-role-options summary')!.textContent).toContain('可选')
+    expect(settings.querySelectorAll('select')).toHaveLength(2)
+    expect(settings.querySelector('[aria-label="本机麦克风角色"]')).toBeNull()
+    expect(settings.querySelector('.source-role-settings')).toBeNull()
+    expect(root!.querySelector('.recording-dialog-role-options')).toBeNull()
     expect(settings.querySelector('.recording-consent input')).toBeNull()
     expect(button('确认授权并开始录音').disabled).toBe(true)
     button('稍后设置').click(); await flush()
@@ -1328,29 +1325,24 @@ describe('streaming reconnection lifecycle', () => {
     expect(checkpoints).toContainEqual(expect.objectContaining({ text: '断线前的本机全文', audioSource: 'microphone', complete: false }))
     expect(checkpoints).toContainEqual(expect.objectContaining({ text: '未中断的会议全文', audioSource: 'meeting' }))
   })
-  it('snapshots explicit role mappings per chunk and allows changing them only while paused', async () => {
+  it('keeps both audio sources in automatic role mode across pause and resume', async () => {
     const { mic, meeting } = await dualSources()
-    const role = root!.querySelector<HTMLSelectElement>('[aria-label="本机麦克风角色"]')!
-    expect(role.value).toBe('unknown'); expect(role.disabled).toBe(true)
+    expect(root!.querySelector('[aria-label="本机麦克风角色"]')).toBeNull()
     await tick(1000); button('暂停').click(); await flush()
     mic.message({ type: 'final', text: '' }); meeting.message({ type: 'final', text: '' }); await flush()
-    expect(role.disabled).toBe(false)
-    role.value = 'candidate'; role.dispatchEvent(new Event('change'))
-    root!.querySelector<HTMLInputElement>('[aria-label="本机麦克风包含多人"]')!.click(); await flush()
     button('继续').click(); await flush(); await tick(1000); button('暂停').click(); await flush()
     mic.message({ type: 'final', text: '' }); meeting.message({ type: 'final', text: '' }); await flush()
-    const micCalls = vi.mocked(uploadLiveInterviewChunk).mock.calls.filter(call => call[6]?.id === 'microphone')
-    expect(micCalls.map(call => call[6])).toEqual([{ id: 'microphone', role: 'unknown', multipleSpeakers: true }, { id: 'microphone', role: 'candidate', multipleSpeakers: false }])
-    expect(micCalls.map(call => [call[3], call[7]])).toEqual([[0, 1000], [1000, 2000]])
+    const calls = vi.mocked(uploadLiveInterviewChunk).mock.calls.filter(call => call[6]?.id === 'microphone')
+    expect(calls.every(call => call[6]?.role === 'unknown' && call[6]?.multipleSpeakers)).toBe(true)
   })
   it('starts transcription in automatic role mode without selecting a speaker', async () => {
     await mount()
-    expect(root!.querySelector<HTMLDetailsElement>('.recording-dialog-role-options')!.open).toBe(false)
+    expect(root!.querySelector('.recording-dialog-role-options')).toBeNull()
     await start()
     await tick(1000); button('暂停').click(); await flush()
     Connection.instances[0]!.message({ type: 'final', text: '' }); await flush()
     expect(vi.mocked(uploadLiveInterviewChunk).mock.calls.at(-1)?.[6]).toEqual({ id: 'microphone', role: 'unknown', multipleSpeakers: true })
-    expect(root!.querySelector<HTMLDetailsElement>('.source-role-settings')!.open).toBe(false)
+    expect(root!.querySelector('.source-role-settings')).toBeNull()
   })
   it('continues saving new meeting chunks while the microphone upload is awaiting manual retry', async () => {
     vi.mocked(uploadLiveInterviewChunk).mockImplementation(async (_session, _audio, _type, _offset, _id, _checkpoint, source) => {
@@ -1372,6 +1364,20 @@ describe('streaming reconnection lifecycle', () => {
   })
   async function connected() { await mount(); await start(); const socket = Connection.instances[0]!; socket.open(); await flush(); return socket }
 
+  it('manual recovery reconnects only the failed source and ignores repeated clicks during that attempt', async () => {
+    const { mic, meeting } = await dualSources()
+    mic.readyState = 3; mic.onclose?.({ code: 1006 }); await flush()
+    button('重新连接').click(); await flush()
+    const replacement = Connection.instances.at(-1)!
+    expect(Connection.instances).toHaveLength(3)
+    expect(meeting.close).not.toHaveBeenCalled()
+    button('重新连接').click(); await flush()
+    expect(Connection.instances).toHaveLength(3)
+    replacement.open(); replacement.ready(); await flush()
+    expect(root!.textContent).toContain('流式识别中')
+    expect(Recorder.instances).toHaveLength(2)
+    expect(capture.stop).not.toHaveBeenCalled()
+  })
   it('immediately replaces a stalled connection on manual recovery without restarting capture', async () => {
     await mount(); await start(); await tick(11000)
     const previous = Connection.instances.at(-1)!

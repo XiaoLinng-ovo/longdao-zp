@@ -132,14 +132,12 @@ watch(() => props.refreshKey, (value) => { if (!value) void load() })
 <template>
   <section class="scoring-skills-panel" aria-labelledby="resume-scoring-skills-heading">
     <div class="section-heading">
-      <div><h3 id="resume-scoring-skills-heading" class="section-title">简历 AI 评分 Skill</h3>
-        <p class="muted">为不同岗位保存专属评分维度、权重与扣分规则，上传简历或重新解析时自动匹配。</p></div>
+      <div><h3 id="resume-scoring-skills-heading" class="section-title">简历 AI 评分 Skill</h3></div>
       <button class="btn btn-ghost" type="button" :disabled="busy" @click="load">刷新评分 Skill</button>
     </div>
-    <p class="scoring-tip">一套规则可关联多个岗位，每个岗位只绑定一套规则。未关联或停用时使用默认规则；修改不影响历史评分。专属规则需要已配置 AI 模型的 Worker 执行，不会静默替换为默认评分。</p>
     <p v-if="error" class="error-note" role="alert">{{ error }}</p>
     <p v-if="message" class="success-note" role="status">{{ message }}</p>
-    <div class="form-panel scoring-editor" :aria-busy="busy">
+    <div class="scoring-editor" :aria-busy="busy">
       <div class="form-field">
         <label for="resume-scoring-skill-name">评分 Skill 名称</label>
         <input id="resume-scoring-skill-name" v-model="draft.name" :disabled="busy" maxlength="80" placeholder="例如：后端工程师 · 项目与技术能力优先" />
@@ -156,13 +154,12 @@ watch(() => props.refreshKey, (value) => { if (!value) void load() })
           <p v-if="loading" class="muted">正在读取岗位...</p>
           <p v-else-if="!visibleJobs.length" class="muted">{{ jobs.length ? '没有匹配的岗位' : '暂无岗位，请先创建岗位；也可先保存未关联的 Skill。' }}</p>
         </div>
-        <small class="muted">不选岗位时仅保存为可复用规则，不会参与评分。更换规则前，请先在原 Skill 中解除岗位关联（停用不会解除关联）。</small>
       </div>
       <div class="form-field">
         <div class="rule-heading"><label for="resume-scoring-skill-content">评分规则</label>
           <button class="btn btn-ghost btn-sm" type="button" :disabled="busy || !!draft.content.trim()" @click="draft.content = rulesTemplate">填入企业通用评分 Skill 模板</button></div>
-        <textarea id="resume-scoring-skill-content" v-model="draft.content" :disabled="busy" rows="8" maxlength="8000" placeholder="写明评分维度、各维度权重、评分标准、扣分条件及证据要求；例如技术能力 40 分、项目经验 30 分、业务匹配 20 分、专业知识 10 分。"></textarea>
-        <small class="muted">{{ draft.content.length }} / 8000 字 · 总分统一为 100 分；最终得分由服务端按已校验的 AI 分项证据重算，招聘决定由人工确认。</small>
+        <div class="content-heading"><span id="resume-scoring-skill-count" class="character-count">{{ draft.content.length }}/8000</span></div>
+        <textarea aria-describedby="resume-scoring-skill-count" id="resume-scoring-skill-content" v-model="draft.content" :disabled="busy" rows="8" maxlength="8000" placeholder="写明评分维度、各维度权重、评分标准、扣分条件及证据要求；例如技术能力 40 分、项目经验 30 分、业务匹配 20 分、专业知识 10 分。"></textarea>
       </div>
       <div class="inline-actions">
         <button class="btn btn-primary" type="button" :disabled="busy" @click="save">{{ saving ? '保存中...' : editingId ? '保存评分 Skill' : '创建评分 Skill' }}</button>
@@ -193,8 +190,10 @@ watch(() => props.refreshKey, (value) => { if (!value) void load() })
 </template>
 
 <style scoped>
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.scoring-editor .form-field { min-width: 0; }
+.scoring-skills-table { overflow-x: auto; }
 .scoring-skills-panel { margin-top: 24px; padding-top: 22px; border-top: 1px solid #e5eef2; }
-.scoring-tip { background: #eff6ff; border: 1px solid #dbeafe; border-radius: 10px; padding: 12px 16px; color: #475569; font-size: 12px; line-height: 1.8; }
 .scoring-editor { display: grid; gap: 16px; margin-top: 14px; }
 .scoring-editor textarea { width: 100%; resize: vertical; min-height: 168px; }
 .scoring-job-list { max-height: 225px; overflow-y: auto; margin: 8px 0; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 12px; }
@@ -202,6 +201,8 @@ watch(() => props.refreshKey, (value) => { if (!value) void load() })
 .scoring-job-option input { width: 16px; height: 16px; flex-shrink: 0; }
 .scoring-job-option span { flex: 1; color: #334155; }.scoring-job-option span small { display: block; margin-top: 3px; color: #64748b; }
 .scoring-job-option.unavailable { opacity: .6; cursor: not-allowed; }
+.content-heading { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+.character-count { font-size: 12px; color: #64748b; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .rule-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .scoring-skills-table { margin-top: 18px; }.scoring-skills-table table { min-width: 850px; }
 .bound-jobs { padding-left: 16px; margin: 0; line-height: 1.8; }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
 import StageScoreFormula from './StageScoreFormula.vue'
 import ApplicationResumeButton from '../../candidates/components/ApplicationResumeButton.vue'
@@ -45,6 +45,9 @@ import {
 
 const props = defineProps<{ applicationId: string; defaultStage?: InterviewStage }>()
 const router = useRouter()
+const route = useRoute()
+const canLead = computed(() => view.value?.permissions?.find(item => item.stage === stage.value)?.lead ?? false)
+const canScore = (type: QuestionSheetType) => view.value?.permissions?.find(item => item.stage === stage.value)?.sheetTypes.includes(type) ?? false
 
 const view = ref<ApiApplicationQuestionSheets | null>(null)
 const stage = ref<InterviewStage>(props.defaultStage ?? 'initial')
@@ -118,7 +121,7 @@ function syncPolling(hasPending: boolean): void {
 }
 
 function applyView(next: ApiApplicationQuestionSheets): void {
-  view.value = next
+  view.value = { ...next, permissions: next.permissions ?? view.value?.permissions }
   for (const item of next.stages) weightsDraft.value[item.stage] = cloneWeights(item.weights)
   syncPolling(next.sheets.some((sheet) => sheet.status === 'generating'))
 }
@@ -187,7 +190,7 @@ function tierOf(question: ApiInterviewQuestion): QuestionTier[] {
 }
 
 function editable(sheet: ApiQuestionSheet): boolean {
-  return sheet.status === 'scoring'
+  return sheet.status === 'scoring' && canScore(sheet.sheetType)
 }
 
 function isRubric(question: ApiInterviewQuestion): boolean {
@@ -435,7 +438,16 @@ async function ensureNextRound(): Promise<void> {
   } finally { busy.value = '' }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  await nextTick()
+  const type = route.query.sheetType
+  if (typeof type === 'string' && STAGE_SHEET_TYPES[stage.value].includes(type as QuestionSheetType)) document.getElementById('sheet-' + type)?.scrollIntoView({block:'start'})
+})
+watch(() => route.query.sheetType, async type => {
+  await nextTick()
+  if (typeof type === 'string' && STAGE_SHEET_TYPES[stage.value].includes(type as QuestionSheetType)) document.getElementById('sheet-' + type)?.scrollIntoView({block:'start'})
+})
 onUnmounted(stopPolling)
 </script>
 
@@ -468,6 +480,7 @@ onUnmounted(stopPolling)
 
       <StageScoreFormula
         :stage="stage"
+        :readonly="!canLead"
         :breakdown="breakdown"
         :draft="draft"
         :review="review"
@@ -481,11 +494,11 @@ onUnmounted(stopPolling)
         @decide="(decision) => (pendingDecision = decision)"
       />
 
-      <div v-if="stage === 'initial' && review?.decision === 'advanced' && !view.nextInterview" class="inline-actions">
+      <div v-if="canLead && stage === 'initial' && review?.decision === 'advanced' && !view.nextInterview" class="inline-actions">
         <button class="btn btn-primary" type="button" :disabled="!!busy" @click="ensureNextRound">{{ busy === 'decision' ? '正在创建…' : '创建第二轮面试' }}</button>
       </div>
 
-      <article v-for="slot in sheetSlots" :key="slot.sheetType" class="sheet-card">
+      <article v-for="slot in sheetSlots" :id="'sheet-' + slot.sheetType" :key="slot.sheetType" class="sheet-card">
         <header class="sheet-card-head">
           <div class="sheet-card-title">
             <strong>{{ slot.label }}</strong>
@@ -502,13 +515,13 @@ onUnmounted(stopPolling)
             <button
               class="btn btn-ghost"
               type="button"
-              :disabled="Boolean(busy) || !canRegenerate(slot.sheet)"
+              :disabled="Boolean(busy) || !canScore(slot.sheetType) || !canRegenerate(slot.sheet)"
               @click="generate(slot.sheetType)"
             >
               {{ slot.sheet?.status === 'generating' ? '正在载入…' : slot.sheet && slot.sheet.status !== 'draft' ? '重新载入考察点' : '载入考察点' }}
             </button>
             <button
-              v-if="slot.sheet && slot.sheet.status === 'submitted'"
+              v-if="canLead && slot.sheet && slot.sheet.status === 'submitted'"
               class="btn btn-ghost"
               type="button"
               :disabled="Boolean(busy)"
@@ -517,7 +530,7 @@ onUnmounted(stopPolling)
               {{ busy === `unlock:${slot.sheet.sheetType}` ? '处理中...' : '撤回提交' }}
             </button>
             <button
-              v-if="slot.sheet && slot.sheet.status === 'submitted'"
+              v-if="canLead && slot.sheet && slot.sheet.status === 'submitted'"
               class="btn btn-ghost"
               type="button"
               :disabled="Boolean(busy)"
@@ -526,7 +539,7 @@ onUnmounted(stopPolling)
               锁定
             </button>
             <button
-              v-if="slot.sheet && slot.sheet.status === 'locked'"
+              v-if="canLead && slot.sheet && slot.sheet.status === 'locked'"
               class="btn btn-ghost"
               type="button"
               :disabled="Boolean(busy)"
@@ -537,7 +550,7 @@ onUnmounted(stopPolling)
           </div>
         </header>
 
-        <div v-if="slot.sheet && slot.sheet.status === 'scoring'" class="sheet-submit-bar">
+        <div v-if="slot.sheet && editable(slot.sheet)" class="sheet-submit-bar">
           <span>
             <strong>{{ slot.label }}</strong>
             <span class="sheet-submit-progress">已打分 {{ slot.sheet.aggregate.scoredCount }}/{{ slot.sheet.aggregate.totalCount }}</span>

@@ -3,9 +3,10 @@ import { createApp, nextTick, type App } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import EnterpriseAiSettingsPage from './EnterpriseAiSettingsPage.vue'
 import { authSession } from '../../auth/session'
-import { getEnterpriseAiSettings, saveEnterpriseAiSettings, testEnterpriseAiConnection, selectEnterpriseAiSource } from '../api'
+import { getEnterpriseAiSettings, saveEnterpriseAiSettings, testEnterpriseAiConnection, selectEnterpriseAiSource, listAiPromptSkills, createAiPromptSkill } from '../api'
 
-vi.mock('../api', () => ({ getEnterpriseAiSettings: vi.fn(), saveEnterpriseAiSettings: vi.fn(), testEnterpriseAiConnection: vi.fn(), selectEnterpriseAiSource: vi.fn() }))
+vi.mock('../api', () => ({ getEnterpriseAiSettings: vi.fn(), saveEnterpriseAiSettings: vi.fn(), testEnterpriseAiConnection: vi.fn(), selectEnterpriseAiSource: vi.fn(), listAiPromptSkills: vi.fn(), createAiPromptSkill: vi.fn(), updateAiPromptSkill: vi.fn(), deleteAiPromptSkill: vi.fn() }))
+vi.mock('../../jobs/api', () => ({ loadJobs: vi.fn().mockResolvedValue([]) }))
 const getSettings = vi.mocked(getEnterpriseAiSettings)
 const saveSettings = vi.mocked(saveEnterpriseAiSettings)
 const testConnection = vi.mocked(testEnterpriseAiConnection)
@@ -40,17 +41,32 @@ describe('enterprise AI self-service configuration', () => {
     vi.resetAllMocks()
     authSession.user = { id: 'member', name: 'Member', email: 'member@example.invalid', role: 'recruiter', departmentId: '', workspaceId: 'org-a' }
     authSession.workspaces = [{ id: 'org-a', name: 'Enterprise A', kind: 'test', status: 'active', role: 'owner', createdAt: '2026-11-20' }]
+    vi.mocked(listAiPromptSkills).mockResolvedValue([])
     getSettings.mockResolvedValue(configured())
     saveSettings.mockResolvedValue(configured())
     testConnection.mockResolvedValue({ ok: true, message: '连接正常', latencyMs: 10, models: ['model-a', 'model-b'] })
   })
   afterEach(() => { app?.unmount(); root?.remove(); app = undefined; root = undefined })
 
+  it('offers both enterprise Skill editors even when the model configuration cannot load', async () => {
+    getSettings.mockRejectedValue(new Error('模型配置暂不可用'))
+    await mount()
+    expect(root!.textContent).toContain('岗位文档生成 Skill')
+    expect(root!.textContent).toContain('简历 AI 评分 Skill')
+    expect(root!.querySelector('#ai-skill-count')?.textContent).toBe('0/8000')
+    await input('#ai-skill-name', '企业写作规则')
+    await input('#ai-skill-content', '清晰准确')
+    expect(root!.querySelector('#ai-skill-count')?.textContent).toBe('4/8000')
+    vi.mocked(createAiPromptSkill).mockResolvedValue({ id: 'own-skill', name: '企业写作规则', content: '清晰准确', targetType: 'both', isActive: true, createdBy: null, createdAt: '', updatedAt: '' })
+    await click('创建 Skill')
+    expect(createAiPromptSkill).toHaveBeenCalledWith({ name: '企业写作规则', content: '清晰准确', targetType: 'both' })
+  })
+
   it('shows the current workspace and a fixed non-editable endpoint without timeout controls', async () => {
     await mount()
     expect(root!.textContent).toContain('Enterprise A')
     expect(root!.querySelector('[data-testid="fixed-ai-endpoint"]')?.textContent).toBe('https://ai.longdaoec.com')
-    expect(root!.querySelectorAll('input').length).toBe(2)
+    expect(root!.querySelectorAll('.ai-settings input').length).toBe(2)
     expect(root!.querySelector<HTMLInputElement>('#enterprise-ai-key')?.value).toBe('')
     expect(root!.querySelector('input[type="number"]')).toBeNull()
   })

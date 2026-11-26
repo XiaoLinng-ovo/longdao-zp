@@ -9,14 +9,14 @@ const emptyVersion: TranscriptVersionInput = { turns: [], evidence: [], correcti
 const raw = (text: string): RawTranscriptSegment => ({ id: 'segment-1', speakerId: 'voice-1', role: 'candidate',
   confidence: .9, text, startMs: 0, endMs: 1000 })
 
-function fixture(overrides: { currentFingerprint?: string; pointer?: string | null; insertId?: string; existingId?: string } = {}) {
+function fixture(overrides: { currentFingerprint?: string; pointer?: string | null; insertId?: string; existingId?: string; paused?: boolean } = {}) {
   const calls: Array<{ sql: string; values?: unknown[] }> = []
   const client = {
     async query(sql: string, values?: unknown[]) {
       calls.push({ sql, ...(values ? { values } : {}) })
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 }
       if (sql.includes('FROM interview_transcript_postprocess_jobs j')) return { rows: [{
-        status: 'processing', claim: job.claim, session_status: 'completed',
+        status: 'processing', claim: job.claim, session_status: overrides.paused ? 'paused' : 'completed', ended_at: '2026-01-01T00:00:01Z',
         corrected_transcript_version_id: overrides.pointer ?? null, summary_status: 'pending', summary_report: null,
       }] }
       if (sql.startsWith('SELECT * FROM interview_live_segments')) return { rows: overrides.currentFingerprint === 'changed'
@@ -37,6 +37,24 @@ function fixture(overrides: { currentFingerprint?: string; pointer?: string | nu
 }
 
 describe('transcript postprocess transactional publication', () => {
+  it('completes a stopped session after canonical publication in the same transaction', async () => {
+    const f = fixture({ paused: true, insertId: 'canonical-version' })
+    assert.equal(await f.repository.publish(job, rawSnapshotFingerprint([], [], 1000), emptyVersion), 'published')
+    const completed = f.calls.findIndex(call => call.sql.startsWith("UPDATE interview_live_sessions SET status='completed'"))
+    const published = f.calls.findIndex(call => call.sql.startsWith("UPDATE interview_transcript_postprocess_jobs SET status='completed'"))
+    assert.ok(completed > published)
+    assert.equal(f.calls.at(-1)!.sql, 'COMMIT')
+  })
+  it('stops retrying exhausted postprocess jobs without losing the claim guard', async () => {
+    let captured = ''
+    let parameters: unknown[] = []
+    const repository = new InterviewTranscriptPostprocessRepository({ query: async (sql: string, values: unknown[]) => { captured = sql; parameters = values } } as never)
+    await repository.retry({ ...job, attempts: 3 }, new Error('synthetic failure'))
+    assert.match(captured, /attempts>=3 THEN 'failed' ELSE 'pending'/u)
+    assert.ok(captured.includes('claim=$2::uuid'))
+    assert.equal(parameters[1], job.claim)
+  })
+
   it('prefers ready pending work over stale processing claims', async () => {
     let captured = ''
     const repository = new InterviewTranscriptPostprocessRepository({ async query(sql: string) {

@@ -122,15 +122,121 @@ test('活动实时连接关闭时断开本地上游并且仅释放一次租约',
   client.on('error', () => undefined)
   try {
     await once(client, 'open')
+    const accessSql=fake.calls.find(sql=>sql.includes('public.organization_members'))!
+    assert.match(accessSql,/m\.is_active AND m\.ended_at IS NULL/)
+    assert.match(accessSql,/s\.revoked_at IS NULL AND s\.expires_at>now\(\)/)
     const [remote] = await upstreamConnected as [WebSocket]
     const remoteClosed = once(remote, 'close'), clientClosed = once(client, 'close')
     const closing = stop(); assert.equal(stop(), closing)
     await Promise.all([closing, remoteClosed, clientClosed])
-    assert.equal(fake.calls.filter(sql => sql.includes('SET lease_until=now() WHERE')).length, 1)
+    assert.equal(fake.calls.filter(sql => sql.includes('SET connection_id=$2,lease_until=now()')).length, 1)
   } finally {
     client.terminate(); await stop()
     await new Promise<void>(resolve => server.close(() => resolve()))
     await new Promise<void>(resolve => upstream.close(() => resolve()))
     if(previous === undefined)delete process.env.TENANT_SCHEMA_ROUTING;else process.env.TENANT_SCHEMA_ROUTING = previous
+  }
+})
+
+
+for (const responds of [false, true]) {
+  test('transport heartbeat ' + (responds ? 'keeps responsive clients connected' : 'reclaims a half-open track so reconnect succeeds'), { timeout: 5000 }, async () => {
+    const previous = process.env.TENANT_SCHEMA_ROUTING
+    process.env.TENANT_SCHEMA_ROUTING = 'off'
+    const upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await once(upstream, 'listening')
+    const upstreamAddress = upstream.address(); assert.ok(upstreamAddress && typeof upstreamAddress !== 'string')
+    const server = createServer(), fake = streamPool()
+    let owner: unknown
+    const base = fake.pool.query.bind(fake.pool)
+    fake.pool.query = (async (sql: string, values?: unknown[]) => {
+      if (sql.includes('INSERT INTO public.billing_stream_sources')) {
+        if (owner) return { rows: [] }
+        owner = values?.[3]
+      }
+      if (sql.includes('SET lease_until=now() WHERE') || sql.includes('SET connection_id=$2,lease_until=now()')) {
+        if (owner === values?.[0]) owner = undefined
+      }
+      return base(sql)
+    }) as Pool['query']
+    fake.pool.connect = (async () => ({ query: fake.pool.query.bind(fake.pool), release() {} })) as Pool['connect']
+    const dependencies = { pool: fake.pool, authenticate, resolveEnv: async () => ({}), upstreamUrl: 'ws://127.0.0.1:' + upstreamAddress.port, heartbeatIntervalMs: 30 }
+    const stop = attachBilledStreamGateway(server, loadConfig(), dependencies)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address(); assert.ok(address && typeof address !== 'string')
+    const url = 'ws://127.0.0.1:' + address.port + streamPath
+    const client = new WebSocket(url, { origin: 'http://localhost:5174', autoPong: responds })
+    client.on('error', () => undefined)
+    let replacement: WebSocket | undefined
+    try {
+      await once(client, 'open')
+      await new Promise(resolve => setTimeout(resolve, 180))
+      if (responds) {
+        assert.equal(client.readyState, WebSocket.OPEN)
+        assert.ok(owner)
+        const originalOwner = owner
+        replacement = new WebSocket(url, { origin: 'http://localhost:5174' })
+        replacement.on('error', () => undefined)
+        const [reason] = await once(replacement, 'message')
+        assert.equal(JSON.parse(String(reason)).code, 'STREAM_SOURCE_BUSY')
+        assert.equal(JSON.parse(String(reason)).retryable, true)
+        assert.equal(owner, originalOwner, 'another tab must not steal a healthy track')
+        assert.equal(client.readyState, WebSocket.OPEN)
+      } else {
+        assert.equal(client.readyState, WebSocket.CLOSED, 'dead peers must not renew their lease forever')
+        assert.equal(owner, undefined)
+        replacement = new WebSocket(url, { origin: 'http://localhost:5174' })
+        replacement.on('error', () => undefined)
+        await once(replacement, 'open')
+        assert.ok(owner, 'the replacement must acquire the released track')
+      }
+    } finally {
+      client.terminate(); replacement?.terminate(); await stop()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      await new Promise<void>(resolve => upstream.close(() => resolve()))
+      if (previous === undefined) delete process.env.TENANT_SCHEMA_ROUTING; else process.env.TENANT_SCHEMA_ROUTING = previous
+    }
+  })
+}
+
+test('disconnect releases and fences the track before an outstanding access check finishes', { timeout: 5000 }, async () => {
+  const previous = process.env.TENANT_SCHEMA_ROUTING
+  process.env.TENANT_SCHEMA_ROUTING = 'off'
+  const upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  await once(upstream, 'listening')
+  const upstreamAddress = upstream.address(); assert.ok(upstreamAddress && typeof upstreamAddress !== 'string')
+  const connected = once(upstream, 'connection')
+  const server = createServer(), fake = streamPool()
+  const base = fake.pool.query.bind(fake.pool)
+  let unblock!: () => void, entered!: () => void, checks = 0
+  const stalled = new Promise<void>(resolve => { unblock = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  fake.pool.query = (async (sql: string) => {
+    if (sql.includes('JOIN public.users') && ++checks === 2) { entered(); await stalled }
+    return base(sql)
+  }) as Pool['query']
+  const stop = attachBilledStreamGateway(server, loadConfig(), { pool: fake.pool, authenticate, resolveEnv: async () => ({}), upstreamUrl: 'ws://127.0.0.1:' + upstreamAddress.port })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address(); assert.ok(address && typeof address !== 'string')
+  const client = new WebSocket('ws://127.0.0.1:' + address.port + streamPath, { origin: 'http://localhost:5174' })
+  client.on('error', () => undefined)
+  try {
+    await once(client, 'open')
+    const [remote] = await connected as [WebSocket]
+    let forwarded = 0
+    remote.on('message', () => { forwarded++ })
+    client.send(JSON.stringify({ type: 'ping' }))
+    await started
+    client.terminate()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(fake.calls.filter(sql => sql.includes('SET connection_id=$2,lease_until=now()')).length, 1, 'release must not wait for a stalled forwarding task')
+    unblock()
+    await stop()
+    assert.equal(forwarded, 0, 'an obsolete task must not send data after cleanup')
+  } finally {
+    unblock(); client.terminate(); await stop()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await new Promise<void>(resolve => upstream.close(() => resolve()))
+    if (previous === undefined) delete process.env.TENANT_SCHEMA_ROUTING; else process.env.TENANT_SCHEMA_ROUTING = previous
   }
 })

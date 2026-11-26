@@ -77,7 +77,7 @@ onUnmounted(() => { version++; clearTimer() })
     <div class="analysis-content">
       <div v-if="completed" class="phase-score"><span>阶段综合参考分</span><strong>{{ phaseScore === null ? '暂无评分' : `${phaseScore}/100` }}</strong><small>{{ phaseFormula || '暂无可用于计算的分数' }}</small></div>
       <div v-if="completed" class="summary-status" aria-live="polite">
-        <span>{{ pending ? '总结生成中，已记录问答保留。' : loading ? '读取面试总结中…' : view?.status === 'failed' ? '总结分析暂未完成，已保留原文。' : report ? '已同步面试总结表' : '等待本场面试总结' }}</span>
+        <span>{{ pending ? '总结生成中，已记录问答保留。' : loading ? '读取面试总结中…' : view?.status === 'failed' ? '总结分析暂未完成，已保留原文。' : view?.stale ? '说话人已更新，待重新评分。' : report?.reviewRequired ? '候选人证据不足，暂无法评分。' : report ? '已同步面试总结表' : '等待本场面试总结' }}</span>
         <button type="button" :disabled="loading" @click="load(true)">刷新总结</button>
         <p v-if="error || view?.error" role="status">{{ error || formatAnalysisError(view?.error ?? undefined) }}</p>
         <p v-if="notice" role="status">{{ notice }}</p>

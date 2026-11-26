@@ -23,7 +23,7 @@ export class RecruitmentApprovalSettingsService {
       `SELECT o.id FROM organizations o
        JOIN organization_members om ON om.organization_id = o.id
        WHERE o.id = $1::uuid AND o.status = 'active'
-         AND om.user_id = $2::uuid AND om.role IN ('owner', 'admin')
+         AND om.user_id = $2::uuid AND om.is_active AND om.ended_at IS NULL AND om.role IN ('owner', 'admin')
        LIMIT 1`,
       [organizationId, actorId],
     )
@@ -67,7 +67,7 @@ export class RecruitmentApprovalSettingsService {
          SET recruitment_approval_mode = $1, updated_at = now()
          WHERE o.id = $2::uuid AND o.status = 'active'
            AND EXISTS (SELECT 1 FROM organization_members om
-                       WHERE om.organization_id = o.id AND om.user_id = $3::uuid AND om.role IN ('owner', 'admin'))
+                       WHERE om.organization_id = o.id AND om.user_id = $3::uuid AND om.is_active AND om.ended_at IS NULL AND om.role IN ('owner', 'admin'))
          RETURNING o.id, o.recruitment_approval_mode
        ), audited AS (
          INSERT INTO audit_logs

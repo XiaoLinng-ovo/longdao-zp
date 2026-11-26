@@ -30,7 +30,6 @@ const showPassword = ref(false)
 const error = ref('')
 const notice = ref('')
 const submitting = ref(false)
-const workspaceChoiceOpen = ref(false)
 const onboardingOpen = ref(true)
 const workspaces = ref<WorkspaceSummary[]>([])
 const loginStage = ref<'credentials' | 'mfa' | 'mfa-setup' | 'recovery-codes'>('credentials')
@@ -74,21 +73,8 @@ async function completeLogin(path: string) {
   await router.push(path)
 }
 
-async function chooseWorkspace(workspaceId: string) {
-  const workspace = workspaces.value.find((item) => item.id === workspaceId)
-  if (!workspace || submitting.value) return
-  submitting.value = true
-  error.value = ''
-  try {
-    await switchWorkspace(workspaceId)
-    workspaceChoiceOpen.value = false
-    await completeLogin(safeRedirect() ?? '/')
-  } catch (cause) {
-    error.value = describeApiFailure(cause, '进入企业失败，请重试').message
-  } finally { submitting.value = false }
-}
-
 async function finishLogin(availableWorkspaces: WorkspaceSummary[]) {
+  if (availableWorkspaces.length>1) throw new Error('账号存在多个企业绑定，请联系平台处理历史成员关系后重试')
   workspaces.value = availableWorkspaces.filter(workspace => isWorkspaceAvailable(workspace))
   if (workspaces.value.length === 1 && !authSession.user?.workspaceId) {
     const onlyWorkspace = workspaces.value[0]
@@ -108,8 +94,7 @@ await completeLogin(redirect ?? (authSession.user?.isSystemAdmin ? '/platform/cu
     return
   }
   if (workspaces.value.length > 1) {
-    workspaceChoiceOpen.value = true
-    return
+    throw new Error('账号存在多个企业绑定，请联系平台处理历史成员关系后重试')
   }
   await completeLogin(redirect ?? '/')
 }
@@ -355,14 +340,6 @@ onMounted(async () => {
           <label class="recovery-saved-check"><input v-model="recoverySaved" type="checkbox" /> 我已安全保存全部恢复码</label>
           <button class="btn btn-primary recovery-confirm" type="button" :disabled="!recoverySaved" @click="confirmRecoveryCodes">继续进入工作空间</button>
         </section>
-        <div v-if="workspaceChoiceOpen" class="workspace-choice" role="dialog" aria-label="选择工作空间">
-          <div class="workspace-choice-head"><strong>选择工作空间</strong><span>你可以在同一个账号下保留测试企业和正式企业。</span></div>
-          <button v-for="workspace in workspaces" :key="workspace.id" type="button" class="workspace-choice-item" :disabled="submitting" @click="chooseWorkspace(workspace.id)">
-            <span class="workspace-choice-icon">{{ workspace.kind === 'test' ? '测' : '正' }}</span>
-            <span><b>{{ workspace.name }}</b><small>{{ workspace.kind === 'test' ? '测试企业 · 可重置或归档' : '正式企业 · 数据独立保留' }}</small></span>
-            <span class="workspace-choice-arrow">›</span>
-          </button>
-        </div>
       </section>
     </div>
   </main>

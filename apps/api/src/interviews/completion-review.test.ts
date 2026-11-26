@@ -12,10 +12,10 @@ function turn(id = 'turn-1'): CorrectedTranscriptTurn {
 const mixed = { audioSource: 'meeting', offsetMs: 0, endMs: 10000, sourceMultipleSpeakers: true } as InterviewAudioManifestEntry
 
 describe('interview completion speaker review', () => {
-  for (const count of [0, 30, 31, 69]) it('enforces the canonical-turn limit at ' + count, () => {
+  for (const count of [0, 30, 31, 69]) it('allows automatic completion with unresolved turns: ' + count, () => {
     const turns = Array.from({ length: count }, (_, i) => turn('turn-' + i))
     const result = evaluateCompletionReview(turns, [mixed], 'version-1')
-    assert.equal(result.phase, count > 30 ? 'review_required' : 'ready')
+    assert.equal(result.phase, 'ready')
     assert.equal(result.unresolvedCount, count)
     assert.deepEqual(result.unresolvedIds, turns.map(row => row.id))
     assert.equal(result.versionId, 'version-1')

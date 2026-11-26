@@ -26,7 +26,7 @@ async function join() {
     if (!joinedId.value) joinedId.value = (await acceptInvitation(code.value)).workspaceId
     await switchWorkspace(joinedId.value)
     window.location.assign('/')
-  } catch (cause) { error.value = joinedId.value ? '已加入企业，但切换失败，请点击下方按钮重试进入。' : describeApiFailure(cause, '加入企业失败').message }
+  } catch (cause) { error.value = joinedId.value ? '已加入企业，但进入失败，请点击下方按钮重试进入。' : describeApiFailure(cause, '加入企业失败').message }
   finally { busy.value = false }
 }
 </script>

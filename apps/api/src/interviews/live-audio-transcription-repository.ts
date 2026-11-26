@@ -91,7 +91,7 @@ export class LiveAudioTranscriptionRepository {
   }
   async retry(job: AudioTranscriptionJob, error: unknown): Promise<void> {
     const delaySeconds = Math.min(300, 5 * 2 ** Math.min(job.attempts - 1, 6))
-    await this.pool.query(`UPDATE interview_audio_transcription_jobs SET status='pending',claim=NULL,error=$3,
+    await this.pool.query(`UPDATE interview_audio_transcription_jobs SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,claim=NULL,error=$3,
       available_at=now()+$4*interval '1 second',updated_at=now() WHERE object_key=$1 AND claim=$2::uuid`,
     [job.objectKey, job.claim, (error instanceof Error ? error.message : String(error)).slice(0, 600), delaySeconds])
   }

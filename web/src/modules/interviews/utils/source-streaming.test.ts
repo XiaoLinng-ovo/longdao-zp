@@ -218,3 +218,16 @@ it.each([
   expect(Math.abs(sampleCount - expected)).toBeLessThanOrEqual(1)
 })
 
+
+
+it('manual recovery preserves a healthy source and does not restart a connecting replacement', async () => {
+  const h = await workletHarness()
+  h.channel.reconnect()
+  expect(h.latestSocket()).toBe(h.socket)
+  h.socket.onmessage!({ data: JSON.stringify({ type: 'billing_error', code: 'STREAM_SOURCE_BUSY', retryable: true, message: 'old track busy' }) })
+  h.channel.reconnect()
+  const replacement = h.latestSocket()
+  expect(replacement).not.toBe(h.socket)
+  h.channel.reconnect()
+  expect(h.latestSocket()).toBe(replacement)
+})

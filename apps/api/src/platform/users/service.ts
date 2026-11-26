@@ -85,9 +85,9 @@ export class PlatformUsersService {
     const filter = `
       ($1::text IS NULL OR position(lower($1) in lower(concat_ws(' ',u.display_name,u.email,coalesce(u.phone,''),u.id))) > 0
         OR EXISTS (SELECT 1 FROM organization_members sm JOIN organizations so ON so.id=sm.organization_id
-                   WHERE sm.user_id=u.id AND position(lower($1) in lower(so.name)) > 0))
+                   WHERE sm.user_id=u.id AND sm.ended_at IS NULL AND position(lower($1) in lower(so.name)) > 0))
       AND ($2::boolean IS NULL OR u.is_active=$2::boolean)
-      AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM organization_members wm WHERE wm.user_id=u.id AND wm.organization_id=$3::uuid))
+      AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM organization_members wm WHERE wm.user_id=u.id AND wm.organization_id=$3::uuid AND wm.ended_at IS NULL))
       AND ($5::text IS NULL OR ($5='none' AND p.role IS NULL) OR p.role=$4::text)
 `
     const count = await this.pool.query<{ total: number }>(
@@ -99,7 +99,7 @@ export class PlatformUsersService {
     const rows = await this.pool.query<any>(
       `SELECT u.id,u.display_name,u.email,u.phone,u.is_active,u.created_at,u.last_login_at,u.registration_source,
               p.role AS platform_role,
-              (SELECT count(*)::integer FROM organization_members m WHERE m.user_id=u.id) AS workspace_count,
+              (SELECT count(*)::integer FROM organization_members m WHERE m.user_id=u.id AND m.ended_at IS NULL) AS workspace_count,
               pw.id AS workspace_id,pw.name AS workspace_name,pw.kind AS workspace_kind,pw.status AS workspace_status,
               pw.service_status AS workspace_service_status,pw.use_platform_ai AS workspace_use_platform_ai,pw.membership_role,pw.business_role
          FROM users u
@@ -107,7 +107,7 @@ export class PlatformUsersService {
          LEFT JOIN LATERAL (
            SELECT o.id,o.name,o.kind,o.status,o.service_status,COALESCE((to_jsonb(o)->>'use_platform_ai')::boolean,false) AS use_platform_ai,m.role AS membership_role,m.business_role
              FROM organization_members m JOIN organizations o ON o.id=m.organization_id
-            WHERE m.user_id=u.id ORDER BY m.joined_at,o.id LIMIT 1
+            WHERE m.user_id=u.id AND m.ended_at IS NULL ORDER BY m.joined_at,o.id LIMIT 1
          ) pw ON true
         WHERE ${filter}
         ORDER BY u.created_at DESC,u.id DESC
@@ -166,7 +166,7 @@ export class PlatformUsersService {
            FROM organization_members m JOIN organizations o ON o.id=m.organization_id
            LEFT JOIN departments d ON d.id=m.department_id
            LEFT JOIN organizations source ON source.id=(to_jsonb(o)->>'platform_ai_source_organization_id')::uuid
-          WHERE m.user_id=$1::uuid ORDER BY m.joined_at,o.id`,
+          WHERE m.user_id=$1::uuid AND m.ended_at IS NULL ORDER BY m.joined_at,o.id`,
         [userId],
       ),
       db.query<any>(
@@ -240,7 +240,7 @@ export class PlatformUsersService {
   private async audit(db: PoolClient, actorId: string, userId: string, action: string, requestId: string | undefined, metadata: Record<string, unknown>) {
     await db.query(
       `INSERT INTO platform_audit_logs (actor_user_id,organization_id,action,request_id,metadata)
-       SELECT $1::uuid,(SELECT min(organization_id) FROM organization_members WHERE user_id=$2::uuid),$3,$4,$5::jsonb`,
+       SELECT $1::uuid,(SELECT min(organization_id) FROM organization_members WHERE user_id=$2::uuid AND ended_at IS NULL),$3,$4,$5::jsonb`,
       [actorId, userId, action, requestId ?? null, JSON.stringify({ targetUserId: userId, ...metadata })],
     )
   }

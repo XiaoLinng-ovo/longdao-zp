@@ -16,6 +16,7 @@ import {
   type InterviewType,
   type InterviewView,
   type InterviewerOption,
+  type InterviewSheetType,
   type ScheduleCandidate,
   type ScheduleJob,
 } from '../api'
@@ -134,8 +135,28 @@ const arrangeForm = ref({
   scheduledAt: '',
   location: '',
   meetingUrl: '',
-  interviewerId: '',
+  interviewerIds: [] as string[], leadId: '', sheetOwners: {} as Partial<Record<InterviewSheetType, string>>,
 })
+
+const interviewerSearch = ref('')
+const filteredInterviewers = computed(() => interviewers.value.filter(person => normalizeSearchText(person.displayName + ' ' + (person.email ?? '')).includes(normalizeSearchText(interviewerSearch.value))))
+const selectedInterviewers = computed(() => interviewers.value.filter(person => arrangeForm.value.interviewerIds.includes(person.id)))
+const scheduleSheets = computed(() => scheduleStage.value === 'initial'
+  ? [{ type: 'hr_screen' as InterviewSheetType, label: '人事面试表' }, { type: 'hiring_department' as InterviewSheetType, label: '用人部门面试表' }]
+  : [{ type: 'business' as InterviewSheetType, label: '业务面试表' }, { type: 'hr' as InterviewSheetType, label: 'HR 面试表' }, { type: 'boss' as InterviewSheetType, label: 'BOSS 面试表' }])
+watch(() => [...arrangeForm.value.interviewerIds], ids => {
+  if (!ids.includes(arrangeForm.value.leadId)) arrangeForm.value.leadId = ids[0] ?? ''
+  for (const sheet of scheduleSheets.value) {
+    if (!ids.includes(arrangeForm.value.sheetOwners[sheet.type] ?? '')) arrangeForm.value.sheetOwners[sheet.type] = ids[0] ?? ''
+  }
+})
+function restoreResponsibilities(target?: InterviewView | null) {
+  interviewerSearch.value = ''
+  arrangeForm.value.interviewerIds = (target?.interviewerIds ?? []).filter(id => interviewers.value.some(person => person.id === id))
+  arrangeForm.value.leadId = target?.participants?.find(person => person.lead)?.userId ?? arrangeForm.value.interviewerIds[0] ?? ''
+  arrangeForm.value.sheetOwners = Object.fromEntries(scheduleSheets.value.map(sheet => [sheet.type,
+    target?.participants?.find(person => person.sheetTypes?.includes(sheet.type))?.userId ?? arrangeForm.value.leadId]))
+}
 
 const showConclude = ref(false)
 const concludeError = ref('')
@@ -197,7 +218,7 @@ async function openArrange(applicationId = '', interviewId = '', reschedule = fa
   reschedulingInterviewId.value = reschedule ? interviewId : ''
   invitationMode.value = 'online'
   candidateSearch.value = ''
-  arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerId: '' }
+  arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerIds: [] as string[], leadId: '', sheetOwners: {} as Partial<Record<InterviewSheetType, string>> }
   showArrange.value = true
   scheduleLoading.value = true
   try {
@@ -221,8 +242,7 @@ async function openArrange(applicationId = '', interviewId = '', reschedule = fa
       arrangeForm.value.title = target.title || (isFinalInterview(target) ? '复试' : '初试')
       arrangeForm.value.type = target.type ?? 'technical'
       candidateSearch.value = candidateLabel(candidate)
-      const interviewerId = target.interviewerIds[0]
-      arrangeForm.value.interviewerId = interviewers.value.some((item) => item.id === interviewerId) ? interviewerId : ''
+      restoreResponsibilities(target)
       invitationMode.value = target.location && !target.meetingUrl ? 'offline' : 'online'
     } else if (route.query.stage === 'initial' && applicationId && !interviewId) {
       const application = applications.value.find((item) => item.id === applicationId)
@@ -278,8 +298,7 @@ function syncCandidateFromSearch() {
 
 function syncFinalInterviewSelection() {
   const selected = selectedFinalInterview.value
-  const existingInterviewerId = selected?.interviewerIds[0]
-  arrangeForm.value.interviewerId = interviewers.value.some((item) => item.id === existingInterviewerId) ? existingInterviewerId! : ''
+  restoreResponsibilities(selected)
   const start = selected?.scheduledStartAt ? new Date(selected.scheduledStartAt) : null
   const pad = (part: number) => String(part).padStart(2, '0')
   arrangeForm.value.scheduledAt = start && Number.isFinite(start.getTime())
@@ -311,8 +330,13 @@ async function submitArrange() {
     if (invitationMode.value === 'offline' && !form.location.trim()) { error.value = '请填写线下复试地点'; return }
   }
   if (creatingInterview.value && !form.title.trim()) form.title = stageLabel
-  const interviewer = interviewers.value.find((item) => item.id === form.interviewerId)
-  if (scheduleStage.value === 'final' && !interviewer) { error.value = '请选择系统面试官'; return }
+  const selectedPeople = selectedInterviewers.value
+  if (!selectedPeople.length || selectedPeople.length !== form.interviewerIds.length) { error.value = '请至少选择一名有效面试官'; return }
+  if (!form.interviewerIds.includes(form.leadId)) { error.value = '请选择面试负责人'; return }
+  if (scheduleSheets.value.some(sheet => !form.interviewerIds.includes(form.sheetOwners[sheet.type] ?? ''))) { error.value = '请为每张面试表指定评分人'; return }
+  const assignedParticipants = selectedPeople.map(person => ({ userId: person.id, name: person.displayName,
+    role: 'interviewer' as const, required: true, lead: person.id === form.leadId,
+    sheetTypes: scheduleSheets.value.filter(sheet => form.sheetOwners[sheet.type] === person.id).map(sheet => sheet.type) }))
 
   acting.value = true
   clearFlags()
@@ -331,12 +355,7 @@ async function submitArrange() {
         scheduledStartAt,
         location: invitationMode.value === 'offline' ? form.location.trim() : undefined,
         meetingUrl: invitationMode.value === 'online' ? form.meetingUrl.trim() : undefined,
-        participants: interviewer ? [...supportParticipants, {
-          userId: interviewer.id,
-          name: interviewer.displayName,
-          role: 'interviewer',
-          required: true,
-        }] : supportParticipants,
+        participants: [...supportParticipants, ...assignedParticipants],
       })
     } else {
       const supportParticipants = (finalInterview!.participants ?? []).filter((person) => (person.role ?? 'interviewer') !== 'interviewer')
@@ -344,12 +363,7 @@ async function submitArrange() {
         scheduledStartAt,
         location: invitationMode.value === 'offline' ? form.location.trim() : null,
         meetingUrl: invitationMode.value === 'online' ? form.meetingUrl.trim() : null,
-        participants: [...supportParticipants, {
-        userId: interviewer!.id,
-        name: interviewer!.displayName,
-        role: 'interviewer',
-        required: true,
-        }],
+        participants: [...supportParticipants, ...assignedParticipants],
       })
     }
     showArrange.value = false
@@ -358,7 +372,7 @@ async function submitArrange() {
     reschedulingInterviewId.value = ''
     clearApplicationQuery()
     candidateSearch.value = ''
-    arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerId: '' }
+    arrangeForm.value = { candidateId: '', jobId: '', title: '', type: 'technical', scheduledAt: '', location: '', meetingUrl: '', interviewerIds: [] as string[], leadId: '', sheetOwners: {} as Partial<Record<InterviewSheetType, string>> }
     await refresh()
     feedback.value = isRescheduling ? `${stageLabel}已重新安排，原取消记录已保留` : wasInitialInvitation ? '初试邀约已创建' : '复试已安排'
   } catch (cause) {
@@ -561,13 +575,23 @@ watch(() => [route.query.applicationId, route.query.stage, route.query.interview
         <div v-if="invitationMode === 'offline'" class="form-field"><label>面试地点</label><input v-model="arrangeForm.location" placeholder="线下地点" /></div>
         <div v-if="invitationMode === 'online'" class="form-field"><label>会议链接</label><input v-model="arrangeForm.meetingUrl" placeholder="https://..." /></div>
         <div class="form-field">
-          <label>{{ scheduleStage === 'initial' ? '面试官（选填）' : '面试官' }}</label>
-          <select v-model="arrangeForm.interviewerId" aria-label="面试官" :disabled="scheduleLoading || (!creatingInterview && !selectedFinalInterview)">
-            <option value="">{{ scheduleStage === 'initial' ? '暂不指定，稍后安排' : '选择系统用户' }}</option>
-            <option v-for="interviewer in interviewers" :key="interviewer.id" :value="interviewer.id">{{ interviewer.displayName }}{{ interviewer.email ? `（${interviewer.email}）` : '' }}</option>
-          </select>
-          <small v-if="scheduleStage === 'initial'">创建初试时可暂不指定面试官，后续可再安排。</small>
-          <small v-else-if="!interviewers.length">暂无可用系统用户，请先在管理后台创建并启用用户。</small>
+          <label for="interviewer-search">面试官 · 已选 {{ arrangeForm.interviewerIds.length }} 人</label>
+          <input id="interviewer-search" v-model="interviewerSearch" type="search" placeholder="搜索姓名或邮箱" />
+          <div class="interviewer-options" :aria-busy="scheduleLoading">
+            <label v-for="person in filteredInterviewers" :key="person.id" class="interviewer-option">
+              <input v-model="arrangeForm.interviewerIds" type="checkbox" :value="person.id" :disabled="scheduleLoading" />
+              <span>{{ person.displayName }}<small>{{ person.email }}</small></span>
+            </label>
+            <p v-if="!filteredInterviewers.length" class="muted">暂无匹配的企业成员</p>
+          </div>
+        </div>
+        <div v-if="selectedInterviewers.length" class="form-field">
+          <label for="interview-lead">面试负责人</label>
+          <select id="interview-lead" v-model="arrangeForm.leadId"><option v-for="person in selectedInterviewers" :key="person.id" :value="person.id">{{ person.displayName }}</option></select>
+        </div>
+        <div v-for="sheet in selectedInterviewers.length ? scheduleSheets : []" :key="sheet.type" class="form-field">
+          <label :for="'sheet-owner-' + sheet.type">{{ sheet.label }}评分人</label>
+          <select :id="'sheet-owner-' + sheet.type" v-model="arrangeForm.sheetOwners[sheet.type]"><option v-for="person in selectedInterviewers" :key="person.id" :value="person.id">{{ person.displayName }}</option></select>
         </div>
       </fieldset>
       <div class="dialog-buttons">
@@ -602,6 +626,12 @@ watch(() => [route.query.applicationId, route.query.stage, route.query.interview
 </template>
 
 <style scoped>
+.interviewer-options { max-height: 180px; overflow-y: auto; border: 1px solid #dce5ed; border-radius: 6px; padding: 6px; }
+.interviewer-option { display: flex; align-items: center; gap: 10px; padding: 7px; cursor: pointer; }
+.interviewer-option input { width: 16px; height: 16px; flex: 0 0 auto; }
+.interviewer-option span { min-width: 0; overflow-wrap: anywhere; }
+.interviewer-option small { display: block; color: #6b7d8c; margin-top: 3px; }
+.interviewer-option:has(input:checked) { background: #edf6ff; }
 .schedule-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
 </style>
 

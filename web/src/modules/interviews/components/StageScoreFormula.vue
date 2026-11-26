@@ -14,6 +14,7 @@ import {
 import { fromPercent, toPercent, weightsTotalPercent } from '../utils/stage-score'
 
 const props = defineProps<{
+  readonly?: boolean
   stage: InterviewStage
   breakdown: StageScoreBreakdown
   draft: StageWeights
@@ -87,6 +88,7 @@ function currentDecisionLabel(): string {
           <td>
             <label class="weight-input">
               <input
+                :disabled="readonly"
                 type="number"
                 min="0"
                 max="100"
@@ -113,8 +115,8 @@ function currentDecisionLabel(): string {
         权重合计 {{ totalPercent }}%{{ totalOk ? '' : '（需为 100% 才能保存）' }}
       </span>
       <div class="inline-actions">
-        <button class="btn btn-ghost" type="button" :disabled="saving" @click="emit('reset')">恢复默认权重</button>
-        <button class="btn btn-primary" type="button" :disabled="saving || !totalOk || !dirty" @click="emit('save')">
+        <button class="btn btn-ghost" type="button" :disabled="readonly || saving" @click="emit('reset')">恢复默认权重</button>
+        <button class="btn btn-primary" type="button" :disabled="readonly || saving || !totalOk || !dirty" @click="emit('save')">
           {{ saving ? '保存中...' : '保存权重' }}
         </button>
       </div>
@@ -142,7 +144,7 @@ function currentDecisionLabel(): string {
           class="btn"
           :class="review?.decision === decision ? 'btn-primary' : 'btn-ghost'"
           type="button"
-          :disabled="deciding"
+          :disabled="readonly || deciding"
           @click="emit('decide', decision)"
         >
           {{ stage === 'initial' && decision === 'advanced' ? '确认初试结果并安排复试' : STAGE_DECISION_LABEL[decision] }}

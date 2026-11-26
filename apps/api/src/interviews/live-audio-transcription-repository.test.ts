@@ -34,7 +34,7 @@ test('an expired claim cannot write duplicate segments or acknowledge another wo
     query: async (sql: string) => { calls.push(sql); return { rowCount: 0, rows: [] } }, release: () => { released = true },
   }) } as never)
   assert.equal(await repository.complete(job, [segment]), false)
-  assert.deepEqual(calls.map(sql => sql.split(' ')[0]), ['BEGIN', 'SELECT', 'ROLLBACK'])
+  assert.deepEqual(calls.map(sql => sql.split(' ')[0]), ['BEGIN', 'SELECT', 'SELECT', 'ROLLBACK'])
   assert.equal(released, true)
 })
 
@@ -65,5 +65,6 @@ test('retries retain the audio job with bounded backoff and the original claim g
     assert.equal(row.values[0], job.objectKey); assert.equal(row.values[1], job.claim)
     assert.equal(String(row.values[2]).length, 600)
     assert.ok(row.sql.includes('WHERE object_key=$1 AND claim=$2::uuid'))
+    assert.ok(row.sql.includes("attempts>=3 THEN 'failed' ELSE 'pending'"))
   }
 })

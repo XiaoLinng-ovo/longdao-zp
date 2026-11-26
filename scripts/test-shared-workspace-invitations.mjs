@@ -39,8 +39,14 @@ try {
  assert.equal(legacy.rows.find(row=>row.id===accepted).accepted_by,legacyUser)
  console.log('PASS legacy single-recipient invitations revoked without changing historical acceptance')
  await pool.end();pool=undefined
+ const databaseUrl=new URL('postgresql://localhost')
+ databaseUrl.username=options.user
+ databaseUrl.password=options.password
+ databaseUrl.hostname=options.host
+ databaseUrl.port=String(options.port)
+ databaseUrl.pathname='/'+database
  const env={...process.env,NODE_ENV:'test',TENANT_SCHEMA_ROUTING:'on',INVITATION_TEST_DATABASE:database,PGDATABASE:database,
-  DATABASE_URL:'postgresql://'+encodeURIComponent(options.user)+':'+encodeURIComponent(options.password)+'@'+options.host+':'+options.port+'/'+database}
+  DATABASE_URL:databaseUrl.href}
  const code=await new Promise((resolve,reject)=>{
   const child=spawn(process.execPath,['--require',join(root,'scripts/isolated-network-guard.cjs'),'--test',join(root,'apps/api/dist/tests/workspace-invitations.postgres.integration.test.js')],{cwd:root,env,stdio:'inherit',windowsHide:true,timeout:180000})
   child.on('error',reject);child.on('close',resolve)

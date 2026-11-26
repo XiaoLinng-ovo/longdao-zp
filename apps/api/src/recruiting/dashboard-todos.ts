@@ -5,7 +5,10 @@ import { latestAnalysisByKey } from './latest-analysis.js'
 
 export interface DashboardTodo {
   id: string
-  category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding'
+  ownerUserIds?: string[]
+  unassigned?: boolean
+  dueAt?: string
+  category: 'requisition' | 'job' | 'resume' | 'interview' | 'offer' | 'onboarding' | 'membership'
   actionKey?: 'confirm-job-spec' | 'confirm-job-jd' | 'publish-job'
   title: string
   description: string
@@ -14,7 +17,7 @@ export interface DashboardTodo {
   updatedAt: string
 }
 
-export function buildDashboardTodos(state: RecruitingStoreState, reviews: DashboardInterviewReview[] = []): DashboardTodo[] {
+export function buildDashboardTodos(state: RecruitingStoreState, reviews: DashboardInterviewReview[] = [], viewer?: { userId: string; scope?: 'mine' | 'enterprise' | 'unassigned' }, ownership?: { activeUserIds: string[]; fallbackUserId?: string | undefined }): DashboardTodo[] {
   const todos: DashboardTodo[] = []
   const applications = new Map(state.applications.map(row => [row.id, row]))
   const candidates = new Map(state.candidates.map(row => [row.id, row]))
@@ -26,8 +29,23 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
     return `${candidates.get(app?.candidateId ?? '')?.fullName ?? '未知候选人'} · ${jobs.get(app?.jobId ?? '')?.title ?? '未知岗位'}`
   }
   const candidatePath = (id: string) => `/candidates/${applications.get(id)?.candidateId ?? ''}?applicationId=${encodeURIComponent(id)}`
-  const add = (id: string, category: DashboardTodo['category'], title: string, description: string, actionLabel: string, path: string, updatedAt: string, actionKey?: DashboardTodo['actionKey']) => {
-    todos.push({ id, category, ...(actionKey ? { actionKey } : {}), title, description, actionLabel, path, updatedAt })
+  const creator = (subjectId: string) => state.workflowEvents.find(event => event.subjectId === subjectId && ['create', 'upload'].includes(event.action))?.actorId
+  const businessOwner = (id: string): string[] => {
+    const app = state.applications.find(row => id.endsWith(row.id))
+      ?? state.applications.find(row => state.offers.some(offer => id.endsWith(offer.id) && offer.applicationId === row.id) || state.onboarding.some(item => id.endsWith(item.id) && item.applicationId === row.id))
+      ?? state.applications.find(row => state.analysisTasks.some(task => id.endsWith(task.id) && task.applicationId === row.id))
+    const request = state.recruitmentRequests.find(row => id.endsWith(row.id))
+    const job = state.jobs.find(row => id.endsWith(row.id))
+    const resourceId = request?.id ?? job?.id ?? app?.id ?? id.replace(/^[^-]+-/, '')
+    const owner = request?.requesterId ?? app?.recruiterId ?? job?.hiringManagerId ?? creator(resourceId)
+    return owner ? [owner] : []
+  }
+  const add = (id: string, category: DashboardTodo['category'], title: string, description: string, actionLabel: string, path: string, updatedAt: string, actionKey?: DashboardTodo['actionKey'], owners?: string[], dueAt?: string) => {
+    const originalOwners = owners ?? businessOwner(id)
+    const ownerUserIds = [...new Set(originalOwners.flatMap(owner => !ownership || ownership.activeUserIds.includes(owner) ? [owner] : ownership.fallbackUserId ? [ownership.fallbackUserId] : []))]
+    if (viewer?.scope === 'unassigned' ? ownerUserIds.length > 0 : viewer && viewer.scope !== 'enterprise' && !ownerUserIds.includes(viewer.userId)) return
+    todos.push({ id, category, ...(actionKey ? { actionKey } : {}), title, description, actionLabel, path, updatedAt,
+      ownerUserIds, unassigned: !ownerUserIds.length, ...(dueAt ? { dueAt } : {}) })
   }
 
   const requestActions: Record<string, string> = { draft: '提交需求审批', pending_approval: '审批招聘需求', approved: '需求转为岗位' }
@@ -81,12 +99,33 @@ export function buildDashboardTodos(state: RecruitingStoreState, reviews: Dashbo
     const previous = latestInterviews.get(key)
     if (!previous || row.round > previous.round || (row.round === previous.round && row.createdAt > previous.createdAt)) latestInterviews.set(key, row)
     if (row.status === 'scheduled' && row.scheduledStartAt) {
-      add(`complete-${row.id}`, 'interview', '面试待完成', `${context(row.applicationId)} · 第 ${row.round} 轮`, '去完成', `/interviews/${row.id}`, row.updatedAt)
+      add(`complete-${row.id}`, 'interview', viewer && viewer.scope !== 'enterprise' && !row.participants.some(person => person.userId === viewer.userId && person.lead) ? '待参加面试' : '面试待完成', `${context(row.applicationId)} · 第 ${row.round} 轮`, '查看安排', `/interviews/${row.id}`, row.updatedAt, undefined, row.participants.filter(person => person.role === 'interviewer').map(person => person.userId), row.scheduledStartAt)
     }
   }
   for (const row of latestInterviews.values()) {
     const review = reviewsByInterview.get(row.id)
-    if (!review || (!completedLiveStages.has(`${row.applicationId}:${review.stage}`) && !review.sheets.length)) continue
+    if (!review || (row.status !== 'completed' && !completedLiveStages.has(`${row.applicationId}:${review.stage}`) && !review.sheets.length)) continue
+    if (viewer) {
+      const leadIds = row.participants.filter(person => person.role === 'interviewer' && person.lead).map(person => person.userId)
+      for (const type of STAGE_SHEET_TYPES[review.stage]) {
+        const sheet = review.sheets.find(item => item.sheetType === type)
+        if (sheet?.status === 'locked') continue
+        const locking = sheet?.status === 'submitted'
+        const owners = locking ? leadIds : row.participants.filter(person => person.role === 'interviewer' && person.sheetTypes?.includes(type)).map(person => person.userId)
+        const action = !sheet?.totalQuestions ? '待载入' : locking ? '待锁定' : sheet.scoredQuestions < sheet.totalQuestions ? '待评分' : '待提交'
+        add(`sheet-${row.id}-${type}-${locking ? 'lock' : 'score'}`, 'interview', SHEET_TYPE_LABEL[type] + action,
+          context(row.applicationId), locking ? '去确认' : '去评分', `/interviews/${row.id}?openQuestionSheet=1&sheetType=${type}`, row.updatedAt, undefined, owners)
+      }
+      const sheetsDone = STAGE_SHEET_TYPES[review.stage].every(type => review.sheets.some(sheet => sheet.sheetType === type && sheet.status === 'locked'))
+      if (sheetsDone && (!review.decision || review.decision === 'hold')) {
+        add(`decision-${row.id}`, 'interview', '面试综合评估待确认', context(row.applicationId), '去确认', `/interviews/${row.id}?openQuestionSheet=1`, row.updatedAt, undefined, leadIds)
+      }
+      if (sheetsDone && review.stage === 'initial' && review.decision === 'advanced' && applications.get(row.applicationId)?.status === 'interviewing' && !latestInterviews.has(`${row.applicationId}:final`)) {
+        const recruiter = applications.get(row.applicationId)?.recruiterId
+        add(`final-${row.applicationId}`, 'interview', '待安排复试', context(row.applicationId), '去安排', `/interviews?applicationId=${row.applicationId}&stage=final`, row.updatedAt, undefined, recruiter ? [recruiter] : leadIds)
+      }
+      continue
+    }
     const pendingSheets = STAGE_SHEET_TYPES[review.stage].flatMap(type => {
       const sheet = review.sheets.find(item => item.sheetType === type)
       const label = SHEET_TYPE_LABEL[type]

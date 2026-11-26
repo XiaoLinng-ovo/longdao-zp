@@ -23,7 +23,7 @@ describe('JoinWorkspaceCard',()=>{
   vi.mocked(switchWorkspace).mockResolvedValue(undefined)
   button('确认加入企业').click();await flush()
   expect(acceptInvitation).toHaveBeenCalledWith('ABCDEF123456ABCDEF123456')
-  expect(switchWorkspace).toHaveBeenCalledWith('w');expect(root.textContent).toContain('当前已切换')
+  expect(switchWorkspace).toHaveBeenCalledWith('w');expect(root.textContent).toContain('已绑定该企业')
  })
  it('invalidates preview if input changes and rejects malformed codes locally',async()=>{
   vi.mocked(previewInvitation).mockResolvedValue(invitation)

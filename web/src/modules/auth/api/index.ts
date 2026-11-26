@@ -17,6 +17,7 @@ export interface WorkspaceSummary {
   serviceStatus?: ServiceStatus
   trialEndsAt?: string | null
   serviceAvailable?: boolean
+  membershipActive?: boolean
   archivedAt?: string
 }
 
@@ -53,7 +54,7 @@ export interface AuthenticatedAuthResponse {
 export type AuthLoginResponse = AuthenticatedAuthResponse
 
 export interface AuthenticatedRegisterResponse extends AuthenticatedAuthResponse {
-  workspace: WorkspaceSummary
+  workspace?: WorkspaceSummary
 }
 
 export interface MfaRequiredResponse {
@@ -90,7 +91,7 @@ export interface RegisterInput {
   name: string
   email: string
   password: string
-  companyName: string
+  companyName?: string
   invitationCode?: string
   phone?: string
   verificationCode: string

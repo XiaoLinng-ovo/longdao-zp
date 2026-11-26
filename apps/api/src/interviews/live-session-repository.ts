@@ -182,7 +182,7 @@ export class LiveInterviewSessionRepository {
       await client.query('BEGIN')
       const session = (await client.query('SELECT * FROM interview_live_sessions WHERE id=$1::uuid FOR UPDATE', [sessionId])).rows[0]
       if (!session) throw sessionNotFound()
-      if (session.status !== 'paused' || !session.ended_at) throw Object.assign(new Error('仅停录后待复核的会话可以修正整理版本。'), { code: 'LIVE_SESSION_NOT_REVIEWABLE', status: 409 })
+      if (!['paused', 'completed'].includes(String(session.status)) || !session.ended_at) throw Object.assign(new Error('仅结束录音后的会话可以校正说话人。'), { code: 'LIVE_SESSION_NOT_REVIEWABLE', status: 409 })
       if (session.corrected_transcript_version_id !== versionId) throw conflict()
       const review = await loadCompletionReview(client, session)
       if (!review || review.phase === 'processing') throw conflict()
@@ -204,7 +204,7 @@ export class LiveInterviewSessionRepository {
       const next = (await client.query('SELECT id FROM interview_transcript_versions WHERE session_id=$1::uuid AND content_fingerprint=$2', [sessionId, fingerprint])).rows[0]
       if (!next) throw conflict()
       await client.query(`UPDATE interview_live_sessions SET corrected_transcript_version_id=$2::uuid,manual_transcript_roles=$3::jsonb,
-        summary_revision=summary_revision+1,summary_status='pending',summary_claim=NULL,summary_report=NULL,summary_error=NULL,updated_at=now() WHERE id=$1::uuid`,
+        summary_revision=summary_revision+1,summary_status='none',summary_claim=NULL,summary_stale=true,summary_error=NULL,updated_at=now() WHERE id=$1::uuid`,
         [sessionId, next.id, JSON.stringify(manual)])
       await client.query("UPDATE interview_transcript_postprocess_jobs SET warnings=$2::jsonb,updated_at=now() WHERE session_id=$1::uuid AND status='completed'", [sessionId, JSON.stringify(warnings)])
       await client.query('COMMIT')

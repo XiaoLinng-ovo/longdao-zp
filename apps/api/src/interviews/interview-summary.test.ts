@@ -24,15 +24,15 @@ const config = { baseUrl: 'https://model.invalid/v1', apiKey: 'secret', model: '
 const reply = (body: unknown) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(body) } }] }), { headers: { 'content-type': 'application/json' } })
 
 describe('actual interview dialogue', () => {
-  it('blocks high-confidence mixed speech when source-role review is pending', () => {
-    assert.equal(assessTranscriptQuality(base().transcript, true).usable, false)
+  it('does not block reliable candidate evidence because other turns need role review', () => {
+    assert.equal(assessTranscriptQuality(base().transcript, true).usable, true)
     assert.equal(assessTranscriptQuality(base().transcript, false).usable, true)
   })
 
-  it('blocks many short unknown segments even when a long candidate answer dominates by characters', () => {
+  it('excludes short unknown segments without blocking reliable answers', () => {
     const rows = [segment('answer', 'candidate', '我完成了项目开发和上线验收，并负责后续维护。'.repeat(10), 0),
       ...Array.from({ length: 3 }, (_, i) => segment(`unknown-${i}`, 'unknown', '嗯。', 2000 + i * 2000))]
-    assert.equal(assessTranscriptQuality(buildActualDialogue(rows).transcript).usable, false)
+    assert.equal(assessTranscriptQuality(buildActualDialogue(rows).transcript).usable, true)
   })
 
   it('counts original segments rather than merged turns when checking unknown share', () => {
@@ -50,7 +50,7 @@ describe('actual interview dialogue', () => {
       segment('mixed', 'unknown', '我负责开发和测试并且完成了上线交付工作。这里还有很多无法确认的内容，包括项目目标、技术方案、上线结果和后续维护情况。', 4000),
     ]).transcript)
     assert.equal(result.usable, false)
-    assert.match(result.warning!, /暂不评分/)
+    assert.match(result.warning!, /暂无法评分/)
   })
 
   it('allows a short uncertain fragment when reliable candidate evidence is larger', () => {
@@ -243,6 +243,16 @@ describe('summary request resilience and compact classifications', () => {
   const compact = () => ({ ...output(), ...legacyClassification(), turns: undefined, pairs: undefined,
     recommendation: null,
     dimensions: output().dimensions.map(row => ({ ...row, evidence: row.evidence.map(item => ({ turnId: 't2', quote: item.quote })) })),
+  })
+  it('bounds the whole generation across successful classification and later scoring requests', async () => {
+    let clock = 0, requests = 0
+    const generator = createInterviewSummaryGenerator(config, async () => {
+      requests++
+      clock += 12 * 60 * 1000
+      return reply(classification())
+    }, async () => {}, () => clock)
+    await assert.rejects(generator.generate(base(), job), /整场面试评分已达到处理时限/u)
+    assert.equal(requests, 1)
   })
   it('classifies first, then evaluates only after restoring every turn kind', async () => {
     const requests: any[] = []
@@ -523,7 +533,7 @@ describe('summary background processing', () => {
   it('saves an explicitly review-required report without model calls or previous scores', async () => {
     let calls = 0
     const previous = { ...base(), overallScore: 86 }
-    const f = fixture(segments(), async () => { calls++; throw new Error('must not call model') }, false, previous, ['混合音轨角色未确认。'], true)
+    const f = fixture(segments().map(row => ({ ...row, role: 'unknown' as const })), async () => { calls++; throw new Error('must not call model') }, false, previous, ['混合音轨角色未确认。'], true)
     await f.service.processPending()
     assert.equal(calls, 0)
     assert.equal(f.resolved, 0)
@@ -532,8 +542,8 @@ describe('summary background processing', () => {
     assert.equal(f.saved[0]!.report.reviewRequired, true)
     assert.deepEqual(f.saved[0]!.report.dimensions, [])
     assert.equal(f.saved[0]!.report.recommendation, null)
-    assert.match(f.saved[0]!.report.summary, /暂不评分/u)
-    assert.deepEqual(f.saved[0]!.report.transcript, base().transcript)
+    assert.match(f.saved[0]!.report.summary, /暂无法评分/u)
+    assert.ok(f.saved[0]!.report.transcript.every(row => row.role === 'unknown'))
   })
 
   it('carries corrected transcript warnings into the model input and saved report', async () => {
@@ -592,7 +602,7 @@ describe('summary background processing', () => {
     assert.equal(f.saved[0]!.report.overallScore, 86)
   })
   it('evaluates candidate-only substantive speech instead of requiring a paired question', async () => {
-    const rows = [segment('intro', 'candidate', '我独立完成项目开发。', 0)]
+    const rows = [segment('intro', 'candidate', '我独立完成项目开发，包括需求分析、接口设计以及上线后的性能优化。', 0)]
     const f = fixture(rows, async (_url, init) => {
       const request = JSON.parse(String(init?.body))
       if (String(request.messages[0].content).includes('"turnKinds"')) return reply({ turnKinds: 'a' })

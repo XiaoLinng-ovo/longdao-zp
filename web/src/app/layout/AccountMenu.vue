@@ -6,6 +6,7 @@ import { authSession, logoutCurrentUser, switchAccount } from '../../modules/aut
 import { listSavedAccounts, type SavedAccount } from '../../modules/auth/api'
 import { describeApiFailure } from '../../shared/utils/errorMessage'
 import WorkspaceSwitcher from './WorkspaceSwitcher.vue'
+import NotificationBell from './NotificationBell.vue'
 
 const accountMenuOpen = ref(false)
 const accountSwitcherOpen = ref(false)
@@ -100,6 +101,7 @@ onBeforeUnmount(() => {
     <span class="account-trigger-copy"><strong class="auth-name">{{ authSession.user.name }}</strong><small>用户信息</small></span>
     <span class="account-trigger-chevron" aria-hidden="true">{{ accountMenuOpen ? '⌄' : '⌃' }}</span>
   </button>
+  <NotificationBell />
   <section v-if="accountMenuOpen" class="account-card" role="dialog" aria-label="账号信息">
     <div class="account-card-head">
       <span class="account-avatar-large" aria-hidden="true">{{ accountInitial }}</span>

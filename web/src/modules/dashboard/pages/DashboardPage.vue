@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { authSession } from '../../auth/session'
 import { CalendarDays, Search, RotateCcw, RotateCw } from '@lucide/vue'
 import type { DashboardPeriod } from '../api'
 import { externalJobPublishingEnabled, recruitmentRequestsEnabled } from '../../../shared/config/features'
@@ -22,6 +23,10 @@ const funnel = ref<DashboardPayload['funnel']>([])
 const pendingInterviews = ref<DashboardPayload['pendingInterviews']>([])
 const failedTasks = ref<DashboardPayload['failedTasks']>([])
 const todos = ref<DashboardPayload['todos']>([])
+const todoScope = ref<'mine' | 'enterprise' | 'unassigned'>('mine')
+const canViewEnterpriseTodos = computed(() => ['owner', 'admin'].includes(authSession.workspaces.find(workspace => workspace.id === authSession.user?.workspaceId)?.role ?? ''))
+watch(todoScope, () => { todos.value = []; void refresh(false, true) })
+watch(() => [authSession.user?.id, authSession.user?.workspaceId].join(':'), () => { todos.value = []; pending.value = []; pendingInterviews.value = []; failedTasks.value = []; metrics.value = []; funnel.value = []; activity.value = undefined; todoScope.value = 'mine'; void refresh(false, true) })
 const todoDialog = ref<HTMLDialogElement>()
 const todoSearch = ref('')
 const todoCategory = ref('')
@@ -61,7 +66,7 @@ async function selectPeriod(value: string) {
 let refreshing = false
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 let disposed = false
-const categoryLabels = { requisition: '招聘需求', job: '岗位', resume: '简历', interview: '面试', offer: '录用', onboarding: '入职' }
+const categoryLabels = { requisition: '招聘需求', job: '岗位', resume: '简历', interview: '面试', offer: '录用', onboarding: '入职', membership: '企业成员' }
 const visibleTodos = computed(() => availableDashboardTodos(todos.value, { externalJobPublishingEnabled, recruitmentRequestsEnabled }))
 const todoCounts = computed(() => visibleTodos.value.reduce<Record<string, number>>((counts, row) => {
   counts[row.category] = (counts[row.category] ?? 0) + 1
@@ -116,7 +121,7 @@ async function refresh(background = false, force = false) {
   if (!background) { loading.value = true; error.value = '' }
   syncError.value = ''
   try {
-    const data = await loadDashboard(appliedPeriod.value)
+    const data = await loadDashboard(appliedPeriod.value, todoScope.value)
     if (disposed || token !== requestVersion) return
     activity.value = data.activity
     error.value = ''
@@ -240,7 +245,7 @@ onUnmounted(() => {
     <div class="dashboard-overview-grid">
       <section class="dashboard-card todo-card">
         <div class="card-heading">
-          <div><h3>待办事项 <em>{{ todoTotal }}</em></h3></div>
+          <div><h3>{{ todoScope === 'mine' ? '我的待办' : todoScope === 'enterprise' ? '企业待办' : '待分配事项' }} <em>{{ todoTotal }}</em></h3><div v-if="canViewEnterpriseTodos" class="todo-scope" role="group" aria-label="待办范围"><button v-for="option in ([{ value: 'mine', label: '我的' }, { value: 'enterprise', label: '企业' }, { value: 'unassigned', label: '待分配' }] as const)" :key="option.value" type="button" :aria-pressed="todoScope === option.value" @click="todoScope = option.value">{{ option.label }}</button></div></div>
           <button class="heading-link" type="button" @click="openTodos">全部查看 →</button>
         </div>
         <div class="todo-list">
@@ -283,7 +288,7 @@ onUnmounted(() => {
   </template>
   <dialog ref="todoDialog" class="todos-dialog" aria-labelledby="todos-title" @click="event => { if (event.target === todoDialog) todoDialog?.close() }">
     <header class="todos-heading">
-      <div><h2 id="todos-title">全部待办 <span>{{ todoTotal }}</span></h2><p>当前所有未处理事项</p></div>
+      <div><h2 id="todos-title">全部待办 <span>{{ todoTotal }}</span></h2><p>{{ todoScope === 'mine' ? '分配给我的未处理事项' : todoScope === 'enterprise' ? '企业未处理事项' : '尚未指定负责人的事项' }}</p></div>
       <button class="todos-close" type="button" aria-label="关闭待办列表" title="关闭" @click="todoDialog?.close()">×</button>
     </header>
     <div class="todos-filters">
@@ -301,6 +306,9 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.todo-scope { display: flex; gap: 4px; margin-top: 8px; }
+.todo-scope button { border: 0; border-radius: 4px; padding: 5px 9px; background: #f0f4f6; color: #526977; font-size: 11px; cursor: pointer; }
+.todo-scope button[aria-pressed="true"] { background: #ddf2ea; color: #247863; }
 .dashboard-period{display:flex;align-items:flex-end;flex-wrap:wrap;gap:12px;margin:0 0 18px;padding:14px 0;border-top:1px solid #e0ebf3;border-bottom:1px solid #e0ebf3;color:#526f85}
 .period-title{display:flex;align-items:center;gap:7px;align-self:center;font-size:13px;font-weight:650}.period-title svg{color:#399b9a}
 .period-shortcuts{display:flex;gap:2px;align-self:center;padding:3px;background:#eaf2f8;border-radius:7px}.period-shortcuts button{border:0;border-radius:5px;padding:8px 10px;background:transparent;color:#637d91;font-size:12px;cursor:pointer;white-space:nowrap}.period-shortcuts button[aria-pressed=true]{background:#fff;color:#287e8e;box-shadow:0 2px 5px #315c7a14}

@@ -5,7 +5,7 @@ import WorkspaceContextBoundary from '../../../shared/components/WorkspaceContex
 import { getWorkspaceContext, setWorkspaceContext, WORKSPACE_CONTEXT_EVENT } from '../../../shared/api/workspace-context'
 import { authSession } from '../../auth/session'
 import EnterpriseAiSettingsPage from '../pages/EnterpriseAiSettingsPage.vue'
-import { getEnterpriseAiSettings, saveEnterpriseAiSettings, testEnterpriseAiConnection, selectEnterpriseAiSource } from './index'
+import { getEnterpriseAiSettings, saveEnterpriseAiSettings, testEnterpriseAiConnection, selectEnterpriseAiSource, listAiPromptSkills, createAiPromptSkill, updateAiPromptSkill, deleteAiPromptSkill } from './index'
 
 const settings = {
   configured: false, apiKeyConfigured: false, model: '',
@@ -24,6 +24,7 @@ describe('enterprise AI requests use the real enterprise-bound API client', () =
     fetcher = vi.fn(async (url: string, options?: RequestInit) => {
       if (url === '/api/v1/auth/csrf') return success({ token: 'synthetic-csrf-token' })
       if (new Headers(options?.headers).get('x-workspace-id') !== 'company-a') return changed()
+      if (url === '/api/v1/admin/ai-skills' || url.startsWith('/api/v1/jobs')) return success([])
       return success(url.endsWith('connection-test') ? { ok: true, models: [], message: 'ok', latencyMs: 1 } : settings)
     })
     vi.stubGlobal('fetch', fetcher)
@@ -51,6 +52,10 @@ describe('enterprise AI requests use the real enterprise-bound API client', () =
   })
 
   it.each([
+    ['GET', '/api/v1/admin/ai-skills', () => listAiPromptSkills()],
+    ['POST', '/api/v1/admin/ai-skills', () => createAiPromptSkill({ name: '企业规则', targetType: 'both', content: '规则' })],
+    ['PATCH', '/api/v1/admin/ai-skills/skill-a', () => updateAiPromptSkill('skill-a', { isActive: false })],
+    ['DELETE', '/api/v1/admin/ai-skills/skill-a', () => deleteAiPromptSkill('skill-a')],
     ['GET', '/api/v1/admin/enterprise-ai-settings', () => getEnterpriseAiSettings()],
     ['PATCH', '/api/v1/admin/enterprise-ai-settings', () => saveEnterpriseAiSettings({ OPENAI_MODEL: 'model-test' })],
     ['POST', '/api/v1/admin/enterprise-ai-connection-test', () => testEnterpriseAiConnection({})],

@@ -552,6 +552,31 @@
       "version": "0110",
       "name": "0110_platform_ai_settings.sql",
       "sha256": "76d706bcf6c1c6eacb7d2203789a2f09069d0dfe9094b0820ade40845dd0fba6"
+    },
+    {
+      "version": "0111",
+      "name": "0111_personal_todos_notifications.sql",
+      "sha256": "9f644d537a31df8368dafd43f59493907c4f646a96443619dbf559064456dacc"
+    },
+    {
+      "version": "0112",
+      "name": "0112_automatic_interview_roles.sql",
+      "sha256": "cff59bedc61d3175395a68094b545d2551ecaff74b556345e2766a3f49e03451"
+    },
+    {
+      "version": "0113",
+      "name": "0113_single_enterprise_membership.sql",
+      "sha256": "504c4fe6a083a78d87669f5181495f672cae1940dde2c7774a496fb6b889cfc3"
+    },
+    {
+      "version": "0114",
+      "name": "0114_enforce_single_enterprise.sql",
+      "sha256": "261cefa1aa925bd8d9d2bd22fdbe8a59dbd78e6834120f29b4809139abd0bbce"
+    },
+    {
+      "version": "0115",
+      "name": "0115_summary_versions_company_ownership.sql",
+      "sha256": "1ce7510324929e070aa98fd10a0b35536ab14c9a54ac603e7853a1de04bab2ff"
     }
   ],
   "public": [
@@ -779,7 +804,7 @@
       "detail": {
         "kind": "f",
         "binary": null,
-        "source": "\r\nDECLARE\r\n  business_tables constant text[] := ARRAY[\r\n    'ai_resume_scoring_skill_jobs', 'analysis_results', 'analysis_tasks', 'applications',\r\n    'approval_instances', 'approval_records', 'approval_steps', 'audit_logs', 'candidates',\r\n    'channel_resume_events', 'channel_sync_runs', 'department_approval_policies',\r\n    'enterprise_ai_settings', 'external_entity_mappings', 'external_event_receipts',\r\n    'idempotency_records', 'interview_audio_recordings', 'interview_audio_transcription_jobs',\r\n    'interview_feedback', 'interview_live_analyses', 'interview_live_question_events',\r\n    'interview_live_segments', 'interview_live_sessions', 'interview_question_preparations',\r\n    'interview_question_sheets', 'interview_questions', 'interview_resume_question_sets',\r\n    'interview_stage_reviews', 'interview_transcript_postprocess_jobs', 'interview_transcript_versions',\r\n    'interviews', 'job_channel_publications', 'job_description_versions', 'job_spec_versions', 'jobs',\r\n    'offer_templates', 'offer_versions', 'offers', 'onboarding_integrations', 'onboarding_materials',\r\n    'onboarding_records', 'onboarding_reminders', 'onboarding_tasks', 'outbox_events',\r\n    'recruitment_requests', 'resume_import_batches', 'resume_import_items', 'resumes',\r\n    'workflow_events'\r\n  ];\r\n  target_table text;\r\n  schema_name text;\r\n  current_status text;\r\n  organization_status text;\r\n  expected_count bigint;\r\n  copied_count bigint;\r\n  constraint_row record;\r\n  trigger_row record;\r\n  source_expression text;\r\n  previous_search_path text := current_setting('search_path');\r\nBEGIN\r\n  SELECT status INTO organization_status\r\n    FROM public.organizations\r\n   WHERE id = p_organization_id;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'ORGANIZATION_NOT_FOUND';\r\n  END IF;\r\n\r\n  schema_name := public.organization_schema_name(p_organization_id);\r\n  PERFORM pg_advisory_xact_lock(hashtext('organization-schema:' || p_organization_id::text));\r\n\r\n  SELECT status INTO current_status\r\n    FROM public.organization_schemas\r\n   WHERE organization_id = p_organization_id\r\n   FOR UPDATE;\r\n\r\n  IF current_status = 'ready' AND organization_status <> 'archived'\r\n     AND to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RETURN schema_name;\r\n  END IF;\r\n\r\n  IF current_status = 'disabled' AND organization_status = 'archived'\r\n     AND to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RETURN schema_name;\r\n  END IF;\r\n\r\n  INSERT INTO public.organization_schemas (organization_id, schema_name, status)\r\n  VALUES (p_organization_id, schema_name, 'initializing')\r\n  ON CONFLICT (organization_id) DO UPDATE\r\n    SET schema_name = EXCLUDED.schema_name,\r\n        status = 'initializing',\r\n        error_message = NULL,\r\n        updated_at = now();\r\n\r\n  -- 重试失败或结构不完整的初始化时，只允许删除确定性企业 Schema。\r\n  IF NOT schema_name ~ '^company_[0-9a-f]{32}$' THEN\r\n    RAISE EXCEPTION 'INVALID_ORGANIZATION_SCHEMA_NAME';\r\n  END IF;\r\n  IF to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RAISE EXCEPTION 'ORGANIZATION_SCHEMA_ALREADY_EXISTS: %', schema_name;\r\n  END IF;\r\n  EXECUTE format('CREATE SCHEMA %I', schema_name);\r\n\r\n  FOREACH target_table IN ARRAY business_tables LOOP\r\n    EXECUTE format(\r\n      'CREATE TABLE %I.%I (LIKE public.%I INCLUDING ALL)',\r\n      schema_name, target_table, target_table\r\n    );\r\n\r\n    CASE target_table\r\n      WHEN 'external_entity_mappings', 'external_event_receipts' THEN\r\n        -- 这两张表没有可靠的企业外键，历史公共数据无法判定归属，新企业从空表开始。\r\n        source_expression := 'SELECT * FROM public.' || quote_ident(target_table) || ' WHERE false';\r\n      WHEN 'ai_resume_scoring_skill_jobs' THEN\r\n        source_expression := 'SELECT s.* FROM public.ai_resume_scoring_skill_jobs s '\r\n          || 'JOIN public.jobs j ON j.id = s.job_id WHERE j.organization_id = $1';\r\n      WHEN 'department_approval_policies' THEN\r\n        source_expression := 'SELECT p.* FROM public.department_approval_policies p '\r\n          || 'JOIN public.departments d ON d.id = p.department_id WHERE d.organization_id = $1';\r\n      WHEN 'interview_audio_recordings' THEN\r\n        source_expression := 'SELECT a.* FROM public.interview_audio_recordings a '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = a.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_audio_transcription_jobs' THEN\r\n        source_expression := 'SELECT a.* FROM public.interview_audio_transcription_jobs a '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = a.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_question_preparations' THEN\r\n        source_expression := 'SELECT p.* FROM public.interview_question_preparations p '\r\n          || 'JOIN public.interviews i ON i.id = p.interview_id WHERE i.organization_id = $1';\r\n      WHEN 'interview_transcript_versions' THEN\r\n        source_expression := 'SELECT v.* FROM public.interview_transcript_versions v '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = v.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_transcript_postprocess_jobs' THEN\r\n        source_expression := 'SELECT j.* FROM public.interview_transcript_postprocess_jobs j '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = j.session_id WHERE s.organization_id = $1';\r\n      ELSE\r\n        IF EXISTS (\r\n          SELECT 1 FROM pg_attribute\r\n           WHERE attrelid = format('public.%I', target_table)::regclass\r\n             AND attname = 'organization_id'\r\n             AND NOT attisdropped\r\n        ) THEN\r\n          source_expression := 'SELECT * FROM public.' || quote_ident(target_table) || ' WHERE organization_id = $1';\r\n        ELSE\r\n          RAISE EXCEPTION 'BUSINESS_TABLE_OWNERSHIP_UNKNOWN: %', target_table;\r\n        END IF;\r\n    END CASE;\r\n\r\n    EXECUTE format(\r\n      'INSERT INTO %I.%I OVERRIDING SYSTEM VALUE %s',\r\n      schema_name, target_table, source_expression\r\n    ) USING p_organization_id;\r\n    GET DIAGNOSTICS copied_count = ROW_COUNT;\r\n    EXECUTE format('SELECT count(*) FROM %I.%I', schema_name, target_table)\r\n      INTO expected_count;\r\n    IF copied_count <> expected_count THEN\r\n      RAISE EXCEPTION 'ORGANIZATION_SCHEMA_COPY_COUNT_MISMATCH: % (% <> %)',\r\n        target_table, copied_count, expected_count;\r\n    END IF;\r\n\r\n    IF EXISTS (\r\n      SELECT 1 FROM pg_attribute\r\n       WHERE attrelid = format('public.%I', target_table)::regclass\r\n         AND attname = 'organization_id'\r\n         AND NOT attisdropped\r\n    ) THEN\r\n      EXECUTE format(\r\n        'SELECT count(*) FROM %I.%I WHERE organization_id IS DISTINCT FROM $1',\r\n        schema_name, target_table\r\n      ) INTO expected_count USING p_organization_id;\r\n      IF expected_count <> 0 THEN\r\n        RAISE EXCEPTION 'ORGANIZATION_SCHEMA_TENANT_MISMATCH: %', target_table;\r\n      END IF;\r\n      EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN organization_id SET DEFAULT %L::uuid',\r\n        schema_name,target_table,p_organization_id);\r\n      EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT tenant_ownership_check CHECK (organization_id=%L::uuid)',\r\n        schema_name,target_table,p_organization_id);\r\n    END IF;\r\n  END LOOP;\r\n\r\n  -- 外键定义来自控制面，但业务目标必须解析到企业 Schema，公共控制目标解析到 public。\r\n  PERFORM set_config('search_path', format('%I,public', schema_name), true);\r\n  FOR constraint_row IN\r\n    SELECT source_table.relname AS source_table,\r\n           target_table.relname AS target_table,\r\n           con.conname,\r\n           CASE WHEN target_namespace.nspname = 'public'\r\n                  AND target_table.relname = ANY (business_tables)\r\n                THEN replace(\r\n                  pg_get_constraintdef(con.oid),\r\n                  format('REFERENCES public.%I', target_table.relname),\r\n                  format('REFERENCES %I', target_table.relname)\r\n                )\r\n                ELSE pg_get_constraintdef(con.oid)\r\n           END AS definition\r\n      FROM pg_constraint con\r\n      JOIN pg_class source_table ON source_table.oid = con.conrelid\r\n      JOIN pg_namespace source_namespace ON source_namespace.oid = source_table.relnamespace\r\n      JOIN pg_class target_table ON target_table.oid = con.confrelid\r\n      JOIN pg_namespace target_namespace ON target_namespace.oid = target_table.relnamespace\r\n     WHERE con.contype = 'f'\r\n       AND source_namespace.nspname = 'public'\r\n       AND source_table.relname = ANY (business_tables)\r\n     ORDER BY source_table.relname, con.conname\r\n  LOOP\r\n    EXECUTE format(\r\n      'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',\r\n      schema_name, constraint_row.source_table, constraint_row.conname, constraint_row.definition\r\n    );\r\n  END LOOP;\r\n\r\n  -- LIKE INCLUDING ALL 不复制用户触发器；公共函数仍通过 public 搜索路径解析。\r\n  FOR trigger_row IN\r\n    SELECT table_class.relname AS table_name,\r\n           replace(\r\n             pg_get_triggerdef(trigger.oid, true),\r\n             ' ON public.' || quote_ident(table_class.relname),\r\n             ' ON ' || quote_ident(table_class.relname)\r\n           ) AS definition\r\n      FROM pg_trigger trigger\r\n      JOIN pg_class table_class ON table_class.oid = trigger.tgrelid\r\n      JOIN pg_namespace table_namespace ON table_namespace.oid = table_class.relnamespace\r\n     WHERE NOT trigger.tgisinternal\r\n       AND table_namespace.nspname = 'public'\r\n       AND table_class.relname = ANY (business_tables)\r\n     ORDER BY table_class.relname, trigger.tgname\r\n  LOOP\r\n    EXECUTE trigger_row.definition;\r\n  END LOOP;\r\n\r\n  PERFORM set_config('search_path', previous_search_path, true);\r\n\r\n  UPDATE public.organization_schemas\r\n     SET status = CASE WHEN organization_status = 'archived' THEN 'disabled' ELSE 'ready' END,\r\n         error_message = NULL,\r\n         initialized_at = now(),\r\n         updated_at = now()\r\n   WHERE organization_id = p_organization_id;\r\n\r\n  RETURN schema_name;\r\nEXCEPTION WHEN OTHERS THEN\r\n  -- 调用方可把失败状态记录到独立事务；表、注册和 DDL 本身必须整体回滚。\r\n  RAISE;\r\nEND;\r\n",
+        "source": "\r\nDECLARE\r\n  business_tables constant text[] := ARRAY[\r\n    'ai_resume_scoring_skill_jobs', 'analysis_results', 'analysis_tasks', 'applications',\r\n    'approval_instances', 'approval_records', 'approval_steps', 'audit_logs', 'candidates',\r\n    'channel_resume_events', 'channel_sync_runs', 'department_approval_policies',\r\n    'enterprise_ai_settings', 'external_entity_mappings', 'external_event_receipts',\r\n    'idempotency_records', 'interview_audio_recordings', 'interview_audio_transcription_jobs',\r\n    'interview_feedback', 'interview_live_analyses', 'interview_live_question_events',\r\n    'interview_live_segments', 'interview_live_sessions', 'interview_question_preparations',\r\n    'interview_question_sheets', 'interview_questions', 'interview_resume_question_sets',\r\n    'interview_summary_versions', 'interview_stage_reviews', 'interview_transcript_postprocess_jobs', 'interview_transcript_versions',\r\n    'interviews', 'job_channel_publications', 'job_description_versions', 'job_spec_versions', 'jobs',\r\n    'offer_templates', 'offer_versions', 'offers', 'onboarding_integrations', 'onboarding_materials',\r\n    'onboarding_records', 'onboarding_reminders', 'onboarding_tasks', 'outbox_events',\r\n    'recruitment_requests', 'resume_import_batches', 'resume_import_items', 'resumes',\r\n    'workflow_events'\r\n  ];\r\n  target_table text;\r\n  schema_name text;\r\n  current_status text;\r\n  organization_status text;\r\n  expected_count bigint;\r\n  copied_count bigint;\r\n  constraint_row record;\r\n  trigger_row record;\r\n  source_expression text;\r\n  previous_search_path text := current_setting('search_path');\r\nBEGIN\r\n  SELECT status INTO organization_status\r\n    FROM public.organizations\r\n   WHERE id = p_organization_id;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'ORGANIZATION_NOT_FOUND';\r\n  END IF;\r\n\r\n  schema_name := public.organization_schema_name(p_organization_id);\r\n  PERFORM pg_advisory_xact_lock(hashtext('organization-schema:' || p_organization_id::text));\r\n\r\n  SELECT status INTO current_status\r\n    FROM public.organization_schemas\r\n   WHERE organization_id = p_organization_id\r\n   FOR UPDATE;\r\n\r\n  IF current_status = 'ready' AND organization_status <> 'archived'\r\n     AND to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RETURN schema_name;\r\n  END IF;\r\n\r\n  IF current_status = 'disabled' AND organization_status = 'archived'\r\n     AND to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RETURN schema_name;\r\n  END IF;\r\n\r\n  INSERT INTO public.organization_schemas (organization_id, schema_name, status)\r\n  VALUES (p_organization_id, schema_name, 'initializing')\r\n  ON CONFLICT (organization_id) DO UPDATE\r\n    SET schema_name = EXCLUDED.schema_name,\r\n        status = 'initializing',\r\n        error_message = NULL,\r\n        updated_at = now();\r\n\r\n  -- 重试失败或结构不完整的初始化时，只允许删除确定性企业 Schema。\r\n  IF NOT schema_name ~ '^company_[0-9a-f]{32}$' THEN\r\n    RAISE EXCEPTION 'INVALID_ORGANIZATION_SCHEMA_NAME';\r\n  END IF;\r\n  IF to_regnamespace(schema_name) IS NOT NULL THEN\r\n    RAISE EXCEPTION 'ORGANIZATION_SCHEMA_ALREADY_EXISTS: %', schema_name;\r\n  END IF;\r\n  EXECUTE format('CREATE SCHEMA %I', schema_name);\r\n\r\n  FOREACH target_table IN ARRAY business_tables LOOP\r\n    EXECUTE format(\r\n      'CREATE TABLE %I.%I (LIKE public.%I INCLUDING ALL)',\r\n      schema_name, target_table, target_table\r\n    );\r\n\r\n    CASE target_table\r\n      WHEN 'external_entity_mappings', 'external_event_receipts' THEN\r\n        -- 这两张表没有可靠的企业外键，历史公共数据无法判定归属，新企业从空表开始。\r\n        source_expression := 'SELECT * FROM public.' || quote_ident(target_table) || ' WHERE false';\r\n      WHEN 'ai_resume_scoring_skill_jobs' THEN\r\n        source_expression := 'SELECT s.* FROM public.ai_resume_scoring_skill_jobs s '\r\n          || 'JOIN public.jobs j ON j.id = s.job_id WHERE j.organization_id = $1';\r\n      WHEN 'department_approval_policies' THEN\r\n        source_expression := 'SELECT p.* FROM public.department_approval_policies p '\r\n          || 'JOIN public.departments d ON d.id = p.department_id WHERE d.organization_id = $1';\r\n      WHEN 'interview_audio_recordings' THEN\r\n        source_expression := 'SELECT a.* FROM public.interview_audio_recordings a '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = a.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_audio_transcription_jobs' THEN\r\n        source_expression := 'SELECT a.* FROM public.interview_audio_transcription_jobs a '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = a.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_question_preparations' THEN\r\n        source_expression := 'SELECT p.* FROM public.interview_question_preparations p '\r\n          || 'JOIN public.interviews i ON i.id = p.interview_id WHERE i.organization_id = $1';\r\n      WHEN 'interview_transcript_versions' THEN\r\n        source_expression := 'SELECT v.* FROM public.interview_transcript_versions v '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = v.session_id WHERE s.organization_id = $1';\r\n      WHEN 'interview_transcript_postprocess_jobs' THEN\r\n        source_expression := 'SELECT j.* FROM public.interview_transcript_postprocess_jobs j '\r\n          || 'JOIN public.interview_live_sessions s ON s.id = j.session_id WHERE s.organization_id = $1';\r\n      ELSE\r\n        IF EXISTS (\r\n          SELECT 1 FROM pg_attribute\r\n           WHERE attrelid = format('public.%I', target_table)::regclass\r\n             AND attname = 'organization_id'\r\n             AND NOT attisdropped\r\n        ) THEN\r\n          source_expression := 'SELECT * FROM public.' || quote_ident(target_table) || ' WHERE organization_id = $1';\r\n        ELSE\r\n          RAISE EXCEPTION 'BUSINESS_TABLE_OWNERSHIP_UNKNOWN: %', target_table;\r\n        END IF;\r\n    END CASE;\r\n\r\n    EXECUTE format(\r\n      'INSERT INTO %I.%I OVERRIDING SYSTEM VALUE %s',\r\n      schema_name, target_table, source_expression\r\n    ) USING p_organization_id;\r\n    GET DIAGNOSTICS copied_count = ROW_COUNT;\r\n    EXECUTE format('SELECT count(*) FROM %I.%I', schema_name, target_table)\r\n      INTO expected_count;\r\n    IF copied_count <> expected_count THEN\r\n      RAISE EXCEPTION 'ORGANIZATION_SCHEMA_COPY_COUNT_MISMATCH: % (% <> %)',\r\n        target_table, copied_count, expected_count;\r\n    END IF;\r\n\r\n    IF EXISTS (\r\n      SELECT 1 FROM pg_attribute\r\n       WHERE attrelid = format('public.%I', target_table)::regclass\r\n         AND attname = 'organization_id'\r\n         AND NOT attisdropped\r\n    ) THEN\r\n      EXECUTE format(\r\n        'SELECT count(*) FROM %I.%I WHERE organization_id IS DISTINCT FROM $1',\r\n        schema_name, target_table\r\n      ) INTO expected_count USING p_organization_id;\r\n      IF expected_count <> 0 THEN\r\n        RAISE EXCEPTION 'ORGANIZATION_SCHEMA_TENANT_MISMATCH: %', target_table;\r\n      END IF;\r\n      EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN organization_id SET DEFAULT %L::uuid',\r\n        schema_name,target_table,p_organization_id);\r\n      EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT tenant_ownership_check CHECK (organization_id=%L::uuid)',\r\n        schema_name,target_table,p_organization_id);\r\n    END IF;\r\n  END LOOP;\r\n\r\n  -- 外键定义来自控制面，但业务目标必须解析到企业 Schema，公共控制目标解析到 public。\r\n  PERFORM set_config('search_path', format('%I,public', schema_name), true);\r\n  FOR constraint_row IN\r\n    SELECT source_table.relname AS source_table,\r\n           target_table.relname AS target_table,\r\n           con.conname,\r\n           CASE WHEN target_namespace.nspname = 'public'\r\n                  AND target_table.relname = ANY (business_tables)\r\n                THEN replace(\r\n                  pg_get_constraintdef(con.oid),\r\n                  format('REFERENCES public.%I', target_table.relname),\r\n                  format('REFERENCES %I', target_table.relname)\r\n                )\r\n                ELSE pg_get_constraintdef(con.oid)\r\n           END AS definition\r\n      FROM pg_constraint con\r\n      JOIN pg_class source_table ON source_table.oid = con.conrelid\r\n      JOIN pg_namespace source_namespace ON source_namespace.oid = source_table.relnamespace\r\n      JOIN pg_class target_table ON target_table.oid = con.confrelid\r\n      JOIN pg_namespace target_namespace ON target_namespace.oid = target_table.relnamespace\r\n     WHERE con.contype = 'f'\r\n       AND source_namespace.nspname = 'public'\r\n       AND source_table.relname = ANY (business_tables)\r\n     ORDER BY source_table.relname, con.conname\r\n  LOOP\r\n    EXECUTE format(\r\n      'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',\r\n      schema_name, constraint_row.source_table, constraint_row.conname, constraint_row.definition\r\n    );\r\n  END LOOP;\r\n\r\n  -- LIKE INCLUDING ALL 不复制用户触发器；公共函数仍通过 public 搜索路径解析。\r\n  FOR trigger_row IN\r\n    SELECT table_class.relname AS table_name,\r\n           replace(\r\n             pg_get_triggerdef(trigger.oid, true),\r\n             ' ON public.' || quote_ident(table_class.relname),\r\n             ' ON ' || quote_ident(table_class.relname)\r\n           ) AS definition\r\n      FROM pg_trigger trigger\r\n      JOIN pg_class table_class ON table_class.oid = trigger.tgrelid\r\n      JOIN pg_namespace table_namespace ON table_namespace.oid = table_class.relnamespace\r\n     WHERE NOT trigger.tgisinternal\r\n       AND table_namespace.nspname = 'public'\r\n       AND table_class.relname = ANY (business_tables)\r\n     ORDER BY table_class.relname, trigger.tgname\r\n  LOOP\r\n    EXECUTE trigger_row.definition;\r\n  END LOOP;\r\n\r\n  PERFORM set_config('search_path', previous_search_path, true);\r\n\r\n  UPDATE public.organization_schemas\r\n     SET status = CASE WHEN organization_status = 'archived' THEN 'disabled' ELSE 'ready' END,\r\n         error_message = NULL,\r\n         initialized_at = now(),\r\n         updated_at = now()\r\n   WHERE organization_id = p_organization_id;\r\n\r\n  RETURN schema_name;\r\nEXCEPTION WHEN OTHERS THEN\r\n  -- 调用方可把失败状态记录到独立事务；表、注册和 DDL 本身必须整体回滚。\r\n  RAISE;\r\nEND;\r\n",
         "strict": false,
         "returns": "text",
         "defaults": null,
@@ -829,6 +854,24 @@
     },
     {
       "kind": "function",
+      "name": "invalidate_membership_sessions()",
+      "detail": {
+        "kind": "f",
+        "binary": null,
+        "source": "\nBEGIN\n IF ROW(OLD.is_active,OLD.role,OLD.department_id,OLD.ended_at) IS DISTINCT FROM ROW(NEW.is_active,NEW.role,NEW.department_id,NEW.ended_at) THEN\n  UPDATE public.sessions SET revoked_at=now() WHERE user_id=NEW.user_id AND revoked_at IS NULL;\n END IF;\n RETURN NEW;\nEND ",
+        "strict": false,
+        "returns": "trigger",
+        "defaults": null,
+        "language": "plpgsql",
+        "parallel": "u",
+        "leakproof": false,
+        "volatility": "v",
+        "configuration": null,
+        "security_definer": false
+      }
+    },
+    {
+      "kind": "function",
       "name": "invalidate_stopped_interview_audio()",
       "detail": {
         "kind": "f",
@@ -851,7 +894,25 @@
       "detail": {
         "kind": "f",
         "binary": null,
-        "source": "\r\nDECLARE source_id uuid; target_id uuid; seats integer; jobs_count integer;\r\n seat_cap integer; job_cap integer;\r\nBEGIN\r\n IF TG_OP <> 'INSERT' THEN source_id=OLD.organization_id; END IF;\r\n IF TG_OP <> 'DELETE' THEN target_id=NEW.organization_id; END IF;\r\n IF source_id IS NOT DISTINCT FROM target_id THEN RETURN NULL; END IF;\r\n -- Deterministic lock order also handles transfers between organizations.\r\n PERFORM id FROM organizations WHERE id IN (source_id,target_id) ORDER BY id FOR NO KEY UPDATE;\r\n IF source_id IS NOT NULL THEN\r\n  IF TG_TABLE_NAME='organization_members' THEN UPDATE organizations SET seat_usage=seat_usage-1 WHERE id=source_id;\r\n  ELSE UPDATE organizations SET job_usage=job_usage-1 WHERE id=source_id; END IF;\r\n END IF;\r\n IF target_id IS NOT NULL THEN\r\n  SELECT o.seat_usage,o.job_usage,p.seat_limit,p.job_limit INTO seats,jobs_count,seat_cap,job_cap\r\n   FROM organizations o JOIN subscription_plan_versions p ON p.id=o.plan_version_id WHERE o.id=target_id;\r\n  IF TG_TABLE_NAME='organization_members' THEN\r\n   IF seat_cap IS NOT NULL AND seats>=seat_cap THEN\r\n    RAISE EXCEPTION 'SEAT_LIMIT_EXCEEDED' USING ERRCODE='P5501';\r\n   END IF;\r\n   UPDATE organizations SET seat_usage=seat_usage+1 WHERE id=target_id;\r\n  ELSE\r\n   IF job_cap IS NOT NULL AND jobs_count>=job_cap THEN\r\n    RAISE EXCEPTION 'JOB_LIMIT_EXCEEDED' USING ERRCODE='P5502';\r\n   END IF;\r\n   UPDATE organizations SET job_usage=job_usage+1 WHERE id=target_id;\r\n  END IF;\r\n END IF;\r\n RETURN NULL;\r\nEND; ",
+        "source": "\nDECLARE source_id uuid; target_id uuid; seats integer; jobs_count integer; seat_cap integer; job_cap integer;\nBEGIN\n IF TG_OP<>'INSERT' THEN source_id=OLD.organization_id; END IF;\n IF TG_OP<>'DELETE' THEN target_id=NEW.organization_id; END IF;\n IF TG_TABLE_NAME='organization_members' THEN\n  IF TG_OP<>'INSERT' AND OLD.ended_at IS NOT NULL THEN source_id=NULL; END IF;\n  IF TG_OP<>'DELETE' AND NEW.ended_at IS NOT NULL THEN target_id=NULL; END IF;\n END IF;\n IF source_id IS NOT DISTINCT FROM target_id THEN RETURN NULL; END IF;\n PERFORM id FROM public.organizations WHERE id IN(source_id,target_id) ORDER BY id FOR NO KEY UPDATE;\n IF source_id IS NOT NULL THEN\n  IF TG_TABLE_NAME='organization_members' THEN UPDATE public.organizations SET seat_usage=seat_usage-1 WHERE id=source_id;\n  ELSE UPDATE public.organizations SET job_usage=job_usage-1 WHERE id=source_id; END IF;\n END IF;\n IF target_id IS NOT NULL THEN\n  SELECT o.seat_usage,o.job_usage,p.seat_limit,p.job_limit INTO seats,jobs_count,seat_cap,job_cap FROM public.organizations o JOIN public.subscription_plan_versions p ON p.id=o.plan_version_id WHERE o.id=target_id;\n  IF TG_TABLE_NAME='organization_members' THEN\n   IF seat_cap IS NOT NULL AND seats>=seat_cap THEN RAISE EXCEPTION 'SEAT_LIMIT_EXCEEDED' USING ERRCODE='P5501'; END IF;\n   UPDATE public.organizations SET seat_usage=seat_usage+1 WHERE id=target_id;\n  ELSE\n   IF job_cap IS NOT NULL AND jobs_count>=job_cap THEN RAISE EXCEPTION 'JOB_LIMIT_EXCEEDED' USING ERRCODE='P5502'; END IF;\n   UPDATE public.organizations SET job_usage=job_usage+1 WHERE id=target_id;\n  END IF;\n END IF;\n RETURN NULL;\nEND ",
+        "strict": false,
+        "returns": "trigger",
+        "defaults": null,
+        "language": "plpgsql",
+        "parallel": "u",
+        "leakproof": false,
+        "volatility": "v",
+        "configuration": null,
+        "security_definer": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "notify_interview_assignment()",
+      "detail": {
+        "kind": "f",
+        "binary": null,
+        "source": "\nDECLARE\n  old_people jsonb := '[]'::jsonb;\n  new_people jsonb := '[]'::jsonb;\n  recipient uuid;\n  previous boolean;\n  current_person boolean;\n  key text;\n  event text;\nBEGIN\n  IF TG_OP = 'UPDATE' THEN\n    IF ROW(OLD.participants, OLD.scheduled_start_at, OLD.location, OLD.meeting_url, OLD.status)\n      IS NOT DISTINCT FROM ROW(NEW.participants, NEW.scheduled_start_at, NEW.location, NEW.meeting_url, NEW.status) THEN RETURN NEW; END IF;\n    old_people := COALESCE(OLD.participants, '[]'::jsonb);\n  END IF;\n  new_people := COALESCE(NEW.participants, '[]'::jsonb);\n  key := 'complete-' || NEW.id::text;\n  FOR recipient IN\n    SELECT DISTINCT (person->>'userId')::uuid FROM (\n      SELECT value AS person FROM jsonb_array_elements(old_people)\n      UNION ALL SELECT value FROM jsonb_array_elements(new_people)\n    ) p WHERE COALESCE(person->>'role','interviewer')='interviewer'\n      AND person->>'userId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n  LOOP\n    SELECT EXISTS(SELECT 1 FROM jsonb_array_elements(old_people) p WHERE p->>'userId'=recipient::text AND COALESCE(p->>'role','interviewer')='interviewer') INTO previous;\n    SELECT EXISTS(SELECT 1 FROM jsonb_array_elements(new_people) p WHERE p->>'userId'=recipient::text AND COALESCE(p->>'role','interviewer')='interviewer') INTO current_person;\n    UPDATE public.recruitment_notifications SET state=CASE WHEN NEW.status='cancelled' OR NOT current_person THEN 'cancelled' ELSE 'resolved' END\n      WHERE organization_id=NEW.organization_id AND user_id=recipient AND task_key=key AND state='active';\n    IF NEW.status='completed' THEN CONTINUE; END IF;\n    IF NOT EXISTS(SELECT 1 FROM public.organization_members m JOIN public.users u ON u.id=m.user_id\n      WHERE m.organization_id=NEW.organization_id AND m.user_id=recipient AND m.is_active AND u.is_active) THEN CONTINUE; END IF;\n    event := 'interview:' || NEW.id::text || ':' || txid_current()::text || ':' || NEW.updated_at::text;\n    INSERT INTO public.recruitment_notifications(organization_id,user_id,task_key,event_key,kind,title,description,path,state)\n      VALUES(NEW.organization_id,recipient,key,event,\n        CASE WHEN NOT current_person OR NEW.status='cancelled' THEN 'removed' WHEN previous THEN 'schedule' ELSE 'assignment' END,\n        CASE WHEN NOT current_person THEN '面试安排已移除' WHEN NEW.status='cancelled' THEN '面试已取消' WHEN previous THEN '面试安排已更新' ELSE '收到面试安排' END,\n        NEW.title || COALESCE(' · ' || NEW.scheduled_start_at::text,''),\n        CASE WHEN current_person AND NEW.status<>'cancelled' THEN '/interviews/' || NEW.id::text ELSE NULL END,\n        CASE WHEN NOT current_person OR NEW.status='cancelled' THEN 'cancelled' ELSE 'active' END)\n      ON CONFLICT (organization_id,user_id,event_key) DO NOTHING;\n  END LOOP;\n  RETURN NEW;\nEND;\n",
         "strict": false,
         "returns": "trigger",
         "defaults": null,
@@ -931,6 +992,24 @@
         "parallel": "u",
         "leakproof": false,
         "volatility": "s",
+        "configuration": null,
+        "security_definer": false
+      }
+    },
+    {
+      "kind": "function",
+      "name": "preserve_interview_summary_version()",
+      "detail": {
+        "kind": "f",
+        "binary": null,
+        "source": "\nBEGIN\n  IF OLD.summary_report IS NOT NULL AND NOT OLD.summary_stale AND (NEW.summary_report IS DISTINCT FROM OLD.summary_report OR NEW.summary_revision<>OLD.summary_revision) THEN\n    INSERT INTO interview_summary_versions(session_id,organization_id,revision,transcript_version_id,report)\n      VALUES(OLD.id,OLD.organization_id,OLD.summary_revision,OLD.corrected_transcript_version_id,OLD.summary_report)\n      ON CONFLICT DO NOTHING;\n  END IF;\n  IF OLD.summary_report IS NOT NULL AND NEW.summary_report IS NULL THEN NEW.summary_report:=OLD.summary_report; END IF;\n  IF NEW.summary_revision<>OLD.summary_revision THEN NEW.summary_stale:=true; END IF;\n  RETURN NEW;\nEND;\n",
+        "strict": false,
+        "returns": "trigger",
+        "defaults": null,
+        "language": "plpgsql",
+        "parallel": "u",
+        "leakproof": false,
+        "volatility": "v",
         "configuration": null,
         "security_definer": false
       }
@@ -8432,7 +8511,7 @@
             "deferred": false,
             "validated": true,
             "deferrable": false,
-            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text])))",
+            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text, 'failed'::text])))",
             "no_inherit": false
           },
           {
@@ -9535,6 +9614,15 @@
             "generated": ""
           },
           {
+            "name": "summary_stale",
+            "type": "boolean",
+            "default": "false",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
             "name": "summary_status",
             "type": "text",
             "default": "'none'::text",
@@ -9621,6 +9709,11 @@
             "name": "interview_transcript_postprocess_on_completion",
             "enabled": "O",
             "definition": "CREATE TRIGGER interview_transcript_postprocess_on_completion AFTER UPDATE OF status, ended_at ON public.interview_live_sessions FOR EACH ROW EXECUTE FUNCTION queue_interview_transcript_postprocess_on_completion()"
+          },
+          {
+            "name": "preserve_interview_summary_version",
+            "enabled": "O",
+            "definition": "CREATE TRIGGER preserve_interview_summary_version BEFORE UPDATE ON public.interview_live_sessions FOR EACH ROW EXECUTE FUNCTION preserve_interview_summary_version()"
           }
         ],
         "constraints": [
@@ -11285,6 +11378,133 @@
     },
     {
       "kind": "relation",
+      "name": "interview_summary_versions",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "id",
+            "type": "uuid",
+            "default": "gen_random_uuid()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "report",
+            "type": "jsonb",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "revision",
+            "type": "integer",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "session_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "transcript_version_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (session_id, revision)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (session_id) REFERENCES interview_live_sessions(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (id)",
+            "no_inherit": true
+          },
+          {
+            "type": "u",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "UNIQUE (session_id, revision)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
       "name": "interview_transcript_postprocess_jobs",
       "detail": {
         "kind": "r",
@@ -11456,7 +11676,7 @@
             "deferred": false,
             "validated": true,
             "deferrable": false,
-            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text])))",
+            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text, 'failed'::text])))",
             "no_inherit": false
           },
           {
@@ -11907,6 +12127,11 @@
             "name": "company_legacy_snapshot_no_truncate",
             "enabled": "O",
             "definition": "CREATE TRIGGER company_legacy_snapshot_no_truncate BEFORE TRUNCATE ON public.interviews FOR EACH STATEMENT EXECUTE FUNCTION guard_company_legacy_snapshot()"
+          },
+          {
+            "name": "interview_assignment_notification",
+            "enabled": "O",
+            "definition": "CREATE TRIGGER interview_assignment_notification AFTER INSERT OR UPDATE ON public.interviews FOR EACH ROW EXECUTE FUNCTION notify_interview_assignment()"
           }
         ],
         "constraints": [
@@ -16134,6 +16359,175 @@
     },
     {
       "kind": "relation",
+      "name": "organization_exit_requests",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "id",
+            "type": "uuid",
+            "default": "gen_random_uuid()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "reason",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "resolution",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "resolved_at",
+            "type": "timestamp with time zone",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "resolved_by",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "default": "'pending'::text",
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (organization_id, user_id) WHERE (status = 'pending'::text)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK (((length(reason) >= 2) AND (length(reason) <= 500)))",
+            "no_inherit": false
+          },
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'completed'::text, 'rejected'::text])))",
+            "no_inherit": false
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (resolved_by) REFERENCES users(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (user_id) REFERENCES users(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (id)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
       "name": "organization_invitation_joins",
       "detail": {
         "kind": "r",
@@ -16506,6 +16900,15 @@
             "generated": ""
           },
           {
+            "name": "ended_at",
+            "type": "timestamp with time zone",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          },
+          {
             "name": "is_active",
             "type": "boolean",
             "default": "true",
@@ -16577,6 +16980,16 @@
             "ready": true,
             "valid": true,
             "unique": true,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (user_id) WHERE (ended_at IS NULL)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
             "primary": true,
             "exclusion": false,
             "definition": " USING btree (organization_id, user_id)",
@@ -16586,12 +16999,25 @@
         "policies": [],
         "triggers": [
           {
+            "name": "membership_sessions",
+            "enabled": "O",
+            "definition": "CREATE TRIGGER membership_sessions AFTER UPDATE ON public.organization_members FOR EACH ROW EXECUTE FUNCTION invalidate_membership_sessions()"
+          },
+          {
             "name": "organization_member_capacity",
             "enabled": "O",
-            "definition": "CREATE TRIGGER organization_member_capacity AFTER INSERT OR DELETE OR UPDATE OF organization_id ON public.organization_members FOR EACH ROW EXECUTE FUNCTION maintain_organization_capacity()"
+            "definition": "CREATE TRIGGER organization_member_capacity AFTER INSERT OR DELETE OR UPDATE OF organization_id, ended_at ON public.organization_members FOR EACH ROW EXECUTE FUNCTION maintain_organization_capacity()"
           }
         ],
         "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK (((ended_at IS NULL) OR ((NOT is_active) AND (role <> 'owner'::text))))",
+            "no_inherit": false
+          },
           {
             "type": "c",
             "deferred": false,
@@ -16638,6 +17064,140 @@
             "validated": true,
             "deferrable": false,
             "definition": "PRIMARY KEY (organization_id, user_id)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
+      "name": "organization_membership_history",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "actor_user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "ended_at",
+            "type": "timestamp with time zone",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "id",
+            "type": "uuid",
+            "default": "gen_random_uuid()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "joined_at",
+            "type": "timestamp with time zone",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "reason",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "role",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (actor_user_id) REFERENCES users(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (user_id) REFERENCES users(id)",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (id)",
             "no_inherit": true
           }
         ],
@@ -19874,6 +20434,222 @@
     },
     {
       "kind": "relation",
+      "name": "recruitment_notifications",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "description",
+            "type": "text",
+            "default": "''::text",
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "event_key",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "id",
+            "type": "uuid",
+            "default": "gen_random_uuid()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "kind",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "path",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "read_at",
+            "type": "timestamp with time zone",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "state",
+            "type": "text",
+            "default": "'active'::text",
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "task_key",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "title",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": false,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (organization_id, user_id) WHERE (read_at IS NULL)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": false,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (organization_id, user_id, created_at DESC)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (organization_id, user_id, event_key)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK ((kind = ANY (ARRAY['assignment'::text, 'schedule'::text, 'removed'::text, 'todo'::text, 'reminder'::text])))",
+            "no_inherit": false
+          },
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK ((state = ANY (ARRAY['active'::text, 'resolved'::text, 'cancelled'::text])))",
+            "no_inherit": false
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (id)",
+            "no_inherit": true
+          },
+          {
+            "type": "u",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "UNIQUE (organization_id, user_id, event_key)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
       "name": "recruitment_requests",
       "detail": {
         "kind": "r",
@@ -20192,6 +20968,132 @@
             "validated": true,
             "deferrable": false,
             "definition": "UNIQUE (request_no)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
+      "name": "recruitment_user_tasks",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "active",
+            "type": "boolean",
+            "default": "true",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "fingerprint",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "payload",
+            "type": "jsonb",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "revision",
+            "type": "integer",
+            "default": "1",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "task_key",
+            "type": "text",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": "\"default\"",
+            "generated": ""
+          },
+          {
+            "name": "updated_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (organization_id, user_id, task_key)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (organization_id, user_id, task_key)",
             "no_inherit": true
           }
         ],
@@ -26039,7 +26941,7 @@
             "deferred": false,
             "validated": true,
             "deferrable": false,
-            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text])))",
+            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text, 'failed'::text])))",
             "no_inherit": false
           },
           {
@@ -27174,6 +28076,15 @@
             "generated": ""
           },
           {
+            "name": "summary_stale",
+            "type": "boolean",
+            "default": "false",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
             "name": "summary_status",
             "type": "text",
             "default": "'none'::text",
@@ -27260,6 +28171,11 @@
             "name": "interview_transcript_postprocess_on_completion",
             "enabled": "O",
             "definition": "CREATE TRIGGER interview_transcript_postprocess_on_completion AFTER UPDATE OF status, ended_at ON __company__.interview_live_sessions FOR EACH ROW EXECUTE FUNCTION queue_interview_transcript_postprocess_on_completion()"
+          },
+          {
+            "name": "preserve_interview_summary_version",
+            "enabled": "O",
+            "definition": "CREATE TRIGGER preserve_interview_summary_version BEFORE UPDATE ON __company__.interview_live_sessions FOR EACH ROW EXECUTE FUNCTION preserve_interview_summary_version()"
           }
         ],
         "constraints": [
@@ -28748,6 +29664,141 @@
     },
     {
       "kind": "relation",
+      "name": "interview_summary_versions",
+      "detail": {
+        "kind": "r",
+        "view": null,
+        "rules": [],
+        "columns": [
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "default": "now()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "id",
+            "type": "uuid",
+            "default": "gen_random_uuid()",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "organization_id",
+            "type": "uuid",
+            "default": "'__organization__'::uuid",
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "report",
+            "type": "jsonb",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "revision",
+            "type": "integer",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "session_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": true,
+            "collation": null,
+            "generated": ""
+          },
+          {
+            "name": "transcript_version_id",
+            "type": "uuid",
+            "default": null,
+            "identity": "",
+            "not_null": false,
+            "collation": null,
+            "generated": ""
+          }
+        ],
+        "indexes": [
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": false,
+            "exclusion": false,
+            "definition": " USING btree (session_id, revision)",
+            "nulls_not_distinct": false
+          },
+          {
+            "live": true,
+            "ready": true,
+            "valid": true,
+            "unique": true,
+            "primary": true,
+            "exclusion": false,
+            "definition": " USING btree (id)",
+            "nulls_not_distinct": false
+          }
+        ],
+        "policies": [],
+        "triggers": [],
+        "constraints": [
+          {
+            "type": "c",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "CHECK ((organization_id = '__organization__'::uuid))",
+            "no_inherit": false
+          },
+          {
+            "type": "f",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "FOREIGN KEY (session_id) REFERENCES __company__.interview_live_sessions(id) ON DELETE CASCADE",
+            "no_inherit": true
+          },
+          {
+            "type": "p",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "PRIMARY KEY (id)",
+            "no_inherit": true
+          },
+          {
+            "type": "u",
+            "deferred": false,
+            "validated": true,
+            "deferrable": false,
+            "definition": "UNIQUE (session_id, revision)",
+            "no_inherit": true
+          }
+        ],
+        "persistence": "p",
+        "row_security": false,
+        "force_row_security": false
+      }
+    },
+    {
+      "kind": "relation",
       "name": "interview_transcript_postprocess_jobs",
       "detail": {
         "kind": "r",
@@ -28919,7 +29970,7 @@
             "deferred": false,
             "validated": true,
             "deferrable": false,
-            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text])))",
+            "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'completed'::text, 'failed'::text])))",
             "no_inherit": false
           },
           {
@@ -29370,6 +30421,11 @@
             "name": "company_legacy_snapshot_no_truncate",
             "enabled": "O",
             "definition": "CREATE TRIGGER company_legacy_snapshot_no_truncate BEFORE TRUNCATE ON __company__.interviews FOR EACH STATEMENT EXECUTE FUNCTION guard_company_legacy_snapshot()"
+          },
+          {
+            "name": "interview_assignment_notification",
+            "enabled": "O",
+            "definition": "CREATE TRIGGER interview_assignment_notification AFTER INSERT OR UPDATE ON __company__.interviews FOR EACH ROW EXECUTE FUNCTION notify_interview_assignment()"
           }
         ],
         "constraints": [

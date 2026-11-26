@@ -18,11 +18,18 @@ const send = (socket: WebSocket, data: Buffer | string, binary: boolean) => new 
   socket.send(data,{binary},error => error ? reject(error) : resolve())
 })
 
+function closeWithDeadline(socket: WebSocket) {
+  socket.close(1000,'stream unavailable')
+  const deadline=setTimeout(()=>socket.terminate(),1000);deadline.unref()
+  socket.once('close',()=>clearTimeout(deadline))
+}
+
 interface StreamGatewayDependencies {
   pool?: Pool
   authenticate?: (context: RequestContext) => Promise<void>
   resolveEnv?: (organizationId: string) => Promise<NodeJS.ProcessEnv>
   upstreamUrl?: string
+  heartbeatIntervalMs?: number
 }
 
 /** Browser ASR traffic requires a session and quota; audio capture and storage remain independent. */
@@ -47,9 +54,13 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
     if(url.pathname !== '/funasr-stream'){socket.destroy();return}
     pendingSockets.add(socket)
     let claimed: string | undefined
+    let authenticated = false
+    let stage = 'origin'
+    const requestId = randomUUID()
     void track((async () => {
       if(!isAllowedRequestOrigin(req, process.env, process.env.NODE_ENV!=='production')) throw new Error('来源校验失败')
-      const context={req,config,url,requestId:randomUUID()} as RequestContext
+      const context={req,config,url,requestId} as RequestContext
+      stage='authentication'
       await authenticate(context)
       if(closed || socket.destroyed)throw new Error('实时转写服务正在关闭')
       const auth=context.auth,org=auth?.user.workspaceId,session=url.searchParams.get('sessionId') ?? '',source=url.searchParams.get('source') ?? ''
@@ -58,14 +69,18 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
       const scoped=<T>(action:()=>Promise<T>) => process.env.TENANT_SCHEMA_ROUTING==='on' ? runWithTenantContext({organizationId:org,schemaName:organizationSchemaName(org)},action) : action()
       const checkAccess=async()=>{
         if(process.env.TENANT_SCHEMA_ROUTING==='on') await requireReadyWorkspaceSchema(pool,org)
-        const member=(await pool.query('SELECT 1 FROM public.organization_members m JOIN public.users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND u.is_active AND public.organization_service_available(m.organization_id)',[org,auth.user.id])).rows[0]
+        const member=(await pool.query('SELECT 1 FROM public.organization_members m JOIN public.users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2 AND m.is_active AND m.ended_at IS NULL AND u.is_active AND EXISTS(SELECT 1 FROM public.sessions s WHERE s.id=$3 AND s.user_id=m.user_id AND s.revoked_at IS NULL AND s.expires_at>now()) AND public.organization_service_available(m.organization_id)',[org,auth.user.id,auth.sessionId])).rows[0]
         const live=member && await scoped(()=>pool.query("SELECT s.id FROM interview_live_sessions s JOIN interviews i ON i.id=s.interview_id WHERE s.id=$1 AND i.organization_id=$2 AND s.status<>'completed'",[session,org]))
         if(!live?.rows[0])throw new EnterpriseAiError('STREAM_ACCESS_DENIED','企业权限已失效或面试已结束，录音仍会保留',403)
       }
+      stage='access'
       await checkAccess()
+      authenticated = true
+      stage='configuration'
       const env=await (dependencies.resolveEnv ? dependencies.resolveEnv(org) : new EnterpriseAiStore(pool).runtimeEnv(org)),connectionId=randomUUID()
       const endpoint=new URL(dependencies.upstreamUrl || process.env.FUNASR_STREAM_URL || process.env.FUNASR_BASE_URL || 'http://127.0.0.1:10095')
       endpoint.protocol=['https:','wss:'].includes(endpoint.protocol)?'wss:':'ws:';endpoint.pathname='/stream';endpoint.search=''
+      stage='admission'
       const db=await pool.connect()
       let initialMs=offset
       try{
@@ -73,49 +88,66 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
         await db.query('SELECT id FROM public.organizations WHERE id=$1 FOR NO KEY UPDATE',[org])
         const policy=await new BillingStore(pool).policy(db)
         const count=(await db.query('SELECT count(DISTINCT session_id)::int AS n FROM public.billing_stream_sources WHERE organization_id=$1 AND session_id<>$2 AND lease_until>now()',[org,session])).rows[0]
-        if(count.n>=policy.config.limits.maxConcurrent)throw new Error('企业实时面试已达到并发上限')
+        if(count.n>=policy.config.limits.maxConcurrent)throw new EnterpriseAiError('BILLING_CONCURRENCY_LIMIT','企业实时面试已达到并发上限',429)
         const lease=(await db.query("INSERT INTO public.billing_stream_sources(organization_id,session_id,source,connection_id,lease_until,end_ms) VALUES($1,$2,$3,$4,now()+interval '45 seconds',$5) ON CONFLICT(organization_id,session_id,source) DO UPDATE SET connection_id=excluded.connection_id,lease_until=excluded.lease_until,end_ms=greatest(billing_stream_sources.end_ms,excluded.end_ms) WHERE billing_stream_sources.lease_until<now() RETURNING end_ms",[org,session,source,connectionId,offset])).rows[0]
-        if(!lease)throw new Error('该音轨已有实时连接，请稍后重试')
+        if(!lease)throw new EnterpriseAiError('STREAM_SOURCE_BUSY','旧音轨连接尚未释放，正在等待恢复，请稍后重试',409)
         initialMs=Number(lease.end_ms)
         await db.query('COMMIT');claimed=connectionId
       }catch(error){await db.query('ROLLBACK').catch(()=>undefined);throw error}finally{db.release()}
       if(socket.destroyed)throw new Error('客户端已断开')
       if(closed)throw new Error('实时转写服务正在关闭')
+      stage='upgrade'
       wss.handleUpgrade(req,socket,head,client=>{
         const upstream=new WebSocket(endpoint,{handshakeTimeout:10000,maxPayload:1048576,headers:process.env.FUNASR_TOKEN?{Authorization:'Bearer '+process.env.FUNASR_TOKEN}:{}})
         let chain=Promise.resolve(),queued=0,endMs=initialMs,sequence=0,totalBytes=0,closed=false,opened=false
-        let heartbeatWork: Promise<unknown> = Promise.resolve(), heartbeatBusy = false
+        let heartbeatWork: Promise<unknown> = Promise.resolve(), heartbeatBusy = false, alive = true
+        client.on('pong', () => { alive = true })
         let chunks:Buffer[]=[],buffered=0,flushTimer:ReturnType<typeof setTimeout>|undefined
         const ready=new Promise<void>((resolve,reject)=>{upstream.once('open',()=>{opened=true;resolve()});upstream.once('error',reject);upstream.once('close',()=>{if(!opened)reject(new Error('转写服务未就绪'))})})
         void ready.catch(()=>undefined)
-        const stop=()=>{
+        const stop=(graceful=false)=>{
           if(closed)return;closed=true;clearInterval(heartbeat);clearTimeout(flushTimer);chunks=[]
-          connections.delete(client);client.terminate();upstream.terminate()
-          void track(Promise.allSettled([chain,heartbeatWork]).then(()=>pool.query('UPDATE public.billing_stream_sources SET lease_until=now() WHERE connection_id=$1',[connectionId]))).catch(()=>console.warn('实时连接租约释放失败，将等待租约到期'))
+          connections.delete(client);upstream.terminate()
+          if(graceful && client.readyState===WebSocket.OPEN)closeWithDeadline(client)
+          else client.terminate()
+          // Fence old async work immediately; keep the timeline cursor for the replacement.
+          void track(pool.query('UPDATE public.billing_stream_sources SET connection_id=$2,lease_until=now() WHERE connection_id=$1',[connectionId,randomUUID()])).catch(()=>console.warn('实时连接租约释放失败，将等待租约到期', { requestId, connectionId }))
+          void track(Promise.allSettled([chain,heartbeatWork]))
         }
         const fail=(message:string,code='STREAM_TEMPORARY_UNAVAILABLE',retryable=true)=>{
-          if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({type:'billing_error',message,code,retryable}),()=>stop())
-          else stop()
+          if(closed)return
+          console.warn('实时转写连接失败', { requestId, connectionId, code, retryable })
+          if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({type:'billing_error',message,code,retryable}))
+          stop(true)
         }
         const heartbeat=setInterval(()=>{
-          if(closed || heartbeatBusy)return
+          if(closed)return
+          // A half-open TCP connection must not keep renewing the source lease.
+          if(!alive){fail('网络连接已失去响应，正在释放旧音轨','STREAM_HEARTBEAT_TIMEOUT');return}
+          alive=false
+          try{client.ping()}catch{stop();return}
+          if(heartbeatBusy)return
           heartbeatBusy=true
           heartbeatWork=track(checkAccess().then(()=>closed ? undefined : pool.query("UPDATE public.billing_stream_sources SET lease_until=now()+interval '45 seconds' WHERE connection_id=$1 RETURNING session_id",[connectionId])).then(r=>{if(r && !r.rows[0])stop()}).catch(error=>fail(error instanceof Error?error.message:'实时连接暂不可用',error?.code,error?.code!=='STREAM_ACCESS_DENIED')).finally(()=>{heartbeatBusy=false}))
-        },15000);heartbeat.unref()
+        },dependencies.heartbeatIntervalMs ?? 10000);heartbeat.unref()
         connections.set(client,stop)
         claimed=undefined
         const enqueue=(data:Buffer,binary:boolean)=>{
           chain=chain.then(async()=>{
             if(closed)return
-            await ready;await checkAccess()
+            await ready
+            if(closed)return
+            await checkAccess()
+            if(closed)return
             if(binary){
               totalBytes+=data.length
               const startMs=endMs,nextMs=initialMs+Math.ceil(totalBytes/32)
               const claim=await pool.query("UPDATE public.billing_stream_sources SET lease_until=now()+interval '45 seconds' WHERE connection_id=$1 RETURNING session_id",[connectionId])
+              if(closed)return
               if(!claim.rows[0])throw new Error('实时音轨连接已变化')
               const key='stream:'+connectionId+':'+(++sequence)
               for(let attempt=0;;attempt++){
-                try{await meterInterviewAudio(env,key,{sessionId:session,startMs,endMs:nextMs},async()=>{await send(upstream,data,true);return true},'realtime');break}
+                try{await meterInterviewAudio(env,key,{sessionId:session,startMs,endMs:nextMs},async()=>{if(closed)throw new Error('实时音轨已断开');await send(upstream,data,true);return true},'realtime');break}
                 catch(error){if((error as {code?:string}).code!=='BILLING_AUDIO_BUSY' || attempt>=20)throw error;await new Promise(r=>setTimeout(r,100));if(closed)return}
               }
               await pool.query('UPDATE public.billing_stream_sources SET end_ms=$2 WHERE connection_id=$1',[connectionId,nextMs])
@@ -128,7 +160,7 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
         const flush=()=>{clearTimeout(flushTimer);flushTimer=undefined;if(!buffered)return;const data=Buffer.concat(chunks,buffered);chunks=[];buffered=0;enqueue(data,true)}
         upstream.on('message',(data,binary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary})})
         upstream.on('error',()=>fail('实时转写服务暂不可用，录音与分段保存继续。'))
-        upstream.on('close',stop);client.on('error',stop);client.on('close',stop)
+        upstream.on('close',()=>stop());client.on('error',()=>stop());client.on('close',()=>stop())
         client.on('message',(raw,binary)=>{
           if(closed)return
           const data=bytesOf(raw);queued+=data.length
@@ -146,9 +178,17 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
         })
       })
       if(claimed){await pool.query('UPDATE public.billing_stream_sources SET lease_until=now() WHERE connection_id=$1',[claimed]);claimed=undefined}
-    })().catch(async()=>{
+    })().catch(async(error: unknown)=>{
+      const code=error instanceof EnterpriseAiError ? error.code : 'STREAM_UPGRADE_FAILED'
+      console.warn('实时转写握手失败', { requestId, stage, code })
       if(claimed)await pool.query('UPDATE public.billing_stream_sources SET lease_until=now() WHERE connection_id=$1',[claimed]).catch(()=>undefined)
-      if(!socket.destroyed){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy()}
+      if(!socket.destroyed && authenticated && error instanceof EnterpriseAiError){
+        wss.handleUpgrade(req,socket,head,client=>{
+          client.on('error',()=>client.terminate())
+          client.send(JSON.stringify({type:'billing_error',code,message:error.message,retryable:isExecutionBusy(error)||code==='STREAM_SOURCE_BUSY'}))
+          closeWithDeadline(client)
+        })
+      }else if(!socket.destroyed){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy()}
     }).finally(()=>pendingSockets.delete(socket)))
   })
   const close = () => {

@@ -27,46 +27,27 @@ beforeEach(() => {
 })
 afterEach(() => { app.unmount(); root.remove(); vi.unstubAllGlobals() })
 
-describe('企业快速切换', () => {
-  it('显示当前企业，刷新列表，隐藏已归档企业并保留管理入口', async () => {
-    expect(trigger().textContent).toContain('企业A')
-    trigger().click(); await flush()
-    expect(listWorkspaces).toHaveBeenCalledOnce()
-    expect(choices()).toHaveLength(2)
-    expect(choices()[0].disabled).toBe(true)
+describe('单企业信息', () => {
+  it('固定展示当前企业，不提供切换按钮', async () => {
+    await flush()
+    expect(root.textContent).toContain('企业A')
+    expect(root.querySelectorAll('button')).toHaveLength(0)
     expect(root.querySelector('a')?.getAttribute('href')).toBe('/workspaces')
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); await flush()
-    expect(root.querySelector('[role="region"]')).toBeNull()
-    expect(document.activeElement).toBe(trigger())
+    expect(listWorkspaces).not.toHaveBeenCalled()
+    expect(switchWorkspace).not.toHaveBeenCalled()
   })
-  it('切换成功后重新加载，不复用旧企业页面数据', async () => {
-    vi.mocked(switchWorkspace).mockResolvedValue(undefined)
-    trigger().click(); await flush()
-    vi.stubGlobal('window', { location: { assign: navigate } })
-    choices()[1].click(); await flush()
-    expect(switchWorkspace).toHaveBeenCalledWith('B')
-    expect(navigate).toHaveBeenCalledWith('/')
-    expect(root.querySelector('[role="region"]')).toBeNull()
+  it('未绑定账号显示创建加入入口', async () => {
+    authSession.user!.workspaceId=undefined
+    authSession.user!.workspaceName=undefined
+    authSession.workspaces=[]
+    await flush()
+    expect(root.textContent).toContain('尚未加入企业')
+    expect(root.querySelector('a')?.textContent).toContain('创建 / 加入')
   })
-  it('阻止重复切换，失败时保留当前企业且展示错误', async () => {
-    let reject!: (cause: Error) => void
-    vi.mocked(switchWorkspace).mockReturnValue(new Promise((_resolve, r) => { reject = r }))
-    trigger().click(); await flush()
-    choices()[1].click(); choices()[1].click(); await flush()
-    expect(switchWorkspace).toHaveBeenCalledOnce()
-    expect(choices().every(button => button.disabled)).toBe(true)
-    reject(new Error('网络不可用')); await flush()
-    expect(root.querySelector('[role="alert"]')?.textContent).toContain('网络不可用')
-    expect(authSession.user?.workspaceId).toBe('A')
-    expect(choices()[1].disabled).toBe(false)
-  })
-  it('读取失败时不清空已有企业列表，并允许重试', async () => {
-    vi.mocked(listWorkspaces).mockRejectedValue(new Error('列表读取失败'))
-    trigger().click(); await flush()
-    expect(root.querySelector('[role="alert"]')?.textContent).toContain('列表读取失败')
-    expect(choices()).toHaveLength(2)
-    expect(authSession.workspaces).toHaveLength(3)
-    document.body.click(); await flush()
-    expect(root.querySelector('[role="region"]')).toBeNull()
+  it('已停用成员仍展示企业归属', async () => {
+    authSession.workspaces=[{...workspace('A'),membershipActive:false}]
+    await flush()
+    expect(root.textContent).toContain('企业A')
+    expect(root.textContent).toContain('成员已停用')
   })
 })

@@ -33,6 +33,6 @@ export function normalizeRegistrationInput(input: RegisterInput): NormalizedRegi
   if (name.length < 2 || name.length > 80) throw validationError('姓名长度需为 2 到 80 个字符')
   if (email.length > 254 || !/^\S+@\S+\.\S+$/u.test(email)) throw validationError('请输入有效邮箱')
   if (password.length < 8 || password.length > 128 || !password.trim()) throw validationError('密码须为 8 至 128 个字符，不能全部为空格')
-  if (!invitationCode && (companyName.length < 2 || companyName.length > 120)) throw validationError('企业名称长度需为 2 到 120 个字符')
+  if (!invitationCode && companyName && (companyName.length < 2 || companyName.length > 120)) throw validationError('企业名称长度需为 2 到 120 个字符')
   return { name, email, password, companyName, ...(invitationCode ? { invitationCode } : {}), phone: normalizePhone(input.phone) }
 }

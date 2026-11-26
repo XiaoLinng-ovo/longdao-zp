@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import InterviewDetailPage from './InterviewDetailPage.vue'
 import { completeInterview, correctInterviewConclusion, getInterview } from '../api'
 import { apiClient } from '../../../shared/api'
 import { loadWorkflowEvents } from '../../../shared/api/workflow-events'
+import { loadInterviewSummary, requestInterviewSummary } from '../api/summary'
+import { authSession } from '../../auth/session'
 
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>()
@@ -30,6 +32,7 @@ vi.mock('../api/question-sheets', async (importOriginal) => {
   }
 })
 
+vi.mock('../api/summary', () => ({ loadInterviewSummary: vi.fn(), requestInterviewSummary: vi.fn(), loadInterviewSummaryVersions: vi.fn().mockResolvedValue([]) }))
 const mockedGetInterview = vi.mocked(getInterview)
 const mockedGetJson = vi.mocked(apiClient.getJson)
 
@@ -86,14 +89,41 @@ async function mountPage(status: 'scheduled' | 'completed' | 'cancelled', overri
   return root
 }
 
+beforeEach(() => {
+  authSession.user = { id: 'user-1', workspaceId: 'test-workspace' } as never
+  authSession.workspaces = [{ id: 'test-workspace', role: 'admin' }] as never
+  vi.mocked(loadInterviewSummary).mockResolvedValue(null)
+})
+
 afterEach(() => {
   app?.unmount()
   app = undefined
   root?.remove()
+  authSession.user = null; authSession.workspaces = []
   vi.resetAllMocks()
 })
 
 describe('InterviewDetailPage', () => {
+  it('automatically loads the inline summary before feedback and audit without a popup or generation request', async () => {
+    const page = await mountPage('scheduled')
+    const summary = page.querySelector('[aria-label="面试总结表"]')!
+    expect(summary.getAttribute('role')).toBe('region')
+    expect(page.querySelector('[role="dialog"]')).toBeNull()
+    expect(page.querySelector('.summary-overlay')).toBeNull()
+    expect([...page.querySelectorAll('button')].some(button => button.textContent?.trim() === '面试总结表')).toBe(false)
+    expect(loadInterviewSummary).toHaveBeenCalledWith('interview-1')
+    expect(requestInterviewSummary).not.toHaveBeenCalled()
+    expect(page.textContent).toContain('尚无已保存的面试录音')
+    expect(summary.compareDocumentPosition(page.querySelector('.audit-details')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+  it('locates the inline summary from existing notification links without opening a modal', async () => {
+    const scroll = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll })
+    const page = await mountPage('completed', {}, '?openSummary=1')
+    expect(scroll).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' })
+    expect(page.querySelector('[role="dialog"]')).toBeNull()
+  })
+
   it('未安排复试时提供安排入口并禁止直接进入面试室', async () => {
     const page = await mountPage('scheduled', { round: 2, stage: 'final' })
     expect(page.textContent).toContain('安排复试')

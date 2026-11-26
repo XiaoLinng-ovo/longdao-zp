@@ -4,6 +4,8 @@ import { InterviewFeedbackStatus, InterviewStatus } from './status.js'
 export type InterviewType = 'phone_screen' | 'technical' | 'behavioral' | 'case_study' | 'onsite' | 'other'
 
 export interface InterviewParticipant {
+  lead?: boolean
+  sheetTypes?: Array<'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'>
   userId: EntityId
   role: 'interviewer' | 'coordinator' | 'observer'
   required: boolean

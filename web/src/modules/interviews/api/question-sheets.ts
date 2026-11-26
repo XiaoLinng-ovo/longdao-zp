@@ -80,6 +80,7 @@ export interface ApiStageReview {
 
 export interface ApiApplicationQuestionSheets {
   applicationId: string
+  permissions?: Array<{stage: InterviewStage; lead: boolean; sheetTypes: string[]}>
   nextInterview?: NextRoundInterview | null
   sheets: ApiQuestionSheet[]
   reviews: ApiStageReview[]

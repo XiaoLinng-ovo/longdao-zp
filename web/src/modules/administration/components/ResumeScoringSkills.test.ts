@@ -27,6 +27,15 @@ async function fill(selector: string, value: string) {
 }
 afterEach(() => { app?.unmount(); root?.remove(); vi.resetAllMocks() })
 describe('ResumeScoringSkills', () => {
+  it('shows a live counter above the rules without explanatory small print', async () => {
+    await mount()
+    expect(root.querySelector('#resume-scoring-skill-count')?.textContent).toBe('0/8000')
+    await fill('#resume-scoring-skill-content', '技术100分')
+    expect(root.querySelector('#resume-scoring-skill-count')?.textContent).toBe('6/8000')
+    expect(root.querySelector('#resume-scoring-skill-content')?.getAttribute('maxlength')).toBe('8000')
+    expect(root.querySelector('.scoring-tip')).toBeNull()
+    expect(root.textContent).not.toContain('不选岗位时仅保存')
+  })
   it('creates a job-specific Skill with the database ID instead of the display code', async () => {
     await mount()
     await fill('#resume-scoring-skill-name', '销售专属')

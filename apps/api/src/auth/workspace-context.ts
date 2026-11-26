@@ -45,8 +45,8 @@ export function createWorkspaceContextMiddleware(
     if (!context.auth || !isWorkspaceScopedPath(context.url.pathname)) return next()
     const workspaceId = context.auth.user.workspaceId
     if (requireWorkspace && !workspaceId) {
-      if (context.auth.user.workspaceAccessIssue) throw new HttpError(403, 'WORKSPACE_SERVICE_UNAVAILABLE', '当前企业已暂停、试用到期或归档，请切换可用企业或联系平台运营人员')
-      throw new HttpError(409, 'WORKSPACE_REQUIRED', '请先选择一个企业，再访问招聘数据')
+      if (context.auth.user.workspaceAccessIssue) throw new HttpError(403, 'WORKSPACE_SERVICE_UNAVAILABLE', '当前企业已暂停、试用到期或归档，请联系企业管理员或平台运营人员')
+      throw new HttpError(409, 'WORKSPACE_REQUIRED', '请先创建或加入企业，再访问招聘数据')
     }
     const expected = context.req.headers['x-workspace-id']
     const cookieSession = context.auth.method === 'session' && !context.req.headers.authorization

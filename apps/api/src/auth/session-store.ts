@@ -189,6 +189,11 @@ export class LocalAuthSessionStore {
       throw Object.assign(new Error('该邮箱已注册，请直接登录'), { code: 'EMAIL_ALREADY_EXISTS', status: 409 })
     }
     const now = timestamp()
+    if (!data.companyName) {
+      const user: SessionUser = { id:randomUUID(),name:data.name,email:data.email,role:'recruiter',departmentId:'' }
+      file.users.push({...user,phone:data.phone,registrationSource:'open_registration',passwordHash:await hashPassword(data.password),emailVerifiedAt})
+      return {user}
+    }
     const workspace: StoredWorkspace = {
       id: randomUUID(),
       name: data.companyName,
@@ -508,6 +513,11 @@ export class LocalAuthSessionStore {
     return this.exclusive(async () => {
       const file = await this.readFile()
       const data = normalizeRegistrationInput(input)
+      if (!data.companyName) {
+        const result = await this.createRegisteredEntities(file,data,timestamp())
+        await this.writeFile(file)
+        return result
+      }
       const recent = (file.registrationAttempts ?? []).filter((item) => item.email === data.email && Date.parse(item.attemptedAt) > Date.now() - 60 * 60 * 1000)
       if (recent.length >= 3) throw Object.assign(new Error('注册尝试过于频繁，请稍后再试'), { code: 'REGISTRATION_RATE_LIMITED', status: 429 })
       file.registrationAttempts = [...(file.registrationAttempts ?? []), { email: data.email, attemptedAt: timestamp() }]
@@ -690,6 +700,7 @@ export class LocalAuthSessionStore {
     return this.exclusive(async () => {
       const file = await this.readFile()
       const memberships = (file.workspaceMembers ?? []).filter((item) => item.userId === userId)
+      if (memberships.length>1) throw Object.assign(new Error('账号存在多个企业绑定，请联系平台处理'),{code:'MULTIPLE_ENTERPRISE_BINDINGS',status:409})
       return memberships.flatMap((membership) => {
         const workspace = (file.workspaces ?? []).find((item) => item.id === membership.workspaceId)
         if (!workspace) return []
@@ -702,6 +713,7 @@ export class LocalAuthSessionStore {
     return this.exclusive(async () => {
       const file = await this.readFile()
       if (!['test', 'production'].includes(input.kind)) throw Object.assign(new Error('企业类型只能是测试企业或正式企业'), { code: 'VALIDATION_ERROR', status: 400 })
+      if ((file.workspaceMembers ?? []).some(member => member.userId === userId)) throw Object.assign(new Error('此账号已绑定企业，请先办理退出'), {code:'ACCOUNT_ALREADY_BOUND',status:409})
       const name = input.name.trim()
       if (name.length < 2 || name.length > 120) throw Object.assign(new Error('企业名称长度需为 2 到 120 个字符'), { code: 'VALIDATION_ERROR', status: 400 })
       const now = timestamp()
@@ -748,6 +760,7 @@ export class LocalAuthSessionStore {
   async selectWorkspace(sessionId: string, userId: string, workspaceId: string): Promise<SessionUser> {
     return this.exclusive(async () => {
       const file = await this.readFile()
+      if ((file.workspaceMembers ?? []).filter(item=>item.userId===userId).length>1) throw Object.assign(new Error('账号存在多个企业绑定，请联系平台处理'),{code:'MULTIPLE_ENTERPRISE_BINDINGS',status:409})
       const membership = (file.workspaceMembers ?? []).find((item) => item.userId === userId && item.workspaceId === workspaceId)
       const workspace = (file.workspaces ?? []).find((item) => item.id === workspaceId && item.status === 'active')
       if (!membership || !workspace) throw Object.assign(new Error('无权访问该企业'), { code: 'FORBIDDEN', status: 403 })
