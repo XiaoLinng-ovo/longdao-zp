@@ -1,0 +1,154 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smartrecruit}
+      POSTGRES_USER: ${POSTGRES_USER:-smartrecruit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartrecruit} -d ${POSTGRES_DB:-smartrecruit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [smartrecruit]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [smartrecruit]
+
+  clamav:
+    profiles: ["virus-scan"]
+    image: clamav/clamav:stable
+    ports:
+      - "${CLAMAV_PORT:-3310}:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 2>/dev/null | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+    networks: [smartrecruit]
+
+  ocr:
+    build:
+      context: ../ocr-service
+    environment:
+      PADDLEOCR_LANG: ${PADDLEOCR_LANG:-ch}
+    ports:
+      - "${OCR_PORT:-8090}:8090"
+    volumes:
+      - paddle_models:/root/.paddlex
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks: [smartrecruit]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      TENANT_SCHEMA_ROUTING: "on"
+      PORT: 3100
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
+      OCR_SERVICE_URL: http://ocr:8090
+      RESUME_VIRUS_SCAN_ENABLED: ${RESUME_VIRUS_SCAN_ENABLED:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://zhaopin.longdaoec.com,http://127.0.0.1:5174,http://localhost:5174}
+      ENV_FILE_PATH: /config/runtime.env
+      AUTH_OTP_HMAC_SECRET: ${AUTH_OTP_HMAC_SECRET:?Set AUTH_OTP_HMAC_SECRET in .env}
+      AUTH_MFA_ENCRYPTION_KEY: ${AUTH_MFA_ENCRYPTION_KEY:?Set AUTH_MFA_ENCRYPTION_KEY in .env}
+      AUTH_MFA_REQUIRED: ${AUTH_MFA_REQUIRED:-false}
+      AUTH_MFA_EXEMPT_EMAILS: ${AUTH_MFA_EXEMPT_EMAILS:-admin@smartrecruit.local}
+      AUTH_TRUSTED_PROXY_IPS: ${AUTH_TRUSTED_PROXY_IPS:-172.16.0.0/12}
+      TURNSTILE_ENABLED: ${TURNSTILE_ENABLED:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    ports:
+      - "${API_PORT:-3100}:3100"
+    volumes:
+      - resume_data:/data/object-storage
+      - ../.env:/config/runtime.env
+      - ../db/migrations:/app/db/migrations:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      ocr: { condition: service_healthy }
+    networks: [smartrecruit]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["node", "apps/worker/dist/src/index.js"]
+    environment:
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-in-development}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      WORKER_DB_POLL: "true"
+      TENANT_SCHEMA_ROUTING: "on"
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: 4001
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
+      CLAMAV_HOST: ${CLAMAV_HOST:-}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+      CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-30000}
+    depends_on:
+      postgres: { condition: service_healthy }
+      api: { condition: service_started }
+    volumes:
+      - resume_data:/data/object-storage
+      - ../db/migrations:/app/db/migrations:ro
+    networks: [smartrecruit]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "${WEB_PORT:-5174}:5174"
+    depends_on:
+      api: { condition: service_started }
+    networks: [smartrecruit]
+
+networks:
+  smartrecruit:
+    name: smartrecruit
+
+volumes:
+  postgres_data:
+  redis_data:
+  resume_data:
+  clamav_data:
+  paddle_models:

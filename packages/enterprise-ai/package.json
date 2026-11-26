@@ -1,0 +1,17 @@
+{
+  "name": "@smartrecruit-pro/enterprise-ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@smartrecruit-pro/runtime-lifecycle": "workspace:*" },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "scripts": {
+    "build": "node --check index.js && node --check billing.js && node --check execution.js",
+    "test": "node --test *.test.js"
+  }
+}

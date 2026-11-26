@@ -1,0 +1,334 @@
+import { apiClient } from '../../../shared/api'
+import { interviewRequest } from './request-timeout'
+import type { Interview } from '../../../shared/types/recruiting'
+import { notifyTrialQuotaChanged } from '../../../shared/api/trial-usage'
+import type { QuestionPreparation } from './question-preparation'
+
+export type InterviewSheetType = 'hr_screen' | 'hiring_department' | 'business' | 'hr' | 'boss'
+export type InterviewType = 'phone_screen' | 'technical' | 'behavioral' | 'case_study' | 'onsite' | 'other'
+export type FeedbackRecommendation = 'strong_yes' | 'yes' | 'mixed' | 'no' | 'strong_no'
+
+export interface ApiInterview {
+  questionPreparation?: QuestionPreparation
+  id: string
+  code: string
+  applicationId: string
+  round: number
+  /** 面试阶段：第 1 轮=初试，第 2 轮及以后=复试（与后端 interviews.stage 一致）。 */
+  stage?: 'initial' | 'final'
+  type: InterviewType
+  title: string
+  status: 'scheduled' | 'completed' | 'cancelled'
+  scheduledStartAt?: string
+  scheduledEndAt?: string
+  timezone?: string
+  location?: string
+  meetingUrl?: string
+  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required: boolean; lead?: boolean; sheetTypes?: InterviewSheetType[] }>
+  feedbackStatus: 'draft' | 'submitted' | 'locked' | 'pending'
+  outcome?: 'continue' | 'offer' | 'reject' | 'cancelled' | null
+  aiScore?: number | null
+  aiScoreStatus?: string
+  application: { id: string; code: string; candidateId: string; jobId: string; status: string }
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApiCandidate { id: string; code: string; fullName: string }
+export interface ApiJob { id: string; code: string; title: string }
+export interface ApiApplication { id: string; code?: string; candidateId: string; jobId: string; status: string; candidateName?: string; jobTitle?: string }
+export interface ScheduleCandidate { id: string; code: string; fullName: string; email?: string }
+export interface ScheduleJob { id: string; code: string; title: string }
+export interface InterviewerOption { id: string; displayName: string; email?: string; departmentCode?: string | null }
+export interface InterviewerParticipantOption { id: string; name: string }
+export interface InterviewScheduleData { candidates: ScheduleCandidate[]; jobs: ScheduleJob[]; applications: ApiApplication[]; interviewers: InterviewerOption[] }
+
+export interface CreateInterviewInput {
+  applicationId: string
+  round?: number
+  type?: InterviewType
+  title: string
+  scheduledStartAt?: string
+  scheduledEndAt?: string
+  timezone?: string
+  location?: string
+  meetingUrl?: string
+  participants: Array<{ userId: string; name?: string; role?: 'interviewer' | 'coordinator' | 'observer'; required?: boolean; lead?: boolean; sheetTypes?: InterviewSheetType[] }>
+}
+
+export interface SubmitFeedbackInput {
+  interviewerId: string
+  overallScore?: number
+  recommendation?: FeedbackRecommendation
+  ratings?: Record<string, number>
+  strengths?: string[]
+  concerns?: string[]
+  notes?: string
+}
+
+export interface InterviewView {
+  questionPreparation?: QuestionPreparation
+  id: string
+  entityId: string
+  stage?: 'initial' | 'final'
+  type?: InterviewType
+  title?: string
+  candidate: string
+  job: string
+  round: string
+  scheduledAt: string
+  scheduledStartAt?: string
+  location?: string
+  meetingUrl?: string
+  interviewers: string[]
+  interviewerIds: string[]
+  interviewerOptions: InterviewerParticipantOption[]
+  participants?: ApiInterview['participants']
+  feedbackStatus: Interview['feedbackStatus'] | 'submitted'
+  outcome?: ApiInterview['outcome']
+  aiScore?: number | null
+  aiScoreStatus?: string
+  status: string
+  applicationId: string
+}
+
+export const INTERVIEW_TYPE_LABEL: Record<InterviewType, string> = {
+  phone_screen: '电话初筛',
+  technical: '技术面试',
+  behavioral: '行为面试',
+  case_study: '案例分析',
+  onsite: '现场面试',
+  other: '其他',
+}
+
+export const RECOMMENDATION_LABEL: Record<FeedbackRecommendation, string> = {
+  strong_yes: '强烈推荐录用',
+  yes: '推荐录用',
+  mixed: '待定',
+  no: '不推荐',
+  strong_no: '强烈不推荐',
+}
+
+export const PARTICIPANT_ROLE_LABEL: Record<string, string> = {
+  interviewer: '面试官',
+  coordinator: '协调人',
+  observer: '观察员',
+}
+
+function toViewModel(row: ApiInterview, candidates: Map<string, string>, jobs: Map<string, string>): InterviewView {
+  const app = row.application
+  const interviewerParticipants = row.participants.filter((participant) => (participant.role ?? 'interviewer') === 'interviewer')
+  const interviewerOptions = interviewerParticipants
+    .filter((participant) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(participant.userId))
+    .map((participant) => ({ id: participant.userId, name: participant.name || participant.userId }))
+  return {
+    id: row.code || row.id,
+    entityId: row.id,
+    stage: row.stage ?? (row.round >= 2 ? 'final' : 'initial'),
+    type: row.type,
+    title: row.title,
+    candidate: candidates.get(app.candidateId) || app.candidateId,
+    job: jobs.get(app.jobId) || app.jobId,
+    round: `${row.round} 轮`,
+    scheduledAt: row.scheduledStartAt ? new Date(row.scheduledStartAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '待安排',
+    scheduledStartAt: row.scheduledStartAt,
+    location: row.location,
+    meetingUrl: row.meetingUrl,
+    interviewers: interviewerParticipants.map((p) => p.name || p.userId),
+    interviewerIds: interviewerOptions.map((participant) => participant.id),
+    interviewerOptions,
+    participants: row.participants,
+    feedbackStatus: row.feedbackStatus === 'locked' || row.status === 'completed' ? 'completed' : row.feedbackStatus === 'submitted' ? 'submitted' : 'scheduled',
+    status: row.status,
+    outcome: row.outcome ?? null,
+    aiScore: row.aiScore ?? null,
+    aiScoreStatus: row.aiScoreStatus ?? 'none',
+    questionPreparation: row.questionPreparation,
+    applicationId: row.applicationId,
+  }
+}
+
+export async function loadInterviews(): Promise<InterviewView[]> {
+  return interviewRequest(async (signal) => {
+  const [interviewsRes, candidatesRes, jobsRes] = await Promise.all([
+    apiClient.getJson<ApiInterview[]>('/interviews', { signal }),
+    apiClient.getJson<ApiCandidate[]>('/candidates', { signal }),
+    apiClient.getJson<ApiJob[]>('/jobs', { signal }),
+  ])
+  const candidates = new Map(candidatesRes.data.map((c) => [c.id, c.fullName]))
+  const jobs = new Map(jobsRes.data.map((j) => [j.id, j.title]))
+  return [...interviewsRes.data].sort((left, right) => {
+    const leftTime = Date.parse(left.scheduledStartAt ?? '')
+    const rightTime = Date.parse(right.scheduledStartAt ?? '')
+    const leftValid = Number.isFinite(leftTime)
+    const rightValid = Number.isFinite(rightTime)
+    if (!leftValid) return rightValid ? 1 : 0
+    if (!rightValid) return -1
+    return rightTime - leftTime
+  }).map((row) => toViewModel(row, candidates, jobs))
+  }, 20000, '读取面试超时，请检查网络连接后点击刷新重试')
+}
+
+export async function loadInterviewScheduleData(): Promise<InterviewScheduleData> {
+  return interviewRequest(async (signal) => {
+  const [applicationResponse, candidateResponse, jobResponse, interviewerResponse] = await Promise.all([
+    apiClient.getJson<ApiApplication[]>('/applications', { signal }),
+    apiClient.getJson<ApiCandidate[]>('/candidates', { signal }),
+    apiClient.getJson<ApiJob[]>('/jobs', { signal }),
+    apiClient.getJson<InterviewerOption[]>('/interviewer-options', { signal }),
+  ])
+  return {
+    candidates: candidateResponse.data.map((candidate) => ({ id: candidate.id, code: candidate.code, fullName: candidate.fullName })),
+    jobs: jobResponse.data.map((job) => ({ id: job.id, code: job.code, title: job.title })),
+    applications: applicationResponse.data,
+    interviewers: interviewerResponse.data,
+  }
+  }, 20000, '读取面试安排选项超时，请检查网络连接后重试')
+}
+
+export interface ApiInterviewDetail extends ApiInterview {
+  feedback: Array<{
+    id: string
+    interviewId: string
+    interviewerId: string
+    status: 'draft' | 'submitted' | 'locked'
+    overallScore?: number
+    recommendation?: FeedbackRecommendation
+    ratings: Record<string, number>
+    strengths: string[]
+    concerns: string[]
+    notes?: string
+    submittedAt?: string
+    lockedAt?: string
+  }>
+}
+
+export async function getInterview(id: string): Promise<ApiInterviewDetail> {
+  return (await apiClient.getJson<ApiInterviewDetail>(`/interviews/${id}`)).data
+}
+
+export async function createInterview(input: CreateInterviewInput): Promise<ApiInterview> {
+  return (await apiClient.postJson<ApiInterview>('/interviews', input)).data
+}
+
+export interface InterviewScheduleUpdate {
+  scheduledStartAt?: string
+  scheduledEndAt?: string | null
+  location?: string | null
+  meetingUrl?: string | null
+  participants?: ApiInterview['participants']
+}
+
+export async function updateInterviewSchedule(id: string, input: InterviewScheduleUpdate): Promise<Pick<ApiInterview, 'scheduledStartAt' | 'scheduledEndAt' | 'location' | 'meetingUrl' | 'updatedAt'> & { participants?: ApiInterview['participants'] }> {
+  return (await apiClient.patchJson<ApiInterview>(`/interviews/${id}`, input)).data
+}
+
+export async function submitFeedback(id: string, input: SubmitFeedbackInput): Promise<unknown> {
+  const result = (await apiClient.postJson(`/interviews/${id}/feedback`, input)).data
+  notifyTrialQuotaChanged()
+  return result
+}
+
+export async function lockFeedback(id: string, interviewerId: string): Promise<unknown> {
+  return (await apiClient.postJson(`/interviews/${id}/lock-feedback`, { interviewerId })).data
+}
+
+export async function concludeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled'): Promise<unknown> {
+  return (await apiClient.postJson(`/interviews/${id}/conclude`, { outcome })).data
+}
+
+export async function completeInterview(id: string, outcome: 'continue' | 'offer' | 'reject' | 'cancelled'): Promise<unknown> {
+  return (await apiClient.postJson('/interviews/' + encodeURIComponent(id) + '/complete', { outcome })).data
+}
+
+export async function correctInterviewConclusion(id: string, outcome: NonNullable<ApiInterview['outcome']>, reason: string): Promise<unknown> {
+  return (await apiClient.postJson(`/interviews/${encodeURIComponent(id)}/correct-conclusion`, { outcome, reason })).data
+}
+
+export async function deleteInterview(id: string): Promise<void> {
+  await apiClient.deleteJson(`/interviews/${id}`)
+}
+
+export interface GeneratedInterviewQuestion {
+  group?: InterviewQuestionGroup
+  dimension?: string
+  sourceEngine?: 'llm' | 'local_fallback'
+  category: 'technical' | 'behavioral' | 'experience' | 'job_specific'
+  difficulty: 'easy' | 'medium' | 'hard'
+  question: string
+  rationale: string
+  groundedIn: string[]
+  scoringRubric: Array<{ criterion: string; points: number }>
+}
+
+export type InterviewQuestionGroup = 'ai' | 'hr' | 'department' | 'boss'
+
+export interface InterviewQuestionConversationMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface InterviewQuestionSet {
+  generationWarning?: string
+  questions: GeneratedInterviewQuestion[]
+  engine: 'llm' | 'local_fallback'
+  advisoryOnly: true
+  applicationStatusMutation: 'none'
+}
+
+export interface InterviewQuestionRefinementResult extends InterviewQuestionSet {
+  assistantMessage?: string
+  mode?: 'discussion'
+  bankUpdated?: false
+}
+
+export async function getInterviewQuestions(id: string, signal?: AbortSignal): Promise<(InterviewQuestionSet & { updatedAt: string }) | null> {
+  return (await apiClient.getJson<(InterviewQuestionSet & { updatedAt: string }) | null>(`/interviews/${id}/questions`, ...(signal ? [{ signal }] : []))).data
+}
+
+export async function generateInterviewQuestions(id: string, questionCount = 10, includeCommonQuestions = true, signal?: AbortSignal, group?: InterviewQuestionGroup): Promise<InterviewQuestionSet> {
+  return (await apiClient.postJson<InterviewQuestionSet>(`/interviews/${id}/questions`, { questionCount, includeCommonQuestions, ...(group ? { group } : {}) }, ...(signal ? [{ signal }] : []))).data
+}
+
+export async function refineInterviewQuestionGroup(id: string, group: InterviewQuestionGroup, messages: InterviewQuestionConversationMessage[], signal?: AbortSignal): Promise<InterviewQuestionRefinementResult> {
+  return (await apiClient.postJson<InterviewQuestionRefinementResult>(`/interviews/${id}/questions`, { refinement: { group, messages } }, ...(signal ? [{ signal }] : []))).data
+}
+
+export interface AnalysisSourceSegment { id: string; text: string; role: string; speakerId: string }
+export interface TranscriptRefinement { text: string; corrections: Array<{ original: string; corrected: string }>; uncertainties: string[]; editedAt?: string; editedBy?: string }
+export interface LiveAnswerAnalysis { summary: string; evidence: string[]; scores: Array<{ dimension: string; score: number; rationale: string; questionQuote?: string; evidence?: string[] }>; concerns: string[]; confidence: number; nextQuestion: string; advisoryOnly: true; applicationStatusMutation: 'none'; transcriptRefinement?: TranscriptRefinement; sourceSegments?: AnalysisSourceSegment[] }
+export interface LiveInterviewSegment { roleReview?: { method: 'semantic_context'; status: 'inferred' | 'uncertain' | 'mixed'; confidence: number; reason: string; model: string; promptVersion: string }; transcriptComparison?: { streamingText: string; offlineText: string; streamingComplete: boolean; selectedSource: 'streaming' | 'offline'; startMs: number; endMs: number }; audioSource?: 'microphone' | 'meeting'; speakerConfirmed?: boolean; id: string; sessionId: string; speakerId: string; role: 'interviewer' | 'candidate' | 'unknown'; confidence: number; text: string; startMs: number; endMs: number; status: string; analysis?: LiveAnswerAnalysis }
+export interface LiveInterviewSession { completionReview?: CompletionReview; id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string; questionSheetGeneration?: { queued: boolean; reason?: string }; summaryGeneration?: { queued: boolean; reason?: string } }
+export interface CompletionReview { phase: 'processing' | 'review_required' | 'ready' | 'completed' | 'failed'; error?: string; unresolvedCount: number; unresolvedIds: string[]; limit: number; versionId?: string }
+export interface LiveInterviewView { session: LiveInterviewSession; segments: LiveInterviewSegment[]; completionReview?: CompletionReview }
+export interface LiveInterviewTranscription extends LiveInterviewView { pendingCount: number; retryingCount: number }
+export async function getLiveInterviewTranscription(sessionId: string): Promise<LiveInterviewTranscription> {
+  return interviewRequest(async signal => (await apiClient.getJson<LiveInterviewTranscription>('/interview-live-sessions/' + sessionId + '/transcription', { signal })).data,
+    15_000, '读取转写进度超时，稍后自动重试。')
+}
+export async function createLiveInterviewSession(interviewId: string): Promise<LiveInterviewSession> {
+  const result = (await apiClient.postJson<LiveInterviewSession>(`/interviews/${interviewId}/live-sessions`, {})).data
+  notifyTrialQuotaChanged()
+  return result
+}
+export async function findActiveLiveInterviewSession(interviewId: string): Promise<LiveInterviewView | null> { return (await apiClient.getJson<LiveInterviewView | null>(`/interviews/${interviewId}/live-sessions`)).data }
+export async function loadLiveInterviewSession(sessionId: string): Promise<LiveInterviewView> { return (await apiClient.getJson<LiveInterviewView>(`/interview-live-sessions/${sessionId}`)).data }
+export async function correctTranscriptRoles(sessionId: string, versionId: string, turnIds: string[], role: 'candidate' | 'interviewer'): Promise<LiveInterviewView> {
+  return (await apiClient.postJson<LiveInterviewView>('/interview-live-sessions/' + sessionId + '/roles', { versionId, turnIds, role })).data
+}
+export async function uploadLiveInterviewChunk(sessionId: string, audioBase64: string, contentType: string, chunkOffsetMs: number, chunkId?: string, streamingTranscript?: { text: string; endMs: number; complete: boolean; audioSource?: 'microphone' | 'meeting' }, audioSource?: { id: 'microphone' | 'meeting'; role: 'candidate' | 'interviewer' | 'unknown'; multipleSpeakers: boolean }, chunkEndMs?: number): Promise<LiveInterviewSegment[]> {
+  return interviewRequest(async signal => (await apiClient.postJson<LiveInterviewSegment[]>('/interview-live-sessions/' + sessionId + '/segments', {
+    audioBase64, contentType, chunkOffsetMs, ...(streamingTranscript ? { streamingTranscript } : {}),
+    ...(audioSource ? { audioSource } : {}), ...(chunkEndMs !== undefined ? { chunkEndMs, backgroundTranscription: true } : {}),
+  }, { signal, ...(chunkId ? { headers: { 'Idempotency-Key': chunkId } } : {}) })).data,
+  60_000, '录音保存响应超时，未确认的片段仍保留，将使用同一片段编号重试。')
+}
+export async function addManualLiveSegment(sessionId: string, text: string, role: 'candidate' | 'interviewer', startMs: number, endMs: number): Promise<LiveInterviewSegment> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-sessions/${sessionId}/segments`, { text, role, startMs, endMs })).data[0]! }
+export async function endLiveInterviewSession(sessionId: string): Promise<LiveInterviewSession> {
+  return interviewRequest(async signal => (await apiClient.postJson<LiveInterviewSession>('/interview-live-sessions/' + sessionId + '/end', {}, { signal })).data,
+    30_000, '结束面试响应超时，录音已保存，后台将继续重试。')
+}
+export async function updateLiveInterviewQuestion(sessionId: string, question: string, source: 'manual' | 'ai_adopted' = 'manual', segmentId?: string): Promise<LiveInterviewSession> { return (await apiClient.postJson<LiveInterviewSession>(`/interview-live-sessions/${sessionId}/question`, { question, source, ...(segmentId ? { segmentId } : {}) })).data }
+export async function correctLiveSegmentRole(segmentId: string, role: 'interviewer' | 'candidate', segmentIds: string[] = [segmentId]): Promise<LiveInterviewSegment[]> { return (await apiClient.postJson<LiveInterviewSegment[]>(`/interview-live-segments/${segmentId}/role`, { role, segmentIds })).data }
+export async function analyzeLiveSegment(segmentId: string, question: string, segmentIds: string[] = [segmentId], priorContext: string[] = []): Promise<LiveAnswerAnalysis> { return (await apiClient.postJson<LiveAnswerAnalysis>(`/interview-live-segments/${segmentId}/analyze`, { question, segmentIds, priorContext })).data }
+export async function saveLiveTranscriptRefinement(segmentId: string, text: string, expectedText: string, sourceSegments: AnalysisSourceSegment[]): Promise<TranscriptRefinement> { return (await apiClient.postJson<TranscriptRefinement>(`/interview-live-segments/${segmentId}/refinement`, { text, expectedText, sourceSegments })).data }

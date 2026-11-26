@@ -1,0 +1,199 @@
+name: smartrecruit-modelscope
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smartrecruit}
+      POSTGRES_USER: ${POSTGRES_USER:-smartrecruit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/modelscope/runtime.env}
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/postgres:/var/lib/postgresql/data
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartrecruit} -d ${POSTGRES_DB:-smartrecruit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [private]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [private]
+
+  ocr:
+    build:
+      context: ../ocr-service
+    restart: unless-stopped
+    environment:
+      PADDLEOCR_LANG: ${PADDLEOCR_LANG:-ch}
+      OMP_NUM_THREADS: ${OCR_CPU_THREADS:-2}
+      MKL_NUM_THREADS: ${OCR_CPU_THREADS:-2}
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/paddle-models:/root/.paddlex
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+    networks: [private]
+
+  funasr:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.funasr
+    restart: unless-stopped
+    environment:
+      FUNASR_DEVICE: cpu
+      FUNASR_OFFLINE_DEVICE: cpu
+      FUNASR_STREAMING_DEVICE: cpu
+      FUNASR_CPU_THREADS: ${FUNASR_CPU_THREADS:-4}
+      FUNASR_BATCH_SIZE_S: ${FUNASR_BATCH_SIZE_S:-20}
+      FUNASR_PRELOAD_MODELS: "1"
+      MODELSCOPE_CACHE: /models/modelscope
+      HF_HOME: /models/huggingface
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/funasr-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10095/ready')"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    networks: [private]
+
+  faster-whisper:
+    build:
+      context: ../faster-whisper-service
+    restart: unless-stopped
+    environment:
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-base}
+      FASTER_WHISPER_DEVICE: cpu
+      FASTER_WHISPER_COMPUTE_TYPE: int8
+      FASTER_WHISPER_LANGUAGE: ${FASTER_WHISPER_LANGUAGE:-zh}
+      FASTER_WHISPER_CPU_THREADS: ${FASTER_WHISPER_CPU_THREADS:-2}
+      FASTER_WHISPER_IDLE_SECONDS: ${FASTER_WHISPER_IDLE_SECONDS:-60}
+      HF_HOME: /models/huggingface
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/faster-whisper-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10096/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+    networks: [private]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3100
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/modelscope/runtime.env}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
+      OCR_SERVICE_URL: http://ocr:8090
+      FUNASR_BASE_URL: http://funasr:10095/transcribe
+      FUNASR_TIMEOUT_MS: ${FUNASR_TIMEOUT_MS:-120000}
+      FASTER_WHISPER_BASE_URL: http://faster-whisper:10096/transcribe
+      FASTER_WHISPER_TIMEOUT_MS: ${FASTER_WHISPER_TIMEOUT_MS:-120000}
+      RESUME_VIRUS_SCAN_ENABLED: "false"
+      ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to the ModelScope proxy origin in deploy/modelscope/runtime.env}
+      AI_CONFIG_ENCRYPTION_KEY: ${AI_CONFIG_ENCRYPTION_KEY:?Set AI_CONFIG_ENCRYPTION_KEY in deploy/modelscope/runtime.env}
+      PAYMENT_ENCRYPTION_KEY: ${PAYMENT_ENCRYPTION_KEY:-}
+      AUTH_OTP_HMAC_SECRET: ${AUTH_OTP_HMAC_SECRET:?Set AUTH_OTP_HMAC_SECRET in deploy/modelscope/runtime.env}
+      AUTH_MFA_ENCRYPTION_KEY: ${AUTH_MFA_ENCRYPTION_KEY:?Set AUTH_MFA_ENCRYPTION_KEY in deploy/modelscope/runtime.env}
+      AUTH_MFA_EXEMPT_EMAILS: ${AUTH_MFA_EXEMPT_EMAILS:-admin@smartrecruit.local}
+      AUTH_TRUSTED_PROXY_IPS: ${AUTH_TRUSTED_PROXY_IPS:-172.16.0.0/12}
+      TURNSTILE_ENABLED: ${TURNSTILE_ENABLED:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      ENV_FILE_PATH: /config/runtime.env
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/object-storage:/data/object-storage
+      - ./modelscope/runtime.env:/config/runtime.env
+    depends_on:
+      postgres: { condition: service_healthy }
+      ocr: { condition: service_healthy }
+      funasr: { condition: service_started }
+      faster-whisper: { condition: service_started }
+    networks: [private]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["node", "apps/worker/dist/src/index.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-smartrecruit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/modelscope/runtime.env}
+      PGDATABASE: ${POSTGRES_DB:-smartrecruit}
+      WORKER_DB_POLL: "true"
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: 4001
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+      RECRUITING_QUARANTINE_ROOT: /data/object-storage
+      RESUME_VIRUS_SCAN_ENABLED: "false"
+      ENV_FILE_PATH: /config/runtime.env
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/object-storage:/data/object-storage
+      - ./modelscope/runtime.env:/config/runtime.env
+    depends_on:
+      postgres: { condition: service_healthy }
+      api: { condition: service_started }
+    networks: [private]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web-nginx
+      args:
+        VITE_ROUTER_MODE: hash
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-7860}:7860"
+    depends_on:
+      api: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7860/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [private]
+
+  clamav:
+    profiles: ["virus-scan"]
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - ${SMARTRECRUIT_DATA_ROOT:-/mnt/workspace/smartrecruit-data}/clamav:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 2>/dev/null | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+    networks: [private]
+
+networks:
+  private: {}
