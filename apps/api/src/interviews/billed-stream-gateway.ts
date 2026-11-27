@@ -77,7 +77,8 @@ export function attachBilledStreamGateway(server: Server, config: AppConfig, dep
       await checkAccess()
       authenticated = true
       stage='configuration'
-      const env=await (dependencies.resolveEnv ? dependencies.resolveEnv(org) : new EnterpriseAiStore(pool).runtimeEnv(org)),connectionId=randomUUID()
+      // WebSocket upgrades do not pass through the HTTP tenant-context middleware.
+      const env=await scoped(() => dependencies.resolveEnv ? dependencies.resolveEnv(org) : new EnterpriseAiStore(pool).runtimeEnv(org)),connectionId=randomUUID()
       const endpoint=new URL(dependencies.upstreamUrl || process.env.FUNASR_STREAM_URL || process.env.FUNASR_BASE_URL || 'http://127.0.0.1:10095')
       endpoint.protocol=['https:','wss:'].includes(endpoint.protocol)?'wss:':'ws:';endpoint.pathname='/stream';endpoint.search=''
       stage='admission'

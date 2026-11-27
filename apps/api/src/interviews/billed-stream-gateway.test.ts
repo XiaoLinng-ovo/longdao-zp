@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import { createServer, request } from 'node:http'
 import { test } from 'node:test'
 import { once } from 'node:events'
+import { randomBytes } from 'node:crypto'
 import { WebSocket, WebSocketServer } from 'ws'
+import { encryptApiKey } from '@smartrecruit-pro/enterprise-ai'
 import type { Pool } from 'pg'
 import { loadConfig } from '../config.js'
 import { attachBilledStreamGateway } from './billed-stream-gateway.js'
+import { currentTenantContext, organizationSchemaName } from '../db/tenant-context.js'
 
 test('流式连接在企业结构缺失时拒绝，不查询历史业务表或认领额度', async () => {
   const previous = process.env.TENANT_SCHEMA_ROUTING
@@ -84,6 +87,61 @@ function streamPool() {
   }
   return { calls, pool: { query, connect: async () => ({ query, release() {} }), end: async () => { assert.fail('不得关闭调用方持有的池') } } as unknown as Pool }
 }
+test('configured enterprise models resolve in the authenticated tenant for both audio sources and concurrent enterprises', { timeout: 10000 }, async () => {
+  const previous = { routing: process.env.TENANT_SCHEMA_ROUTING, key: process.env.AI_CONFIG_ENCRYPTION_KEY }
+  const master = randomBytes(32).toString('base64')
+  Object.assign(process.env, { TENANT_SCHEMA_ROUTING: 'on', AI_CONFIG_ENCRYPTION_KEY: master })
+  const organizations = ['11111111-1111-4111-8111-111111111111', '33333333-3333-4333-8333-333333333333']
+  const readScopes: { requested: string; actual: string | undefined }[] = []
+  const fake = streamPool(), base = fake.pool.query.bind(fake.pool)
+  fake.pool.query = (async (sql: string, values?: unknown[]) => {
+    const org = String(values?.[0])
+    if (sql.includes('organization_schema_structure_ready')) return { rows: [{ schema_name: organizationSchemaName(org), status: 'ready', structure_ready: true }] }
+    if (sql.includes('own.self_service_enabled')) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const tenant = currentTenantContext()
+      readScopes.push({ requested: org, actual: tenant?.organizationId })
+      return { rows: [{ id: org, ai_model_source: 'enterprise', use_platform_ai: false,
+        own_self_service_enabled: tenant?.organizationId === org,
+        own_api_key_ciphertext: tenant?.organizationId === org ? encryptApiKey('synthetic-' + org, org, master) : null,
+        own_model: 'synthetic-' + org }] }
+    }
+    return base(sql)
+  }) as Pool['query']
+  const upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  await once(upstream, 'listening')
+  const upstreamAddress = upstream.address(); assert.ok(upstreamAddress && typeof upstreamAddress !== 'string')
+  upstream.on('connection', remote => remote.send(JSON.stringify({ type: 'status', status: 'ready' })))
+  const server = createServer(), clients: WebSocket[] = []
+  const stop = attachBilledStreamGateway(server, loadConfig(), {
+    pool: fake.pool,
+    authenticate: async context => { await authenticate!(context); context.auth!.user.workspaceId = String(context.req.headers['x-test-organization']) },
+    upstreamUrl: 'ws://127.0.0.1:' + upstreamAddress.port,
+  })
+  try {
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address(); assert.ok(address && typeof address !== 'string')
+    await Promise.all(organizations.flatMap(org => ['microphone', 'meeting'].map(async source => {
+      const client = new WebSocket('ws://127.0.0.1:' + address.port + streamPath.replace('source=microphone', 'source=' + source), {
+        origin: 'http://localhost:5174', headers: { 'x-test-organization': org },
+      })
+      clients.push(client); client.on('error', () => undefined)
+      const [raw] = await once(client, 'message')
+      const message = JSON.parse(String(raw))
+      assert.equal(message.status, 'ready', JSON.stringify(message))
+    })))
+    assert.equal(readScopes.length, 4)
+    assert.ok(readScopes.every(scope => scope.requested === scope.actual))
+    assert.equal(currentTenantContext(), undefined)
+  } finally {
+    clients.forEach(client => client.terminate())
+    await stop()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await new Promise<void>(resolve => upstream.close(() => resolve()))
+    if (previous.routing === undefined) delete process.env.TENANT_SCHEMA_ROUTING; else process.env.TENANT_SCHEMA_ROUTING = previous.routing
+    if (previous.key === undefined) delete process.env.AI_CONFIG_ENCRYPTION_KEY; else process.env.AI_CONFIG_ENCRYPTION_KEY = previous.key
+  }
+})
 test('关闭等待鉴权完成，立即断开待升级连接，不再认领租约', async () => {
   let finish!: () => void, entered!: () => void
   const started = new Promise<void>(resolve => { entered = resolve })
