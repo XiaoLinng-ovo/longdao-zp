@@ -299,7 +299,7 @@ export function transcriptRoleReviewWarning(
   const unresolved = unresolvedTranscriptTurns(manifest, turns)
   if (!unresolved.length) return undefined
   const unresolvedChars = unresolved.reduce((sum, turn) => sum + turn.text.replace(/\s/gu, '').length, 0)
-  return `角色复核未完成：本场存在多人混合或来源未明确的音轨，仍有 ${unresolved.length} 段（约 ${unresolvedChars} 字）缺少可靠的角色依据，暂不评分；请回听存疑片段并人工确认角色后重新生成总结。`
+  return `角色复核未完成：仍有 ${unresolved.length} 段（约 ${unresolvedChars} 字）缺少可靠的角色依据，仅这些片段暂不评分；总结继续依据可靠发言生成。可在总结后回听并选择是否调整角色，调整后可重新评分。`
 }
 
 /** Multiple acoustic routes are merged only when their clocks and texts agree. */

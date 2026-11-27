@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { RepositoryClient, RepositoryPool } from './types.js'
 import { NormalizedRecruitingRepository } from './postgres-repository.js'
+import { prepareOfferSalary } from '../offer-salary.js'
 
 const candidateRow = {
   id: '11111111-1111-4111-8111-111111111111', candidate_no: 'CAN-8821', name: '王思远', email: null, phone: null,
@@ -574,6 +575,29 @@ describe('candidate deletion SQL contract', () => {
 })
 
 describe('offer template SQL contract', () => {
+  it('serializes regular salary without a stale or null initial salary', async () => {
+    const id = '88888888-8888-4888-8888-888888888888'
+    const baseSalary = { amount: 10000, currency: 'CNY' }
+    const salary = prepareOfferSalary({ probationSalary: null, templateFields: { probationSalaryMonths: '0', formalSalaryStartMonth: '1' } }, {
+      employmentType: 'full_time', templateFields: { probationDuration: '3个月', probationSalaryMonths: '1', formalSalaryStartMonth: '2' },
+      compensation: { baseSalary, probationSalary: { amount: 8000, currency: 'CNY' } },
+    })
+    const compensation = { baseSalary: salary.baseSalary, ...(salary.probationSalary ? { probationSalary: salary.probationSalary } : {}) }
+    const row = { id, offer_id: id, version: 2, position_title: 'Engineer', department_id: candidateRow.id,
+      employment_type: 'full_time', start_date: null, reporting_location: null, invoice_title: null, tax_number: null,
+      compensation, template_fields: salary.templateFields, benefits: [], materials: [], content: '<p>Original terms</p>', created_at: '2026-11-27T00:00:00Z' }
+    const pool = new FakePool([], [[], [{ id }], [{ id: candidateRow.id }], [{ next: 2 }], [row], []])
+    const saved = await new NormalizedRecruitingRepository(pool).createOfferVersion({ offerId: id, positionTitle: row.position_title,
+      departmentId: candidateRow.id, employmentType: 'full_time', templateFields: salary.templateFields, compensation, content: row.content })
+    const insert = pool.client.calls.find(call => call.sql.startsWith('INSERT INTO offer_versions'))!
+    assert.deepEqual(JSON.parse(String(insert.values[10])), { baseSalary })
+    assert.deepEqual(JSON.parse(String(insert.values[14])), { probationDuration: '3个月', probationSalaryMonths: '0', formalSalaryStartMonth: '1' })
+    assert.deepEqual(saved.compensation, { baseSalary })
+    assert.equal(saved.templateFields?.probationSalaryMonths, '0')
+    assert.ok(!pool.client.calls.some(call => call.sql.startsWith('UPDATE offer_versions')))
+    assert.equal(pool.client.calls.at(-1)?.sql, 'COMMIT')
+  })
+
   it('persists and reads Offer invoice details with aligned SQL placeholders', async () => {
     const id = '88888888-8888-4888-8888-888888888888'
     const row = {

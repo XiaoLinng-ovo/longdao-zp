@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import InterviewDetailPage from './InterviewDetailPage.vue'
 import { completeInterview, getInterview, loadInterviews } from '../api'
 import { apiClient } from '../../../shared/api'
+vi.mock('../../auth/session', () => ({ authSession: { user: { id: 'lead-user' }, workspaces: [] } }))
 
 vi.mock('../api', async (importOriginal) => ({
   ...await importOriginal<typeof import('../api')>(),
@@ -65,7 +66,7 @@ describe('Interview detail conclusion', () => {
     vi.mocked(getInterview).mockResolvedValue({
       id: 'interview-1', code: 'INT-1', title: '商务面试', applicationId: 'app-1', round: 1,
       type: 'technical', status: 'scheduled', timezone: 'Asia/Shanghai',
-      participants: [], feedbackStatus: 'pending', feedback: [],
+      participants: [{ userId: 'lead-user', role: 'interviewer', lead: true, required: true }], feedbackStatus: 'pending', feedback: [],
       application: { id: 'app-1', code: 'APP-1', candidateId: 'candidate-1', jobId: 'job-1', status: 'interviewing' },
       createdAt: '2026-10-21T00:00:00Z', updatedAt: '2026-10-21T00:00:00Z',
       ...overrides,
@@ -77,7 +78,7 @@ describe('Interview detail conclusion', () => {
     }) as never)
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/interviews/:id?', component: { template: '<div />' } }],
+      routes: [{ path: '/interviews/:id?', component: { template: '<div />' } }, { path: '/offers', component: { template: '<div />' } }],
     })
     await router.push('/interviews/interview-1')
     await router.isReady()
@@ -89,6 +90,7 @@ describe('Interview detail conclusion', () => {
     await flush()
     button('完成面试').click()
     await flush()
+    return router
   }
 
   it('shows completion failures inside the dialog and lets the user retry', async () => {
@@ -146,7 +148,7 @@ describe('Interview detail conclusion', () => {
     [{ round: 2, stage: 'final' }, 'cancelled', '已取消面试'],
   ] as const)('submits %s through the single completion endpoint and refreshes', async (overrides, outcome, label) => {
     vi.mocked(completeInterview).mockResolvedValue({})
-    await mount(overrides)
+    const router = await mount(overrides)
     await chooseOutcome(outcome)
     button('确认完成', dialog()).click()
     await flush()
@@ -154,8 +156,9 @@ describe('Interview detail conclusion', () => {
     expect(completeInterview).toHaveBeenCalledTimes(1)
     expect(completeInterview).toHaveBeenCalledWith('interview-1', outcome)
     expect(root.querySelector('[role="dialog"]')).toBeNull()
-    expect(root.textContent).toContain(`面试已完成：${label}`)
-    expect(getInterview).toHaveBeenCalledTimes(2)
+    if (outcome === 'offer') await vi.waitFor(() => expect(router.currentRoute.value.query).toEqual({ createApplicationId: 'app-1' }))
+    else expect(root.textContent).toContain(`面试已完成：${label}`)
+    expect(getInterview).toHaveBeenCalledTimes(outcome === 'offer' ? 1 : 2)
   })
 
   it('locks the outcome and backdrop while submitting and prevents duplicate requests', async () => {
@@ -178,5 +181,23 @@ describe('Interview detail conclusion', () => {
     resolve({})
     await flush()
     expect(root.querySelector('[role="dialog"]')).toBeNull()
+  })
+  it('navigates with the exact application after a successful final pass', async () => {
+    vi.mocked(completeInterview).mockResolvedValue({})
+    const router = await mount({ round: 2, stage: 'final' })
+    button('确认完成', dialog()).click(); await flush()
+    expect(router.currentRoute.value.path).toBe('/offers')
+    expect(router.currentRoute.value.query).toEqual({ createApplicationId: 'app-1' })
+  })
+  it('retains the saved conclusion and offers navigation retry when a guard blocks navigation', async () => {
+    vi.mocked(completeInterview).mockResolvedValue({})
+    const router = await mount({ round: 2, stage: 'final' })
+    const remove = router.beforeEach(to => to.path === '/offers' ? false : true)
+    button('确认完成', dialog()).click(); await flush()
+    expect(root.textContent).toContain('面试结论已保存')
+    expect(root.querySelector('[role="dialog"]')).toBeNull()
+    remove(); button('前往 Offer 管理').click(); await flush()
+    expect(router.currentRoute.value.path).toBe('/offers')
+    expect(completeInterview).toHaveBeenCalledTimes(1)
   })
 })

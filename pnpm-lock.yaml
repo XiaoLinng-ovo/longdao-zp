@@ -18,6 +18,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@smartrecruit-pro/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@smartrecruit-pro/database-readiness':
         specifier: workspace:*
         version: link:../../packages/database-readiness
@@ -156,6 +159,9 @@ importers:
       '@lucide/vue':
         specifier: ^1.61.0
         version: 1.61.0(vue@3.5.42(typescript@5.9.3))
+      '@smartrecruit-pro/contracts':
+        specifier: workspace:*
+        version: link:../packages/contracts
       '@tiptap/core':
         specifier: 3.32.2
         version: 3.32.2(@tiptap/pm@3.32.2)

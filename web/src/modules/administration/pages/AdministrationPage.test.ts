@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import AdministrationPage from './AdministrationPage.vue'
+vi.mock('../components/AiConfigurationDiagnostics.vue',()=>({default:{template:'<div aria-label="模型生效诊断" />'}}))
 import { listAdminChecks, loadWorkflowEvents, listAdminUsers, listAdminRoles, listAdminDepartments, createAdminDepartment, updateAdminDepartment, deleteAdminDepartment, getAdminSettings, updateAdminSettings, getDingTalkSettings, updateDingTalkSettings, getResumeVirusScanSetting, updateResumeVirusScanSetting, getAiSettings, saveAiSettings, testAiConnection, getAiSharingSettings, updateAiSharingSettings, updateAdminUser, listFailedAnalysisTasks, listAdminAuditLogs, getChannelSettings, listAiPromptSkills, listAccountOrganizations, createAdminUser } from '../api'
 
 vi.mock('../api', () => ({ listAdminChecks: vi.fn(), loadWorkflowEvents: vi.fn(), listAdminUsers: vi.fn(), listAdminRoles: vi.fn(), listAdminDepartments: vi.fn(), createAdminDepartment: vi.fn(), updateAdminDepartment: vi.fn(), deleteAdminDepartment: vi.fn(), getAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), getDingTalkSettings: vi.fn(), updateDingTalkSettings: vi.fn(), getResumeVirusScanSetting: vi.fn(), updateResumeVirusScanSetting: vi.fn(), getAiSettings: vi.fn(), saveAiSettings: vi.fn(), testAiConnection: vi.fn(), getAiSharingSettings: vi.fn(), updateAiSharingSettings: vi.fn(), updateAdminUser: vi.fn(), listFailedAnalysisTasks: vi.fn(), listAdminAuditLogs: vi.fn(), getChannelSettings: vi.fn(), updateChannelSettings: vi.fn(), testChannelConnection: vi.fn(), listAiPromptSkills: vi.fn(), createAiPromptSkill: vi.fn(), updateAiPromptSkill: vi.fn(), deleteAiPromptSkill: vi.fn(), listAccountOrganizations: vi.fn(), createAdminUser: vi.fn() }))
@@ -130,7 +131,13 @@ describe('管理后台页面', () => {
     await mountAdmin('users')
     expect(root!.textContent).toContain('用户与角色')
     expect(root!.textContent).toContain('admin@example.com')
-    expect(root!.textContent).toContain('系统管理员')
+    expect(root!.querySelector('[aria-label="用户账号类型"]')).toBeNull()
+    expect([...root!.querySelectorAll('thead th')].map(item => item.textContent)).toEqual(['用户', '部门', '状态', '操作'])
+    vi.mocked(updateAdminUser).mockResolvedValue({ id: 'u1', email: 'admin@example.com', displayName: '管理员', role: 'admin', departmentCode: 'HQ', isActive: true, lastLoginAt: null, createdAt: '2026-09-01T00:00:00Z' })
+    const saveButton = [...root!.querySelectorAll('button')].find(item => item.textContent === '保存')!
+    saveButton.click()
+    await flush()
+    expect(updateAdminUser).toHaveBeenCalledWith('u1', { displayName: '管理员', isActive: true, departmentCode: 'HQ' })
 
     await mountAdmin('settings')
     expect(root!.querySelector<HTMLInputElement>('#setting-timezone')?.value).toBe('Asia/Shanghai')

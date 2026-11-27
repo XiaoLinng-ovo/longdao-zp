@@ -1,13 +1,36 @@
 import assert from 'node:assert/strict'
 
 import { describe, it } from 'node:test'
-import { describeBaseUrlHost, describeFetchFailure, readAiSettings, testAiConnection } from './ai-settings.js'
+import { describeBaseUrlHost, describeFetchFailure, readAiSettings, testAiConnection, testAiGeneration } from './ai-settings.js'
 
 import { loadInterviewAnswerAnalyzerConfig } from '../interviews/answer-analyzer.js'
 import { loadInterviewQuestionGeneratorConfig } from '../interviews/question-generator.js'
 import { loadQuestionSheetGeneratorConfig } from '../interviews/question-sheet-generator.js'
 import { loadJobDescriptionGeneratorConfig } from '../recruiting/job-description-generator.js'
 import { loadJobSpecGeneratorConfig } from '../recruiting/job-spec-generator.js'
+
+describe('persisted AI generation probe',()=>{
+  const env={OPENAI_BASE_URL:'https://provider.example/v1',OPENAI_API_KEY:'synthetic-private-secret',OPENAI_MODEL:'model-a',OPENAI_TIMEOUT_MS:'5000'}
+  it('requires real generated content and never returns provider text or credentials',async()=>{
+    const result=await testAiGeneration(env,async(url,init)=>{
+      assert.equal(String(url),'https://provider.example/v1/chat/completions');assert.equal(init?.redirect,'error')
+      assert.equal(JSON.parse(String(init?.body)).model,'model-a')
+      return new Response(JSON.stringify({choices:[{message:{content:'synthetic-private-secret'}}]}))
+    })
+    assert.equal(result.ok,true);assert.equal(JSON.stringify(result).includes('synthetic-private-secret'),false)
+    for(const payload of [{data:[{id:'model-a'}]},{choices:[]},{choices:[{message:{content:''}}]}]){
+      assert.equal((await testAiGeneration(env,async()=>new Response(JSON.stringify(payload)))).code,'AI_PROVIDER_INVALID_RESPONSE')
+    }
+  })
+  it('does not leak error bodies or exception messages',async()=>{
+    assert.equal((await testAiGeneration(env,async()=>new Response('synthetic-private-secret',{status:401}))).code,'AI_PROVIDER_HTTP_ERROR')
+    const result=await testAiGeneration(env,async()=>{throw new Error('synthetic-private-secret')})
+    assert.equal(result.code,'AI_PROVIDER_UNAVAILABLE');assert.equal(JSON.stringify(result).includes('synthetic-private-secret'),false)
+    let called=false
+    assert.equal((await testAiGeneration({},async()=>{called=true;return new Response('{}')})).code,'PLATFORM_AI_NOT_CONFIGURED')
+    assert.equal(called,false)
+  })
+})
 
 describe('database-only AI configuration', () => {
   it('never borrows legacy process model settings when a database configuration is omitted', async () => {

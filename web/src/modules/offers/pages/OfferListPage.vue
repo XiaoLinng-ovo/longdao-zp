@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { offerSalaryVariables } from '@smartrecruit-pro/contracts'
 import { useRouter } from 'vue-router'
 import {
   createOffer,
@@ -32,6 +33,8 @@ import OfferTable from '../components/OfferTable.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
 import { bindOfferContent, synchronizeOfferContent } from '../utils/offerContent'
 import OfferTemplateFields from '../components/OfferTemplateFields.vue'
+import OfferSalaryFields from '../components/OfferSalaryFields.vue'
+import { salaryFormError, salaryPayload } from '../utils/salary'
 import { additionalOfferVariables, offerTemplateFieldValues, restoreOfferTemplateFields, type OfferTemplateFields as TemplateFields } from '../utils/templateFields'
 import { hasVisibleRichText, normalizeRichHtml, normalizeReportingLocationTemplate, pinOfferEmailContent, renderHtmlTemplate } from '../utils/richText'
 
@@ -77,7 +80,7 @@ const createForm = ref({
   reportingLocation: '',
   invoiceTitle: '',
   taxNumber: '',
-  templateFields: {} as TemplateFields,
+  templateFields: { probationSalaryMonths: '0', formalSalaryStartMonth: '1' } as TemplateFields,
   probationSalaryAmount: 0,
   baseSalaryAmount: 0,
   currency: 'CNY',
@@ -94,8 +97,14 @@ const createForm = ref({
 const materialsExpanded = ref(false)
 const extraMaterialOptions = ref<string[]>([])
 const createContentManuallyEdited = ref(false)
+const salaryBodyReviewRequired = ref(false)
+const salaryBodyReviewed = ref(false)
+watch(() => JSON.stringify([createForm.value.templateFields.probationDuration, createForm.value.templateFields.probationSalaryMonths,
+  createForm.value.templateFields.formalSalaryStartMonth, createForm.value.baseSalaryAmount, createForm.value.probationSalaryAmount, createForm.value.employmentType]), () => {
+  if (showCreate.value && createContentManuallyEdited.value) { salaryBodyReviewRequired.value = true; salaryBodyReviewed.value = false }
+}, { flush: 'sync' })
 let createDraftKey = ''
-const createDrafts = new Map<string, { form: typeof createForm.value; manuallyEdited: boolean; expanded: boolean; extraMaterialOptions: string[] }>()
+const createDrafts = new Map<string, { form: typeof createForm.value; manuallyEdited: boolean; expanded: boolean; extraMaterialOptions: string[]; salaryReviewRequired: boolean }>()
 const templateVariables = [
   { value: '{{candidateName}}', label: '候选人姓名' },
   { value: '{{入职材料}}', label: '入职材料' },
@@ -107,8 +116,8 @@ const templateVariables = [
   { value: '{{报到地点}}', label: '报到地点' },
   { value: '{{发票抬头}}', label: '发票抬头' },
   { value: '{{企业税号}}', label: '企业税号' },
-  { value: '{{probationSalary}}', label: '试用期工资' },
-  { value: '{{baseSalary}}', label: '转正后工资' },
+  { value: '{{probationSalary}}', label: '初期月薪（兼容旧模板）' },
+  { value: '{{baseSalary}}', label: '正常月薪' },
   { value: '{{bonus}}', label: '奖金' },
   { value: '{{benefits}}', label: '福利' },
 ]
@@ -205,6 +214,7 @@ function templateValues(): Record<string, string> {
   const materials = serializeMaterials(createForm.value.materials, createForm.value.bankName, createForm.value.otherMaterial, createForm.value.extraMaterials)
   return {
     ...offerTemplateFieldValues(createForm.value.templateFields),
+    ...offerSalaryVariables(createForm.value.templateFields, createForm.value.baseSalaryAmount, createForm.value.probationSalaryAmount),
     candidateName: application?.candidateName ?? '',
     jobTitle: createForm.value.positionTitle || application?.jobTitle || '',
     department: department?.name ?? job?.department ?? '',
@@ -239,14 +249,17 @@ function templateValues(): Record<string, string> {
 
 function applyOfferTemplate(templateId = createForm.value.templateId) {
   const template = offerTemplates.value.find((item) => item.id === templateId && item.isActive)
-  if (!template) return
-  createForm.value.templateId = template.id
-  createForm.value.content = bindOfferContent(normalizeReportingLocationTemplate(template.content), templateValues())
+  if (!template && templateId) return
+  const content = template?.content ?? '<p>{{candidateName}}，您好：</p><h2>录用通知</h2><p>岗位：{{jobTitle}}；部门：{{department}}。</p><p>报到日期：{{报到日期}}；报到时间：{{报到时间}}；报到地点：{{报到地点}}。</p><p>薪资安排：{{薪资安排说明}}。</p><p>福利：{{benefits}}</p><p>入职材料：{{入职材料}}</p>'
+  createForm.value.templateId = template?.id ?? ''
+  createForm.value.content = bindOfferContent(normalizeReportingLocationTemplate(content), templateValues())
   createContentManuallyEdited.value = false
+  salaryBodyReviewRequired.value = false
+  salaryBodyReviewed.value = false
 }
 
 function applyOfferTemplateIfClean() {
-  if (createForm.value.templateId && !createContentManuallyEdited.value) applyOfferTemplate()
+  if (!createContentManuallyEdited.value) applyOfferTemplate()
   else if (createContentManuallyEdited.value) createForm.value.content = synchronizeOfferContent(createForm.value.content, templateValues())
 }
 
@@ -261,6 +274,9 @@ function prefillCreateApplication(applicationId: string) {
 }
 
 function resetCreateForm() {
+  createContentManuallyEdited.value = false
+  salaryBodyReviewRequired.value = false
+  salaryBodyReviewed.value = false
   createForm.value = {
     applicationId: '',
     jobId: '',
@@ -271,7 +287,7 @@ function resetCreateForm() {
     reportingLocation: '',
   invoiceTitle: '',
   taxNumber: '',
-  templateFields: {} as TemplateFields,
+  templateFields: { probationSalaryMonths: '0', formalSalaryStartMonth: '1' } as TemplateFields,
     probationSalaryAmount: 0,
     baseSalaryAmount: 0,
     currency: 'CNY',
@@ -301,16 +317,14 @@ async function openCreate(application?: ApiApplication, source?: ApiOfferVersion
   try {
     const [eligible, templates] = await Promise.all([loadApplicationsForOffer(true), listOfferTemplates().catch(() => []), ensureApplications()])
     if (request === eligibilityRequest) {
-      const selectedApplication = application?.id ? applications.value.find((item) => item.id === application.id) : undefined
-      eligibleApplications.value = selectedApplication && !eligible.some((item) => item.id === selectedApplication.id)
-        ? [...eligible, selectedApplication]
-        : eligible
+      eligibleApplications.value = eligible
       offerTemplates.value = templates
       createForm.value.templateId = templates.find((item) => item.isActive && item.isDefault)?.id ?? ''
       const draft = createDrafts.get(draftKey)
       if (draft) {
         createForm.value = { ...draft.form, templateFields: { ...draft.form.templateFields }, materials: [...draft.form.materials], extraMaterials: [...draft.form.extraMaterials] }
         createContentManuallyEdited.value = draft.manuallyEdited
+        salaryBodyReviewRequired.value = draft.salaryReviewRequired
         materialsExpanded.value = draft.expanded
         extraMaterialOptions.value = [...draft.extraMaterialOptions]
       } else if (source) {
@@ -358,7 +372,7 @@ async function openRecreate(row: OfferRow) {
 
 function closeCreate() {
   if (creating.value) return
-  createDrafts.set(createDraftKey, { form: { ...createForm.value, templateFields: { ...createForm.value.templateFields }, materials: [...createForm.value.materials], extraMaterials: [...createForm.value.extraMaterials] }, manuallyEdited: createContentManuallyEdited.value, expanded: materialsExpanded.value, extraMaterialOptions: [...extraMaterialOptions.value] })
+  createDrafts.set(createDraftKey, { form: { ...createForm.value, templateFields: { ...createForm.value.templateFields }, materials: [...createForm.value.materials], extraMaterials: [...createForm.value.extraMaterials] }, manuallyEdited: createContentManuallyEdited.value, expanded: materialsExpanded.value, extraMaterialOptions: [...extraMaterialOptions.value], salaryReviewRequired: salaryBodyReviewRequired.value })
   showCreate.value = false
   eligibilityRequest++
 }
@@ -463,8 +477,9 @@ async function submitCreate() {
   if (!eligibleApplications.value.some(item => item.id === form.applicationId)) { error.value = '请选择第二轮复试已通过的申请'; return }
   if (!form.positionTitle.trim()) { error.value = '请填写职位名称'; return }
   if (!form.departmentId.trim()) { error.value = '请填写部门'; return }
-  if (form.employmentType === 'full_time' && !(form.probationSalaryAmount > 0)) { error.value = '请填写试用期工资'; return }
-  if (!(form.baseSalaryAmount > 0)) { error.value = form.employmentType === 'full_time' ? '请填写转正期工资' : '请填写实习工资'; return }
+  const salaryError = salaryFormError(form.employmentType, form.templateFields, form.baseSalaryAmount, form.probationSalaryAmount)
+  if (salaryError) { error.value = salaryError; return }
+  if (salaryBodyReviewRequired.value && !salaryBodyReviewed.value) { error.value = '请核对手写正文中的薪资安排后再保存'; return }
   if (form.materials.includes('other') && !form.otherMaterial.trim()) { error.value = '请填写其他入职材料'; return }
   if (!hasVisibleRichText(form.content)) { error.value = '请填写 Offer 内容'; return }
 
@@ -480,8 +495,7 @@ async function submitCreate() {
       reportingLocation: form.reportingLocation.trim() || undefined,
       invoiceTitle: form.invoiceTitle.trim(),
       taxNumber: form.taxNumber.trim(),
-      templateFields: form.templateFields,
-      probationSalary: form.employmentType === 'full_time' ? { amount: form.probationSalaryAmount, currency: 'CNY' } : undefined,
+      ...salaryPayload(form.employmentType, form.templateFields, form.probationSalaryAmount),
       baseSalary: { amount: form.baseSalaryAmount, currency: 'CNY' },
       bonus: form.bonusAmount > 0 ? { amount: form.bonusAmount, currency: 'CNY' } : undefined,
       equity: form.equity.trim() || undefined,
@@ -531,28 +545,48 @@ function openRevise(row: OfferRow) {
 }
 
 const templatePreviewHtml = computed(() => renderHtmlTemplate(pinOfferEmailContent(templateForm.value.content || templateForm.value.name), {
+  ...offerTemplateFieldValues({ probationDuration: '3个月', probationSalaryMonths: '1', formalSalaryStartMonth: '2' }),
+  ...offerSalaryVariables({ probationDuration: '3个月', probationSalaryMonths: '1', formalSalaryStartMonth: '2' }, 15000, 12000),
   candidateName: '候选人姓名', '候选人姓名': '候选人姓名', '称谓': '您好', jobTitle: '岗位名称', department: '所属部门', employmentType: '全职', startDate: '2026-11-02', reportDate: '2026-11-02',
   reportingLocation: '杭州市余杭区城投未来之星 C2 幢 21 楼', '报到日期': '2026-11-02', '报到地点': '杭州市余杭区城投未来之星 C2 幢 21 楼',
   invoiceTitle: '发票抬头', '发票抬头': '发票抬头', taxNumber: '企业税号', '企业税号': '企业税号',
   probationSalary: '12,000', baseSalary: '15,000', bonus: '2,000', benefits: '五险一金、带薪年假', '入职材料': '1. 身份证；\n2. 招商银行工资卡；', companyName: '公司名称',
 }))
 
-onMounted(async () => {
-  await refresh()
+let routeReady = false
+let routeDisposed = false
+let routeRequest = 0
+async function handleOfferRoute() {
+  const request = ++routeRequest
   const recreateOfferId = router.currentRoute.value.query.recreateOfferId
   if (typeof recreateOfferId === 'string') {
     await openRecreate({ entityId: recreateOfferId } as OfferRow)
-    await router.replace({ path: '/offers' })
+    if (request !== routeRequest) return
+    const query = { ...router.currentRoute.value.query }; delete query.recreateOfferId
+    await router.replace({ path: '/offers', query })
     return
   }
   const applicationId = typeof router.currentRoute.value.query.createApplicationId === 'string'
     ? router.currentRoute.value.query.createApplicationId
     : ''
-  const application = applications.value.find((item) => item.id === applicationId) ?? eligibleApplications.value.find((item) => item.id === applicationId)
-  if (application) {
+  if (!applicationId) return
+  try {
+    const [currentOffers, eligible] = await Promise.all([listOfferContextRows(), loadApplicationsForOffer(true)])
+    if (request !== routeRequest) return
+    const existing = currentOffers.find(item => item.applicationId === applicationId && item.status !== 'cancelled')
+    if (existing) { await router.replace({ name: 'offer-detail', params: { id: existing.entityId } }); return }
+    const application = eligible.find(item => item.id === applicationId)
+    if (!application) { error.value = '该申请不存在、无权访问或尚不符合 Offer 创建条件'; return }
     await openCreate(application)
-    await router.replace({ path: '/offers' })
-  }
+    if (request !== routeRequest) return
+    const query = { ...router.currentRoute.value.query }; delete query.createApplicationId
+    await router.replace({ path: '/offers', query })
+  } catch (cause) { error.value = describeApiFailure(cause, '读取录用申请失败，请刷新重试').message }
+}
+onMounted(async () => { await refresh(); if (routeDisposed) return; routeReady = true; await handleOfferRoute() })
+onUnmounted(() => { routeDisposed = true; routeReady = false; routeRequest++; eligibilityRequest++ })
+watch(() => [router.currentRoute.value.query.createApplicationId, router.currentRoute.value.query.recreateOfferId], () => {
+  if (routeReady) void handleOfferRoute()
 })
 </script>
 
@@ -605,9 +639,10 @@ onMounted(async () => {
       <div class="offer-create-body">
       <div v-if="error" class="error-note">{{ error }}</div>
       <div class="form-grid">
+      <h4 class="offer-form-heading">录用信息</h4>
       <div class="form-field">
         <label>申请</label>
-        <select v-model="createForm.applicationId" :disabled="loadingEligibleApplications || !eligibleApplications.length">
+        <select v-model="createForm.applicationId" :disabled="loadingEligibleApplications || !eligibleApplications.length" @change="prefillCreateApplication(createForm.applicationId)">
           <option value="" disabled>{{ loadingEligibleApplications ? '正在读取申请...' : eligibleApplications.length ? '选择申请' : '暂无可办理的申请' }}</option>
           <option v-for="app in eligibleApplications" :key="app.id" :value="app.id">{{ applicationOptionLabel(app) }}</option>
         </select>
@@ -627,10 +662,11 @@ onMounted(async () => {
           <option value="internship">实习</option>
         </select>
       </div>
+      <h4 class="offer-form-heading">报到安排</h4>
       <div class="form-field"><label>报到地点</label><input v-model="createForm.reportingLocation" maxlength="300" placeholder="请输入候选人报到地点" @input="applyOfferTemplateIfClean" /></div>
       <OfferTemplateFields v-model="createForm.templateFields" :employment-type="createForm.employmentType" @update:modelValue="$nextTick(applyOfferTemplateIfClean)" />
-      <div v-if="createForm.employmentType === 'full_time'" class="form-field"><label>试用期工资（元/月）</label><input v-model.number="createForm.probationSalaryAmount" type="number" min="0" @input="applyOfferTemplateIfClean" /></div>
-      <div class="form-field"><label>{{ createForm.employmentType === 'full_time' ? '转正期工资（元/月）' : '实习工资（元/月）' }}</label><input v-model.number="createForm.baseSalaryAmount" type="number" min="0" @input="applyOfferTemplateIfClean" /></div>
+      <OfferSalaryFields v-model:fields="createForm.templateFields" v-model:base-salary="createForm.baseSalaryAmount" v-model:initial-salary="createForm.probationSalaryAmount" :employment-type="createForm.employmentType" @update:fields="$nextTick(applyOfferTemplateIfClean)" @update:base-salary="$nextTick(applyOfferTemplateIfClean)" @update:initial-salary="$nextTick(applyOfferTemplateIfClean)" />
+      <h4 class="offer-form-heading">福利与材料</h4>
       <div class="form-field"><label>奖金（元，可选）</label><input v-model.number="createForm.bonusAmount" type="number" min="0" @input="applyOfferTemplateIfClean" /></div>
       <div class="form-field"><label>股权（可选）</label><input v-model="createForm.equity" placeholder="如 2000 RSU" /></div>
       <div class="form-field"><label>发票抬头</label><input v-model="createForm.invoiceTitle" maxlength="200" placeholder="请输入发票抬头" @input="applyOfferTemplateIfClean" /></div>
@@ -651,17 +687,19 @@ onMounted(async () => {
            </label>
          </div>
        </details>
+       <h4 class="offer-form-heading">Offer 正文</h4>
        <div class="form-field" style="grid-column:1 / -1">
          <label>Offer 模板</label>
          <div class="template-select-row">
            <select v-model="createForm.templateId" @change="applyOfferTemplate()">
-             <option value="">不使用模板</option>
+             <option value="">基础录用正文</option>
              <option v-for="template in offerTemplates.filter((item) => item.isActive)" :key="template.id" :value="template.id">{{ template.name }}{{ template.isDefault ? '（默认）' : '' }}</option>
            </select>
            <button class="btn btn-ghost btn-compact" type="button" :disabled="!createForm.templateId" @click="applyOfferTemplate()">重新套用</button>
          </div>
        </div>
       <div class="form-field" style="grid-column:1 / -1"><label>Offer 内容</label><RichTextEditor v-model="createForm.content" :variables="templateVariables" :min-height="260" @update:model-value="createContentManuallyEdited = true" /><small v-if="createContentManuallyEdited" class="list-muted">正文已人工调整，上方字段变化不会自动覆盖。</small></div>
+      <label v-if="salaryBodyReviewRequired" class="salary-body-review"><input v-model="salaryBodyReviewed" type="checkbox" />已核对正文中的薪资安排与本次填写一致</label>
       </div>
       </div>
     </div>
@@ -707,6 +745,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.offer-form-heading{grid-column:1 / -1;margin:12px 0 0;padding-bottom:8px;border-bottom:1px solid var(--border,#dbe3ef);font-size:14px}
+.salary-body-review{grid-column:1 / -1;display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6;color:#a34c15}
+.salary-body-review input{width:16px;height:16px;flex:none;margin-top:3px}
 .offer-create-dialog {
   display: flex;
   flex-direction: column;

@@ -1,9 +1,9 @@
-import { EnterpriseAiStore, PlatformAiStore, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
+import { EnterpriseAiStore, PlatformAiStore, PlatformAiMaintenance, EnterpriseAiError, assertAiEndpointAllowed } from '@smartrecruit-pro/enterprise-ai';
 import { randomInt, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashPassword } from '../auth/password.js';
 import { readDingTalkEnvSettings, readResumeVirusScanSetting, updateDingTalkEnvSettings, updateResumeVirusScanSetting, type DingTalkEnvPatch } from './dingtalk-env-settings.js';
-import { testAiConnection, type AiConnectionTestInput, type AiConnectionTestResult, type AiEnvPatch, type AiSettingsResponse } from './ai-settings.js';
+import { testAiConnection, testAiGeneration, type AiConnectionTestInput, type AiConnectionTestResult, type AiEnvPatch, type AiSettingsResponse } from './ai-settings.js';
 import { resolveEnvFilePath } from './env-file.js';
 import { readChannelConnectionInput, readChannelSettings, updateChannelSettings, type ChannelSettings } from '../integrations/channels/settings.js';
 import { createChannelConnector } from '../integrations/channels/registry.js';
@@ -699,6 +699,41 @@ export class AdminService {
    */
   async getAiSettings(): Promise<AiSettingsResponse> {
     return new PlatformAiStore(this.pool).get()
+  }
+
+  async diagnoseAi(organizationId?: string) {
+    return new PlatformAiMaintenance(this.pool).diagnose(organizationId)
+  }
+
+  async testPersistedAiGeneration(organizationId?: string) {
+    const env = organizationId ? await new PlatformAiMaintenance(this.pool).effectiveEnv(organizationId)
+      : await new PlatformAiStore(this.pool).runtimeEnv()
+    return testAiGeneration(env)
+  }
+
+  async importLegacyAi(body: Record<string,unknown>, actorId: string, requestId?: string) {
+    if (body.baseUrl !== undefined && typeof body.baseUrl !== 'string') throw new AdminValidationError('迁移地址无效')
+    const input = {sourceOrganizationId:String(body.sourceOrganizationId ?? ''),sourceDigest:String(body.sourceDigest ?? ''),targetDigest:String(body.targetDigest ?? ''),
+      ...(typeof body.baseUrl === 'string' ? {baseUrl:body.baseUrl} : {})}
+    if (Object.keys(body).some(key => !['sourceOrganizationId','sourceDigest','targetDigest','baseUrl'].includes(key))
+      || !UUID_PATTERN.test(input.sourceOrganizationId ?? '') || !/^[a-f0-9]{64}$/.test(input.sourceDigest ?? '') || !/^[a-f0-9]{64}$/.test(input.targetDigest ?? '')) {
+      throw new AdminValidationError('迁移参数无效，请刷新配置诊断')
+    }
+    const store = new PlatformAiMaintenance(this.pool)
+    const preview = await store.preview(input.sourceOrganizationId,input.baseUrl)
+    if (preview.platformExists) return store.migrate(input,actorId,requestId)
+    if (!preview.canMigrate || preview.sourceDigest !== input.sourceDigest || preview.targetDigest !== input.targetDigest) {
+      throw new EnterpriseAiError('AI_CONFIGURATION_CHANGED','配置已变化或平台已有配置，请刷新后重新核对',409)
+    }
+    const probe = await testAiGeneration(await store.sourceEnv(input.sourceOrganizationId,input.sourceDigest,input.baseUrl))
+    if (!probe.ok) throw new EnterpriseAiError(probe.code ?? 'AI_PROVIDER_UNAVAILABLE','历史配置真实生成测试未通过，未修改平台配置',503)
+    return store.migrate(input,actorId,requestId)
+  }
+
+  async previewLegacyAi(body: Record<string,unknown>) {
+    if (Object.keys(body).some(key => !['sourceOrganizationId','baseUrl'].includes(key)) || typeof body.sourceOrganizationId !== 'string'
+      || body.baseUrl !== undefined && typeof body.baseUrl !== 'string') throw new AdminValidationError('迁移预览参数无效')
+    return new PlatformAiMaintenance(this.pool).preview(body.sourceOrganizationId,body.baseUrl as string | undefined)
   }
 
   async updateAiSettings(patch: AiEnvPatch, actorId: string, requestId?: string): Promise<AiSettingsResponse> {

@@ -90,6 +90,20 @@ test('background recognition reads saved audio and clamps timestamps to the real
   assert.deepEqual(h.retried, [])
 })
 
+test('single-slot audio polling does not claim competing work while its worker is busy', async () => {
+  let release!: () => void, calls = 0
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const stop = startLiveAudioTranscriptionPoll({ async processPending() { calls++; await waiting; return false } }, 10, 1)
+  try { await new Promise(resolve => setTimeout(resolve, 60)); assert.equal(calls, 1) }
+  finally { const closing = stop(); release(); await closing }
+})
+
+test('invalid audio worker capacity is rejected before polling', () => {
+  for (const capacity of [0, 33, NaN, 1.5]) {
+    assert.throws(() => startLiveAudioTranscriptionPoll({ processPending: async () => false }, 10, capacity), /Invalid audio worker concurrency/)
+  }
+})
+
 test('a recognition outage retries without deleting the already saved audio', async () => {
   const error = new FunAsrError('UPSTREAM', 'temporarily offline')
   const h = harness({ transcribeError: error })

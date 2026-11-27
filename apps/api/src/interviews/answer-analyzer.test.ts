@@ -178,4 +178,21 @@ describe('interview answer analyzer', () => {
     assert.equal(calls, 2)
     assert.equal(result.summary, valid.summary)
   })
+  it('returns specific quote validation feedback on a bounded retry without borrowing context evidence', async () => {
+    const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
+    const invalid = { ...valid, scores: [{ ...valid.scores[0], questionQuote: input.question }] }
+    const corrected = { ...valid, scores: [{ ...valid.scores[0], questionQuote: '' }] }
+    const analyzer = createInterviewAnswerAnalyzer({ baseUrl: 'https://llm.example/v1', apiKey: 'key', model: 'model', timeoutMs: 2000 }, async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)))
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(requests.length === 1 ? invalid : corrected) } }] }))
+    })
+    const result = await analyzer.analyze({ ...input, question: '', priorContext: [input.question] })
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0]!.messages.length, 2)
+    const feedback = JSON.parse(requests[1]!.messages[2]!.content) as { validationError: string }
+    assert.ok(feedback.validationError.includes('scores[0].questionQuote'))
+    assert.deepEqual(JSON.parse(requests[1]!.messages[1]!.content), { ...input, question: '', priorContext: [input.question] })
+    assert.equal(result.scores[0]!.questionQuote, '')
+    await assert.rejects(fixture({ ...valid, scores: [{ ...valid.scores[0], questionQuote: ' ' }] }).analyze({ ...input, question: '' }), /questionQuote/)
+  })
 })

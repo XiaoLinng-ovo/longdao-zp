@@ -118,8 +118,11 @@ export function createConfiguredLiveAudioTranscriptionService(providedPool?: Ret
     })
 }
 
-export function startLiveAudioTranscriptionPoll(service: Pick<LiveAudioTranscriptionService, 'processPending'> & Partial<Pick<LiveAudioTranscriptionService, 'close'>>, intervalMs = 1000): () => Promise<void> {
-  const stop = startBackgroundPoll({ intervalMs, concurrency: 2, run: async stopped => {
+export function startLiveAudioTranscriptionPoll(service: Pick<LiveAudioTranscriptionService, 'processPending'> & Partial<Pick<LiveAudioTranscriptionService, 'close'>>, intervalMs = 1000,
+  concurrency = Number(process.env.AI_AUDIO_GLOBAL_CONCURRENT ?? 1)): () => Promise<void> {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error('Invalid audio worker concurrency')
+  // Match local workers to provider capacity; cross-process admission still uses database locks.
+  const stop = startBackgroundPoll({ intervalMs, concurrency, run: async stopped => {
     for (let count = 0; count < 8 && !stopped() && await service.processPending(); count++) { /* Bounded drain. */ }
   }, onError: error => { console.error('[live-audio-transcription]', error instanceof Error ? error.name : 'unknown') } })
   let closing: Promise<void> | undefined

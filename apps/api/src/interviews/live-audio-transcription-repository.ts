@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Pool } from 'pg'
+import { isExecutionBusy } from '@smartrecruit-pro/enterprise-ai'
 import type { AudioSourceConfig } from './audio-source.js'
 import { LiveInterviewSessionRepository } from './live-session-repository.js'
 import type { TranscriptCheckpoint } from './transcript-checkpoint.js'
@@ -90,6 +91,13 @@ export class LiveAudioTranscriptionRepository {
     return result.rowCount ?? 0
   }
   async retry(job: AudioTranscriptionJob, error: unknown): Promise<void> {
+    if (isExecutionBusy(error)) {
+      await this.pool.query(`UPDATE interview_audio_transcription_jobs SET status='pending',claim=NULL,error=$3,
+        attempts=greatest(0,attempts-1),available_at=now()+interval '5 seconds',updated_at=now()
+        WHERE object_key=$1 AND claim=$2::uuid AND status='processing'`,
+      [job.objectKey, job.claim, (error instanceof Error ? error.message : String(error)).slice(0, 600)])
+      return
+    }
     const delaySeconds = Math.min(300, 5 * 2 ** Math.min(job.attempts - 1, 6))
     await this.pool.query(`UPDATE interview_audio_transcription_jobs SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,claim=NULL,error=$3,
       available_at=now()+$4*interval '1 second',updated_at=now() WHERE object_key=$1 AND claim=$2::uuid`,

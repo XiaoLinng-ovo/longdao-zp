@@ -21,7 +21,7 @@ import { formatAnalysisError } from '../../../shared/utils/analysis-error'
 import { addManualLiveSegment, analyzeLiveSegment, correctLiveSegmentRole, createLiveInterviewSession, endLiveInterviewSession, findActiveLiveInterviewSession, generateInterviewQuestions, getInterviewQuestions, refineInterviewQuestionGroup, getInterview, updateLiveInterviewQuestion, uploadLiveInterviewChunk, type ApiInterviewDetail, type GeneratedInterviewQuestion, type InterviewQuestionConversationMessage, type LiveAnswerAnalysis, type LiveInterviewSegment } from '../api'
 import { loadQuestionSheets, stageOfRound } from '../api/question-sheets'
 import { getQuestionPreparation, waitForPreparedInterviewQuestions, type QuestionPreparation } from '../api/question-preparation'
-import { analysisMatchesUtterance, analysisSourceKey, analysisSourceSegments, buildUtterances, type LiveUtterance } from '../utils/utterance-state'
+import { analysisMatchesUtterance, analysisSourceKey, analysisSourceSegments, buildUtterances, mergePolledLiveSegments, speakerRoleReviewLabel, speakerRoleReviewReason, type LiveUtterance } from '../utils/utterance-state'
 import { createSourceStreaming, type SourceStreamingState } from '../utils/source-streaming'
 import { createSourceRecorderGroup, type SourceRecorderGroup } from '../utils/source-recorder'
 import { createAnalysisRetryState } from '../utils/analysis-retry-state'
@@ -79,7 +79,7 @@ function openAudio(session = sessionId.value, startMs = 0) {
 }
 function speakerLabel(segment: LiveInterviewSegment) {
   if (segment.speakerConfirmed || segment.speakerId?.startsWith('manual_')) return '手动确认'
-  if (segment.roleReview) return segment.roleReview.status === 'inferred' ? '上下文语义推断' : segment.roleReview.status === 'mixed' ? '混合发言，待复核' : '角色存疑，待复核'
+  if (segment.roleReview) return speakerRoleReviewLabel(segment)
   if (!segment.speakerId || segment.speakerId.includes(':stream_')) return '声音身份待确认'
   const ids = [...new Set([...segments.value].filter(row => row.sessionId === segment.sessionId && row.audioSource === segment.audioSource)
     .sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id)).map(row => row.speakerId).filter(Boolean))]
@@ -206,10 +206,9 @@ async function refreshTranscription() {
   try {
     const result = await getLiveInterviewTranscription(id)
     if (disposed || savingRole.value || revision !== transcriptEditRevision || id !== sessionId.value || getWorkspaceContext().revision !== workspace.revision) return
-    const knownIds = new Set(segments.value.map(segment => segment.id))
     // Never overwrite an in-room role correction or refinement with an older poll response.
     if (status.value === 'reviewing' || result.session?.endedAt) applyReviewView(result)
-    else segments.value.push(...result.segments.filter(segment => !knownIds.has(segment.id)))
+    else segments.value = mergePolledLiveSegments(segments.value, result.segments)
     pendingTranscriptionCount.value = result.pendingCount
     retryingTranscriptionCount.value = result.retryingCount
     transcriptionProgressWarning.value = ''
@@ -638,6 +637,7 @@ async function load() {
   try {
     const id = String(route.params.id ?? '')
     detail.value = await getInterview(id)
+    if (detail.value.meetingUrl?.trim()) audioMode.value = 'meeting'
     const [candidates, jobs, active] = await Promise.all([
       apiClient.getJson<Array<{ id: string; fullName: string }>>('/candidates'),
       apiClient.getJson<Array<{ id: string; title: string }>>('/jobs'),
@@ -981,6 +981,8 @@ async function setRole(segment:LiveInterviewSegment & {sourceIds?:string[]},role
   }
   // 把已经确认过的发言改成另一个说话人属于人工复核，不自动调用模型分析，避免无谓的额度消耗；需要评分时由面试官点击“分析完整回答”。
   const reclassification = segment.role !== 'unknown'
+  savingRole.value = true
+  transcriptEditRevision++
   try {
     const updated=await correctLiveSegmentRole(segment.id,role,segment.sourceIds??[segment.id])
     updated.forEach((item)=>{const existing=segments.value.find((row)=>row.id===item.id);if(existing)Object.assign(existing,item)})
@@ -993,6 +995,7 @@ async function setRole(segment:LiveInterviewSegment & {sourceIds?:string[]},role
       }
     }
   } catch(cause) { error.value=describeApiFailure(cause,'修正说话人失败').message }
+  finally { transcriptEditRevision++; savingRole.value = false; scheduleTranscriptionPoll(0) }
 }
 async function analyze(segment: LiveUtterance) {
   if (status.value === 'reviewing' || segment.id.startsWith('turn-')) return false
@@ -1221,7 +1224,7 @@ onUnmounted(() => {
             <div v-if="!utterances.length && !streamingText" class="room-empty">{{ interviewCancelled ? '面试已取消，不能创建实时面试会话。' : interviewCompleted ? '该面试已完成，暂无实时面试记录，不能重新创建实时会话。' : '暂无转写记录' }}</div>
             <article v-for="segment in utterances" :key="segment.id" class="utterance" :data-role="segment.role">
               <div class="utterance-head"><strong>{{ segment.role==='candidate'?'候选人':segment.role==='interviewer'?'面试官':'待确认' }}<span class="utterance-source">{{ segment.audioSource ? sourceLabels[segment.audioSource] : '历史记录 / 手动记录' }}</span></strong><small>{{ formatTimestamp(segment.startMs) }}–{{ formatTimestamp(segment.endMs) }} · {{ segment.final?'发言已结束':'正在继续...' }}</small></div>
-              <div class="utterance-identity"><span :title="segment.roleReview?.reason">{{ speakerLabel(segment) }}</span><strong v-if="needsRoleReview(segment)" class="role-review-badge">角色不确定</strong><span v-if="segment.sourceIds.length > 1">已合并 {{ segment.sourceIds.length }} 段</span><span v-if="segment.role !== 'unknown' && segment.confidence < 1">角色为自动识别，可人工校正</span><span v-if="segment.overlapping" class="overlap-badge">重叠发言</span></div>
+              <div class="utterance-identity"><span :title="segment.roleReview?.reason">{{ speakerLabel(segment) }}</span><strong v-if="needsRoleReview(segment)" class="role-review-badge">{{ segment.roleReview?.failure ? '识别未完成' : '角色不确定' }}</strong><span v-if="segment.sourceIds.length > 1">已合并 {{ segment.sourceIds.length }} 段</span><span v-if="segment.role !== 'unknown' && segment.confidence < 1">角色为自动识别，可人工校正</span><span v-if="segment.overlapping" class="overlap-badge">重叠发言</span></div>
               <template v-if="applicableAnalyses[segment.id]?.transcriptRefinement">
                 <TranscriptRefinementEditor :segment-id="segment.id" :refinement="applicableAnalyses[segment.id]!.transcriptRefinement!" :source-segments="analysisSourceSegments(segment)" :label="segment.role === 'interviewer' ? '整理后的发言' : '整理后的回答'" :disabled="analyzingId === segment.id" @editing-change="editingRefinements[segment.id] = $event" @saved="analyses[segment.id] = { ...analyses[segment.id]!, transcriptRefinement: $event }" />
                 <details class="answer-original">
@@ -1237,7 +1240,7 @@ onUnmounted(() => {
               <small v-if="segment.role === 'unknown' && segment.speakerId?.includes(':stream_')" class="stream-source">流式全文保留 · 说话人待确认</small>
               <div class="utterance-actions"><button v-if="!segment.speakerId?.startsWith('manual_')" type="button" title="从本段开始回听整场录音" @click="openAudio(segment.sessionId, segment.startMs)">回听本段</button><button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为面试官" @click="setRole(segment,'interviewer')">面试官</button><button v-if="!interviewReadOnly || canCorrectTranscript" type="button" :disabled="editingRefinements[segment.id] || savingRole || (status === 'reviewing' && completionReview?.phase === 'processing')" title="标记为候选人" @click="setRole(segment,'candidate')">候选人</button><button v-if="status !== 'reviewing' && !segment.id.startsWith('turn-') && hasSubstantiveAnswer(segment.text) && segment.final && segment.role!=='unknown' && segment.confidence>=.6" class="analyze-button" type="button" :disabled="!!analyzingId || editingRefinements[segment.id] || !!blockedAnalysisReasons[segment.id]" :aria-busy="analyzingId === segment.id" :title="blockedAnalysisReasons[segment.id] || (editingRefinements[segment.id] ? '请先保存或取消编辑' : analyzingId && analyzingId !== segment.id ? '请等待当前回答分析完成' : segment.role === 'interviewer' ? '整理面试官完整发言，不参与候选人评分' : '分析整段回答')" @click="analyze(segment)">{{ analyzingId===segment.id?'分析中...':analysisFeedback[segment.id]?'重新分析完整回答':'分析完整回答' }}</button></div>
               <div v-if="analyzingId === segment.id" class="answer-analysis-feedback" role="status">正在整理并分析完整回答…</div>
-              <div v-else-if="segment.final && blockedAnalysisReasons[segment.id]" class="answer-analysis-feedback review" role="status">待核实：{{ blockedAnalysisReasons[segment.id] }}</div>
+              <div v-else-if="segment.final && blockedAnalysisReasons[segment.id]" class="answer-analysis-feedback review" role="status">{{ speakerRoleReviewReason(segment) || ('待核实：' + blockedAnalysisReasons[segment.id]) }}</div>
               <div v-else-if="analysisFeedback[segment.id] && analysisFeedback[segment.id]!.kind !== 'review'" class="answer-analysis-feedback" :class="analysisFeedback[segment.id]!.kind" :role="analysisFeedback[segment.id]!.kind === 'error' ? 'alert' : 'status'">{{ analysisFeedback[segment.id]!.message }}</div>
               <details v-if="segment.sourceSegments.length > 1" class="utterance-fragments">
                 <summary>原始分段 ({{ segment.sourceSegments.length }})</summary>

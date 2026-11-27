@@ -77,7 +77,7 @@ export async function retainPreviousWebAssets(destination, previousRoot, olderRo
   }
 }
 
-export async function prepareRelease(root, destination, { pnpmCli, pnpmStore } = {}) {
+export async function prepareRelease(root, destination, { pnpmCli, pnpmStore, previousReleaseDirectory } = {}) {
   if(pnpmStore && !isAbsolute(pnpmStore)) throw Error('BUILD_TOOL: pnpm store must be absolute')
   await assertReleaseCapacity(destination)
   await mkdir(dirname(destination), { recursive: true })
@@ -89,7 +89,7 @@ export async function prepareRelease(root, destination, { pnpmCli, pnpmStore } =
   }
   for (const path of ['db/migrations', 'scripts']) {
     await mkdir(join(destination, path), { recursive: true })
-    const names = path === 'scripts' ? ['runtime-config.mjs', 'runtime-log.mjs', 'runtime-role.mjs', 'runtime-doctor.mjs', 'runtime-origin-check.mjs', 'runtime-release.mjs', 'runtime-control.mjs', 'serve-web-production.mjs', 'check-company-schemas.mjs', 'company-data-model.mjs', 'company-data-maintenance.mjs', 'maintenance-company-data.mjs', 'runtime-probes.mjs', 'maintenance-migrations.mjs', 'migration-approval.mjs', 'runtime-recovery-audit.mjs', 'private-recovery-files.mjs'] : await readdir(join(root, path))
+    const names = path === 'scripts' ? ['runtime-config.mjs', 'runtime-log.mjs', 'runtime-role.mjs', 'runtime-doctor.mjs', 'runtime-origin-check.mjs', 'runtime-release.mjs', 'runtime-control.mjs', 'serve-web-production.mjs', 'check-company-schemas.mjs', 'company-data-model.mjs', 'company-data-maintenance.mjs', 'maintenance-company-data.mjs', 'runtime-probes.mjs', 'maintenance-migrations.mjs', 'migration-approval.mjs', 'runtime-recovery-audit.mjs', 'private-recovery-files.mjs', 'ai-configuration-maintenance.mjs'] : await readdir(join(root, path))
     for (const name of names) await cp(join(root, path, name), join(destination, path, name), { errorOnExist: true, force: false })
   }
   for (const name of ['company-conflict-repair.mjs','maintenance-five-decisions.mjs','recovery-snapshot.mjs'])
@@ -118,11 +118,11 @@ export async function prepareRelease(root, destination, { pnpmCli, pnpmStore } =
   }
   await run(['--dir', 'web', 'build'])
   await verifyReleaseOriginPolicy(destination)
-  let previousRelease
-  try { previousRelease = JSON.parse(await readFile(join(root, 'logs/runtime/active-release.json'), 'utf8')) }
+  let previousRelease = previousReleaseDirectory ? {directory:resolve(previousReleaseDirectory)} : undefined
+  try { if (!previousRelease) previousRelease = JSON.parse(await readFile(join(root, 'logs/runtime/active-release.json'), 'utf8')) }
   catch (error) { if (error.code !== 'ENOENT') throw error }
   if (previousRelease) {
-    if (!inside(join(root, 'logs/runtime/releases'), resolve(previousRelease.directory))) throw new Error('RELEASE_ASSET: Previous release escapes runtime directory')
+    if (!previousReleaseDirectory && !inside(join(root, 'logs/runtime/releases'), resolve(previousRelease.directory))) throw new Error('RELEASE_ASSET: Previous release escapes runtime directory')
     await retainPreviousWebAssets(destination, previousRelease.directory)
   }
   const files = await releaseFiles(destination)
@@ -139,6 +139,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const destination = index < 0 ? join(root, 'logs/runtime/releases', new Date().toISOString().replace(/[:.]/gu, '-') + '-candidate') : resolve(process.argv[index + 1])
     const cli = process.argv.indexOf('--pnpm-cli')
     const store = process.argv.indexOf('--pnpm-store')
-    console.log(JSON.stringify(await prepareRelease(root, destination, { pnpmCli: cli < 0 ? undefined : process.argv[cli + 1], pnpmStore: store < 0 ? undefined : process.argv[store + 1] }), null, 2))
+    const previous = process.argv.indexOf('--previous-release')
+    if (previous >= 0 && !process.argv[previous+1]) throw new Error('RELEASE_ASSET: --previous-release requires a sealed release directory')
+    console.log(JSON.stringify(await prepareRelease(root, destination, { pnpmCli: cli < 0 ? undefined : process.argv[cli + 1], pnpmStore: store < 0 ? undefined : process.argv[store + 1],previousReleaseDirectory:previous < 0 ? undefined : process.argv[previous+1] }), null, 2))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

@@ -68,6 +68,41 @@ test('low confidence, acknowledgements and mixed turns remain unresolved without
   assert.ok(result.turns.every(row => !semanticRoleResolved(row)))
 })
 
+test('fragment and filler review receives continuity rules and acoustic evidence without inventing confirmation', async () => {
+  const input = [turn('1', '呃，额，啊，哦，嗯，', { speakerVerified: true, audioSource: 'microphone' }),
+    turn('2', '就是客服 Agent 的时候，', { speakerVerified: true, audioSource: 'microphone' }),
+    turn('3', '我负责项目需求分析、开发和上线。', { speakerVerified: true, audioSource: 'microphone' })]
+  const snapshot = structuredClone(input)
+  let request: Record<string, any> = {}
+  const result = await model(input.map(row => decision(row.id)), body => { request = body }).review(input, env)
+  const prompt = request.messages[0].content
+  assert.match(prompt, /转写分段不是说话轮次/)
+  assert.match(prompt, /后文可以反向解释/)
+  assert.match(prompt, /纯语气词没有独立角色含义/)
+  assert.match(prompt, /不得因候选人常会思考而一律归给 candidate/)
+  assert.match(prompt, /相同 speakerId、相邻顺序或已有自动标签都不能单独证明/)
+  const payload = JSON.parse(request.messages[1].content)
+  assert.deepEqual(payload.turnsToReview.map((row: any) => row.text), input.map(row => row.text))
+  assert.ok(payload.turnsToReview.every((row: any) => row.speakerVerified === true && !row.manuallyConfirmed))
+  assert.deepEqual(result.turns.map(row => row.role), ['candidate', 'candidate', 'candidate'])
+  assert.ok(result.turns.every(row => semanticRoleResolved(row) && !row.speakerConfirmed))
+  assert.deepEqual(input, snapshot)
+})
+
+test('filler cannot borrow a later candidate label across conflicting acoustic evidence or sources', async () => {
+  const input = [turn('1', '嗯，', { speakerMixed: true, speakerVerified: false, audioSource: 'meeting' }),
+    turn('2', '我负责项目需求分析、开发和上线。', { speakerVerified: true, audioSource: 'microphone' })]
+  let payload: Record<string, any> = {}
+  const result = await model([decision('1', 'unknown', { confidence: .4, reason: '可能为另一人的应答，缺少连续说话人证据' }),
+    decision('2')], body => { payload = JSON.parse(body.messages[1].content) }).review(input, env)
+  assert.equal(payload.turnsToReview[0].speakerMixed, true)
+  assert.equal(payload.turnsToReview[0].speakerVerified, false)
+  assert.notEqual(payload.turnsToReview[0].audioSource, payload.turnsToReview[1].audioSource)
+  assert.equal(result.turns[0]?.role, 'unknown')
+  assert.equal(result.turns[1]?.role, 'candidate')
+  assert.equal(result.turns[0]?.text, input[0]?.text)
+})
+
 for (const [name, items] of Object.entries({
   missing: [], duplicate: [decision('1'), decision('1')], invented: [decision('other')],
   numericString: [decision('1', 'candidate', { confidence: '0.99' })],
@@ -91,13 +126,27 @@ test('provider failure and reasoning-only output cannot certify roles', async ()
   }
 })
 
-test('missing config never calls a provider or marks heuristic roles as reviewed', async () => {
+test('missing config never calls a provider or mistakes a skipped review for semantic uncertainty', async () => {
   const reviewer = new SemanticRoleReviewer(async () => { throw Error('must not call') })
   const input = [turn('1', '我做过项目。')]
   const result = await reviewer.review(input, {})
-  assert.deepEqual(result.turns, input)
+  assert.equal(result.turns[0]?.text, input[0]?.text)
+  assert.equal(result.turns[0]?.role, 'unknown')
   assert.equal(result.warnings.length, 1)
-  assert.equal(result.turns[0]?.roleReview, undefined)
+  assert.equal(result.turns[0]?.roleReview?.failure, 'configuration')
+  assert.equal(input[0]?.roleReview, undefined)
+})
+
+for (const [name, failure, response] of [
+  ['timeout', 'timeout', async () => { throw new DOMException('timed out', 'TimeoutError') }],
+  ['HTTP failure', 'request', async () => new Response('private upstream error', { status: 503 })],
+  ['invalid JSON', 'response', async () => Response.json({ choices: [{ message: { content: 'not json' } }] })],
+] as const) test('records ' + name + ' separately from a genuine uncertain model decision', async () => {
+  const result = await new SemanticRoleReviewer(response).review([turn('1', '请介绍一下你的项目。')], env, { timeoutMs: 12000 })
+  assert.equal(result.turns[0]?.roleReview?.failure, failure)
+  assert.notEqual(result.turns[0]?.roleReview?.reason, '语义模型未完成复核')
+  assert.equal(result.turns[0]?.role, 'unknown')
+  assert.doesNotMatch(result.turns[0]?.roleReview?.reason ?? '', /private upstream error|not json/)
 })
 
 test('batches preserve coverage and heartbeat; lookahead never becomes a target twice', async () => {

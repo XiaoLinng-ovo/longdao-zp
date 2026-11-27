@@ -1,9 +1,12 @@
 import type { ApiOfferVersion } from '../api'
+import { offerSalaryVariables } from '@smartrecruit-pro/contracts'
 import { employmentTypeLabel } from '../../../shared/utils/labels'
 import { offerTemplateFieldValues } from './templateFields'
 import { normalizeRichHtml, renderHtmlTemplate } from './richText'
 
 const aliases: Record<string, string> = {
+  '初期月薪': 'initialSalary', '正常月薪': 'normalSalary', '薪资安排说明': 'salaryArrangement',
+  '初期薪资适用月数': 'probationSalaryMonths', '正常月薪起始月': 'formalSalaryStartMonth',
   '候选人姓名': 'candidateName', '称谓': 'salutation', '岗位名称': 'jobTitle', positionTitle: 'jobTitle',
   '试用期月薪': 'probationSalary', '试用期工资': 'probationSalary', '转正后月薪': 'baseSalary', '转正后工资': 'baseSalary', formalSalary: 'baseSalary',
   '其他福利或约定': 'benefits', '所属部门': 'department', '用工类型': 'employmentType',
@@ -26,6 +29,7 @@ export function offerContentValues(version: ApiOfferVersion, candidateName = '',
   })
   const date = version.templateFields?.reportingTime?.includes('T') ? version.templateFields.reportingTime.slice(0, 10) : version.startDate ?? ''
   const values = {
+    ...offerSalaryVariables(version.templateFields ?? {}, version.compensation.baseSalary.amount, version.compensation.probationSalary?.amount),
     ...offerTemplateFieldValues(version.templateFields), candidateName, salutation: '您好', jobTitle: version.positionTitle,
     department, employmentType: employmentTypeLabel(version.employmentType), startDate: date, reportDate: date, '报到日期': date,
     reportingLocation: version.reportingLocation ?? '', invoiceTitle: version.invoiceTitle ?? '', taxNumber: version.taxNumber ?? '',

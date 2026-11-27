@@ -18,6 +18,7 @@ const configurationPaths = [
   'smtp-connection-test', 'smtp-test-email', 'resume-virus-scan',
   'ai-settings', 'ai-connection-test', 'channel-settings', 'channel-connections', 'audit-logs',
   'ai-sharing', 'platform-operators', 'email-deliveries', 'operational-recovery',
+  'ai-diagnostics', 'ai-generation-test', 'ai-legacy-preview', 'ai-legacy-import',
 ]
 
 export function isSystemAdministrationPath(path: string): boolean {

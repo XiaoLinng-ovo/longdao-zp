@@ -21,6 +21,7 @@ import {
   type ScheduleJob,
 } from '../api'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { navigateToOffer } from '../utils/offer-navigation'
 import { normalizeSearchText } from '../../../shared/utils/search'
 import PageHeader from '../../../shared/components/PageHeader.vue'
 import PageFeedback from '../../../shared/components/workflow/PageFeedback.vue'
@@ -28,6 +29,11 @@ import InterviewTable from '../components/InterviewTable.vue'
 import { aiScoreLabel, interviewResult, INTERVIEW_RESULT_LABELS, isFinalInterview } from '../utils/interview-result'
 
 const rows = ref<InterviewView[]>([])
+const completedOfferApplicationId = ref('')
+async function openCompletedOffer() {
+  if (!completedOfferApplicationId.value) return
+  if (!await navigateToOffer(router, completedOfferApplicationId.value)) feedback.value = '面试结论已保存，跳转未完成，请点击前往 Offer 管理重试'
+}
 const preparingInterviewId = ref<string | null>(null)
 let preparationTimer: ReturnType<typeof setTimeout> | undefined
 let preparationDisposed = false
@@ -436,6 +442,12 @@ async function submitConclude() {
       : row)
     showConclude.value = false
     concludeTarget.value = null
+    if (outcome === 'offer') {
+      completedOfferApplicationId.value = target.applicationId
+      feedback.value = `${target.candidate} 面试已完成：${outcomeLabel}`
+      await openCompletedOffer()
+      return
+    }
     await refresh({ silent: true })
     feedback.value = `${target.candidate} 面试已完成：${outcomeLabel}`
   } catch (cause) {
@@ -464,6 +476,7 @@ watch(() => [route.query.applicationId, route.query.stage, route.query.interview
   </PageHeader>
 
   <PageFeedback :feedback="feedback" :error="error" @clear-feedback="feedback = ''" @clear-error="error = ''" />
+  <button v-if="completedOfferApplicationId" class="btn btn-primary" type="button" @click="openCompletedOffer">前往 Offer 管理</button>
   <section v-if="!loading && !loadFailed" class="interview-filters" aria-label="面试搜索与筛选">
     <form class="search-field" role="search" @submit.prevent="runSearch">
       <input v-model="searchQuery" type="search" aria-label="面试中心搜索" placeholder="搜索候选人、岗位、面试官、面试编号" />

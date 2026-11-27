@@ -7,8 +7,10 @@ import { loadDepartments } from '../../requisitions/api'
 import { loadJobs } from '../../jobs/api'
 
 const routerPush = vi.fn()
+const routerReplace = vi.fn()
+const routeQuery: Record<string, string> = {}
 
-vi.mock('vue-router', () => ({ useRouter: () => ({ push: routerPush, currentRoute: { value: { query: {} } } }) }))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push: routerPush, replace: routerReplace, currentRoute: { value: { query: routeQuery } } }) }))
 
 vi.mock('../api', async importOriginal => ({ ...(await importOriginal<typeof import('../api')>()), createOffer: vi.fn(), getOffer: vi.fn(), updateOffer: vi.fn(), listOfferContextRows: vi.fn(async () => []), listOfferTemplates: vi.fn(async () => []), loadApplicationsForOffer: vi.fn() }))
 vi.mock('../../requisitions/api', () => ({ loadDepartments: vi.fn(async () => []) }))
@@ -19,6 +21,7 @@ function button(text: string) { return [...root.querySelectorAll('button')].find
 async function mount() { root = document.createElement('div'); document.body.appendChild(root); app = createApp(OfferListPage); app.mount(root); await flush() }
 beforeEach(() => {
   vi.clearAllMocks()
+  for (const key of Object.keys(routeQuery)) delete routeQuery[key]
   vi.mocked(listOfferContextRows).mockResolvedValue([])
   vi.mocked(listOfferTemplates).mockResolvedValue([])
   vi.mocked(loadDepartments).mockResolvedValue([{ id: 'dept-1', name: '财务部' }] as never)
@@ -49,7 +52,7 @@ describe('Offer creation application picker', () => {
       offer: { id: 'old-offer', applicationId: 'cancelled-application' },
       version: { id: 'old-version', positionTitle: '会计', departmentId: 'dept-1', employmentType: 'full_time',
         startDate: '2026-12-01', reportingLocation: '原报到地点', invoiceTitle: '原公司抬头', taxNumber: 'TAX9133',
-        templateFields: { reportingTime: '09:30', supervisorName: '原主管', payday: '15' },
+        templateFields: { reportingTime: '09:30', supervisorName: '原主管', payday: '15', probationDuration: '3个月', probationSalaryMonths: '1', formalSalaryStartMonth: '2' },
         compensation: { baseSalary: { amount: 12000, currency: 'CNY' }, probationSalary: { amount: 10000, currency: 'CNY' } },
         benefits: ['餐补'], materials: ['id_card', 'bank_card:中国银行', 'other:资格证', 'other:成绩单'], content: '<p>原 Offer 手写条款</p>' },
     } as never)
@@ -68,7 +71,7 @@ describe('Offer creation application picker', () => {
     expect(root.querySelector<HTMLInputElement>('#offer-supervisorName')?.value).toBe('原主管')
     expect(root.querySelector<HTMLInputElement>('input[placeholder="请输入发票抬头"]')?.value).toBe('原公司抬头')
     expect(root.querySelector('.rich-text-content')?.textContent).toContain('原 Offer 手写条款')
-    const salaries = [...root.querySelectorAll('.form-field')].filter(field => /工资（元\/月）/.test(field.querySelector('label')?.textContent ?? ''))
+    const salaries = [...root.querySelectorAll('.form-field')].filter(field => /月薪（元\/月）/.test(field.querySelector('label')?.textContent ?? ''))
     expect(salaries).toHaveLength(2)
     expect(salaries.map(field => field.querySelector<HTMLInputElement>('input')?.value)).toEqual(['10000', '12000'])
     expect(root.querySelectorAll('details input[type="checkbox"]:checked')).toHaveLength(4)
@@ -117,7 +120,7 @@ describe('Offer creation application picker', () => {
     }
     expect(root.querySelector('.rich-text-content')?.textContent).toContain('发票抬头：测试<科技>有限公司')
     expect(root.querySelector('.rich-text-content')?.textContent).toContain('企业税号：TEST9133')
-    const salaryFields = [...root.querySelectorAll('.form-field')].filter(field => /工资（元\/月）/.test(field.querySelector('label')?.textContent ?? ''))
+    const salaryFields = [...root.querySelectorAll('.form-field')].filter(field => /月薪（元\/月）/.test(field.querySelector('label')?.textContent ?? ''))
     for (const field of salaryFields) {
       const input = field.querySelector<HTMLInputElement>('input')!
       input.value = '10000'
@@ -219,7 +222,7 @@ describe('Offer creation application picker', () => {
       const field = [...root.querySelectorAll<HTMLElement>('.form-field')].find(item => item.querySelector('label')?.textContent?.includes(labelText))
       return field?.querySelector<HTMLInputElement>('input')!
     }
-    for (const [labelText, value] of [['转正期工资', '12000'], ['试用期工资', '10000']]) {
+    for (const [labelText, value] of [['正常月薪', '12000']]) {
       const input = inputForLabel(labelText)
       input.value = value
       input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -236,5 +239,26 @@ describe('Offer creation application picker', () => {
     button('新建 Offer').click(); await flush()
     finish([{ id: 'old', code: 'APP-old', candidateId: 'c', jobId: 'j', status: 'interviewing', candidateName: '旧申请' }]); await flush()
     expect(root.querySelector('select')?.textContent).not.toContain('旧申请')
+  })
+  it('opens the eligible application from a final-pass route without creating an offer', async () => {
+    routeQuery.createApplicationId = 'passed'; routeQuery.filter = 'keep'
+    await mount()
+    expect(root.querySelector<HTMLSelectElement>('select')?.value).toBe('passed')
+    expect(routerReplace).toHaveBeenCalledWith({ path: '/offers', query: { filter: 'keep' } })
+    expect(createOffer).not.toHaveBeenCalled()
+  })
+  it('opens an existing non-cancelled offer instead of a second form', async () => {
+    routeQuery.createApplicationId = 'passed'
+    vi.mocked(listOfferContextRows).mockResolvedValue([{ entityId: 'existing', applicationId: 'passed', status: 'draft' }] as never)
+    await mount()
+    expect(routerReplace).toHaveBeenCalledWith({ name: 'offer-detail', params: { id: 'existing' } })
+    expect(root.querySelector('[role="dialog"]')).toBeNull()
+    expect(createOffer).not.toHaveBeenCalled()
+  })
+  it('does not offer a foreign or ineligible application from a crafted route', async () => {
+    routeQuery.createApplicationId = 'foreign'
+    await mount()
+    expect(root.textContent).toContain('无权访问或尚不符合')
+    expect(root.querySelector('[role="dialog"]')).toBeNull()
   })
 })

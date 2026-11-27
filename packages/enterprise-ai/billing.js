@@ -139,7 +139,7 @@ export class BillingStore {
     try { const result = await runningPolicy.run(ticket.config, action); settling = true; await this.finish(ticket.id, 'settled', result); return result }
     catch (error) {
       // Unknown provider/DB outcomes must not release credits and allow a second dispatch.
-      const rejected = !settling && (error?.code === 'MODEL_HTTP_ERROR' || error?.code === 'OCR_HTTP_ERROR' || error?.code === 'BILLING_INPUT_LIMIT')
+      const rejected = !settling && (error?.code === 'MODEL_HTTP_ERROR' || error?.code === 'OCR_HTTP_ERROR' || error?.code === 'ASR_HTTP_ERROR' || error?.code === 'BILLING_INPUT_LIMIT')
       await this.finish(ticket.id, rejected ? 'released' : 'uncertain').catch(() => undefined)
       throw error
     }

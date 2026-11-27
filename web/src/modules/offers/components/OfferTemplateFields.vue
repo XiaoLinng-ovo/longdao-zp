@@ -24,7 +24,7 @@ function updateReportingPart(part: 'date' | 'time', event: Event) {
 </script>
 
 <template>
-  <template v-for="field in offerTemplateFieldDefinitions" :key="field.key">
+  <template v-for="field in offerTemplateFieldDefinitions.filter(item => !['probationDuration', 'formalSalaryStartMonth'].includes(item.key))" :key="field.key">
     <div v-if="employmentType === 'full_time' || !['probationDuration', 'probationSalaryMonths', 'formalSalaryStartMonth'].includes(field.key)" class="form-field" :class="{ 'reporting-datetime-field': field.key === 'reportingTime' }">
       <label :for="field.key === 'reportingTime' ? 'offer-reporting-date' : `offer-${field.key}`">{{ field.key === 'formalSalaryStartMonth' ? '调薪起始月' : field.label }}</label>
       <div v-if="field.key === 'reportingTime'" class="reporting-datetime-inputs">

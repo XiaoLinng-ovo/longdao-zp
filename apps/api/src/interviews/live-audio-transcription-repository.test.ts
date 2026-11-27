@@ -68,3 +68,19 @@ test('retries retain the audio job with bounded backoff and the original claim g
     assert.ok(row.sql.includes("attempts>=3 THEN 'failed' ELSE 'pending'"))
   }
 })
+
+for (const code of ['AI_CHANNEL_BUSY', 'BILLING_CONCURRENCY_LIMIT', 'BILLING_AUDIO_BUSY']) {
+  test(code + ' defers source work without exhausting recognition attempts', async () => {
+    const calls: Array<{ sql: string; values: unknown[] }> = []
+    const repository = new LiveAudioTranscriptionRepository({ query: async (sql: string, values: unknown[]) => {
+      calls.push({ sql, values }); return { rows: [] }
+    } } as never)
+    await repository.retry({ ...job, attempts: 3 }, Object.assign(new Error('busy'), { code }))
+    assert.equal(calls.length, 1)
+    assert.match(calls[0]!.sql, /status='pending'/)
+    assert.match(calls[0]!.sql, /attempts=greatest\(0,attempts-1\)/)
+    assert.match(calls[0]!.sql, /interval '5 seconds'/)
+    assert.match(calls[0]!.sql, /claim=\$2::uuid AND status='processing'/)
+    assert.deepEqual(calls[0]!.values, [job.objectKey, job.claim, 'busy'])
+  })
+}

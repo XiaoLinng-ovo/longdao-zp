@@ -112,6 +112,39 @@ beforeEach(() => {
 afterEach(async () => { backgroundQueue.dispose(); app?.unmount(); await flush(); root?.remove(); app = undefined; root = undefined; vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals() })
 
 describe('live interview meeting audio', () => {
+  it('defaults interviews with a meeting URL to both sources and still allows explicit microphone-only capture', async () => {
+    vi.mocked(getInterview).mockResolvedValue({ id: 'interview-1', applicationId: 'app-1', round: 1, status: 'scheduled',
+      meetingUrl: 'https://meeting.example.invalid/room', application: { candidateId: 'candidate-1', jobId: 'job-1' } } as never)
+    await mount()
+    expect(root!.querySelector<HTMLSelectElement>('[aria-label="音频采集方式"]')!.value).toBe('meeting')
+    expect(root!.querySelector<HTMLSelectElement>('[aria-label="确认录音采集方式"]')!.value).toBe('meeting')
+    expect(createInterviewAudioCapture).not.toHaveBeenCalled()
+    await selectMode('microphone')
+    await start()
+    expect(createInterviewAudioCapture).toHaveBeenCalledWith('microphone', expect.any(Object))
+  })
+  it('shows the actual AI role failure separately from an uncertain contextual judgment', async () => {
+    const session = { id: 'session-1', interviewId: 'interview-1', status: 'paused', externalStatus: 'ready',
+      startedAt: '2026-11-27T00:00:00Z', endedAt: '2026-11-27T00:10:00Z', createdBy: 'u', currentQuestion: '' }
+    const base: LiveInterviewSegment = { id: 'turn-0', sessionId: session.id, speakerId: 'microphone:voice_1',
+      role: 'unknown', confidence: .35, text: '好的，', startMs: 1000, endMs: 2000, status: 'transcribed', audioSource: 'microphone',
+      roleReview: { method: 'semantic_context', status: 'uncertain', confidence: .4,
+        reason: '只有简短应答，缺少角色线索', model: 'test', promptVersion: 'test' } }
+    const failed: LiveInterviewSegment = { ...base, id: 'turn-1', startMs: 3000, endMs: 4000,
+      roleReview: { ...base.roleReview!, confidence: 0, failure: 'timeout', reason: 'AI 角色识别请求超时，尚未完成判断' } }
+    const view = { session, segments: [base, failed], completionReview: { phase: 'ready' as const,
+      unresolvedCount: 2, unresolvedIds: [base.id, failed.id], limit: 30, versionId: 'version-1' } }
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue(view)
+    vi.mocked(getLiveInterviewTranscription).mockResolvedValue({ ...view, pendingCount: 0, retryingCount: 0 })
+    await mount()
+    const rows = root!.querySelectorAll('.utterance')
+    expect(rows[0]!.querySelector('.utterance-identity')!.textContent).toContain('上下文不足，角色待确认')
+    expect(rows[0]!.querySelector('.answer-analysis-feedback')!.textContent).toBe(base.roleReview!.reason)
+    expect(rows[1]!.querySelector('.utterance-identity')!.textContent).toContain('AI 识别未完成')
+    expect(rows[1]!.querySelector('.role-review-badge')!.textContent).toBe('识别未完成')
+    expect(rows[1]!.querySelector('.answer-analysis-feedback')!.textContent).toContain('请求超时')
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+  })
   it('allows completion without mandatory role confirmation and retains optional correction', async () => {
     const session = { id: 'session-1', interviewId: 'interview-1', status: 'paused', externalStatus: 'ready', startedAt: '2026-11-16T00:00:00Z', endedAt: '2026-11-16T01:00:00Z', createdBy: 'u', currentQuestion: '' }
     const segments: LiveInterviewSegment[] = Array.from({ length: 31 }, (_, index) => ({ id: 'turn-' + index,
@@ -681,6 +714,41 @@ describe('live interview chronological transcript', () => {
     id, text, startMs, endMs: startMs + 1000, sessionId: 'session-1', speakerId: `voice_${role}`, role, confidence: .35, status: 'transcribed' as const,
   })
   const texts = () => [...root!.querySelectorAll('.utterance > p')].map(row => row.textContent)
+
+  it('refreshes an existing pending fragment when the backend finishes automatic role identification', async () => {
+    const pending = speech('old-pending', '就是客服 Agent 的时候，', 0)
+    const session = { id: 'session-1', status: 'active' }
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session, segments: [pending] } as never)
+    vi.mocked(getLiveInterviewTranscription).mockResolvedValue({ session, segments: [{ ...pending, role: 'interviewer', confidence: .95,
+      roleReview: { method: 'semantic_context', status: 'inferred', confidence: .95,
+        reason: '后续提问明确了招聘方立场', model: 'test', promptVersion: 'test' } }], pendingCount: 0, retryingCount: 0 } as never)
+    await mount()
+    expect(root!.querySelector('.utterance-head')!.textContent).toContain('待确认')
+    await tick(0)
+    expect(root!.querySelector('.utterance-head')!.textContent).toContain('面试官')
+    expect(root!.querySelector('.utterance-identity')!.textContent).toContain('AI 已识别')
+    expect(texts()).toEqual([pending.text])
+    expect(root!.querySelectorAll('.utterance')).toHaveLength(1)
+  })
+
+  it('keeps an in-room manual correction when a previously started transcription poll returns', async () => {
+    const pending = speech('pending-manual', '你在那个扫地机器人项目里，', 0)
+    const session = { id: 'session-1', status: 'active' }
+    const stale = deferred<never>()
+    vi.mocked(findActiveLiveInterviewSession).mockResolvedValue({ session, segments: [pending] } as never)
+    vi.mocked(getLiveInterviewTranscription).mockReturnValueOnce(stale.promise)
+    vi.mocked(correctLiveSegmentRole).mockResolvedValue([{ ...pending, role: 'interviewer', confidence: 1, speakerConfirmed: true }])
+    await mount(); await tick(0)
+    const interviewer = [...root!.querySelectorAll<HTMLButtonElement>('.utterance-actions button')].find(button => button.textContent === '面试官')!
+    interviewer.click(); await flush()
+    expect(root!.querySelector('.utterance-head')!.textContent).toContain('面试官')
+    stale.resolve({ session: { ...session, endedAt: '2026-11-27T00:10:00Z' },
+      segments: [{ ...pending, role: 'candidate', confidence: .95 }], pendingCount: 0, retryingCount: 0 } as never)
+    await flush()
+    expect(root!.querySelector('.utterance-head')!.textContent).toContain('面试官')
+    expect(root!.querySelector('.utterance-identity')!.textContent).toContain('手动确认')
+    expect(analyzeLiveSegment).not.toHaveBeenCalled()
+  })
 
   it('merges manually confirmed speakers, restores the merge and allows correcting just one original fragment', async () => {
     let saved: LiveInterviewSegment[] = [

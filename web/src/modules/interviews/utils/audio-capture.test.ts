@@ -54,7 +54,7 @@ afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); vi.restoreAllMocks(); 
 describe('interview audio capture', () => {
   it('requests sharing synchronously before microphone permissions to preserve user activation', async () => {
     const promise = createInterviewAudioCapture('meeting')
-    expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: true, systemAudio: 'include' })
+    expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: true, systemAudio: 'include', windowAudio: 'system', selfBrowserSurface: 'exclude' })
     expect(getUserMedia).not.toHaveBeenCalled()
     const capture = await promise
     expect(getUserMedia).toHaveBeenCalledOnce()

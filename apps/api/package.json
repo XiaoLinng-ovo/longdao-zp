@@ -27,6 +27,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@smartrecruit-pro/contracts": "workspace:*",
     "@smartrecruit-pro/runtime-lifecycle": "workspace:*",
     "@smartrecruit-pro/database-readiness": "workspace:*",
     "@smartrecruit-pro/enterprise-ai": "workspace:*",

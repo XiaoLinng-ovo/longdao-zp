@@ -100,8 +100,8 @@ export async function createInterviewAudioCapture(mode: InterviewAudioMode, opti
     if (mode === 'meeting') {
       try {
         // systemAudio is a browser hint, not a guarantee. Inspect returned tracks.
-        const constraints: DisplayMediaStreamOptions & { systemAudio: 'include' } = {
-          video: true, audio: true, systemAudio: 'include',
+        const constraints: DisplayMediaStreamOptions & { systemAudio: 'include'; windowAudio: 'system'; selfBrowserSurface: 'exclude' } = {
+          video: true, audio: true, systemAudio: 'include', windowAudio: 'system', selfBrowserSurface: 'exclude',
         }
         display = await devices.getDisplayMedia(constraints)
       } catch (cause) { throw permissionError('meeting', cause) }

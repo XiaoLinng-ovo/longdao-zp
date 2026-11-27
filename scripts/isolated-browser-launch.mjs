@@ -24,7 +24,7 @@ export async function launchIsolatedBrowser(chromium, options, platform = proces
       // Match Playwright's upstream workaround for crbug.com/572515601 without replacing its other defaults.
       const merged = disableSwitch + [...features, workaround].join(',')
       await browser.close()
-      browser = await chromium.launch({ ...options, ignoreDefaultArgs: [original], args: [...options.args, merged] })
+      browser = await chromium.launch({ ...options, ignoreDefaultArgs: [...(options.ignoreDefaultArgs ?? []), original], args: [...options.args, merged] })
       assert.equal(await disabledFeatures(browser), merged)
     }
     return { browser, windowsTcpWorkaround: true }

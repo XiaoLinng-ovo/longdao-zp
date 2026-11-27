@@ -163,7 +163,7 @@ describe('InterviewListPage', () => {
   ] as const)('completes %s with %s and only stage-appropriate outcomes', async (stage, round, outcome, options) => {
     mockedLoadInterviews.mockResolvedValue([{ ...finalInterview(), stage, round, scheduledAt: '10/29 10:00', scheduledStartAt: '2026-10-29T02:00:00Z', interviewerIds: ['interviewer-1'], aiScore: 82.5 }])
     vi.mocked(completeInterview).mockResolvedValue({})
-    await mountPage()
+    const router = await mountPage()
     button('完成').click(); await flush()
     expect([...root!.querySelectorAll<HTMLOptionElement>('#conclude-outcome option')].map(item => item.value)).toEqual(options)
     expect(root!.querySelector('.completion-score')?.textContent).toContain('82.5')
@@ -171,6 +171,7 @@ describe('InterviewListPage', () => {
     select.value = outcome; select.dispatchEvent(new Event('change')); await flush()
     button('确认完成').click(); await flush()
     expect(completeInterview).toHaveBeenCalledWith('final-1', outcome)
+    if (outcome === 'offer') await vi.waitFor(() => expect(router.currentRoute.value.query).toEqual({ createApplicationId: 'app-1' }))
     expect(root!.querySelector('[role="dialog"]')).toBeNull()
     expect(submitFeedback).not.toHaveBeenCalled()
   })

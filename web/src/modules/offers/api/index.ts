@@ -79,7 +79,7 @@ export interface CreateOfferInput {
   taxNumber?: string
   templateFields?: OfferTemplateFields
   baseSalary: MoneyAmount
-  probationSalary?: MoneyAmount
+  probationSalary?: MoneyAmount | null
   bonus?: MoneyAmount
   equity?: string
   benefits?: string[]

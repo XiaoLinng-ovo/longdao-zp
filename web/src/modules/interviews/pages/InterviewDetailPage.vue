@@ -12,6 +12,7 @@ import ApplicationResumeButton from '../../candidates/components/ApplicationResu
 import InterviewSummaryPanel from '../components/InterviewSummaryPanel.vue'
 import type { InterviewSummaryView } from '../api/summary'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
+import { navigateToOffer } from '../utils/offer-navigation'
 import { stageOfRound, SHEET_TYPE_LABEL } from '../api/question-sheets'
 import { loadWorkflowEvents, type WorkflowEvent } from '../../../shared/api/workflow-events'
 import {
@@ -36,6 +37,11 @@ const jobTitle = ref('')
 const loading = ref(true)
 const error = ref('')
 const feedback = ref('')
+const completedOfferApplicationId = ref('')
+async function openCompletedOffer() {
+  if (!completedOfferApplicationId.value) return
+  if (!await navigateToOffer(router, completedOfferApplicationId.value)) feedback.value = '面试结论已保存，跳转未完成，请点击前往 Offer 管理重试'
+}
 const enteringLive = ref(false)
 const liveEntryError = ref('')
 const liveEntryNeedsReload = ref(false)
@@ -266,6 +272,7 @@ async function submitComplete() {
   clearFlags()
   completeError.value = ''
   const id = detail.value.id
+  const applicationId = detail.value.applicationId
   const outcome = completeOutcome.value
   try {
     await completeInterview(id, outcome)
@@ -273,6 +280,13 @@ async function submitComplete() {
       : outcome === 'reject' ? '未通过'
         : outcome === 'cancelled' ? '已取消面试' : '进入下一轮'
     showComplete.value = false
+    if (outcome === 'offer') {
+      detail.value = { ...detail.value!, status: 'completed', outcome }
+      completedOfferApplicationId.value = applicationId
+      feedback.value = `面试已完成：${outcomeLabel}`
+      await openCompletedOffer()
+      return
+    }
     await load()
     feedback.value = `面试已完成：${outcomeLabel}`
   } catch (cause) {
@@ -352,6 +366,7 @@ watch(() => route.query.openSummary, () => { void locateSummary() })
       <a v-if="liveEntryNeedsReload" :href="liveRoomHref">重新打开面试室</a>
     </div>
     <div v-if="feedback" class="success-note">{{ feedback }}</div>
+    <button v-if="completedOfferApplicationId" class="btn btn-primary" type="button" @click="openCompletedOffer">前往 Offer 管理</button>
 
     <section class="interview-summary" aria-label="面试关键信息">
       <div class="summary-head">

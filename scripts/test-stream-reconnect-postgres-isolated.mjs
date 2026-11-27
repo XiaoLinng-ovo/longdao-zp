@@ -35,7 +35,8 @@ try {
     pool = new Pool({ ...instance.connection, database: instance.database, max: 5 })
     await pool.query(`CREATE TABLE organizations(id uuid PRIMARY KEY);
       CREATE TABLE users(id uuid PRIMARY KEY,is_active boolean NOT NULL);
-      CREATE TABLE organization_members(organization_id uuid,user_id uuid);
+      CREATE TABLE organization_members(organization_id uuid,user_id uuid,is_active boolean DEFAULT true,ended_at timestamptz);
+      CREATE TABLE sessions(id uuid,user_id uuid,revoked_at timestamptz,expires_at timestamptz);
       CREATE FUNCTION organization_service_available(uuid) RETURNS boolean LANGUAGE sql AS 'SELECT true';
       CREATE TABLE interviews(id uuid PRIMARY KEY,organization_id uuid);
       CREATE TABLE interview_live_sessions(id uuid PRIMARY KEY,interview_id uuid,status text);
@@ -47,7 +48,9 @@ try {
     await pool.query(table[0])
     await pool.query('INSERT INTO organizations VALUES($1)', [org])
     await pool.query('INSERT INTO users VALUES($1,true)', [user])
-    await pool.query('INSERT INTO organization_members VALUES($1,$2)', [org,user])
+    await pool.query('INSERT INTO organization_members(organization_id,user_id) VALUES($1,$2)', [org,user])
+    const authSession = randomUUID()
+    await pool.query("INSERT INTO sessions VALUES($1,$2,NULL,now()+interval '1 hour')", [authSession,user])
     await pool.query('INSERT INTO interviews VALUES($1,$2)', [interview,org])
     await pool.query("INSERT INTO interview_live_sessions VALUES($1,$2,'recording')", [session,interview])
     upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' })
@@ -63,7 +66,7 @@ try {
     server = createServer()
     stop = attachBilledStreamGateway(server, loadConfig(), {
       pool, heartbeatIntervalMs: 100,
-      authenticate: async context => { context.auth = { method: 'session',sessionId:'synthetic',user:{ id:user,name:'synthetic',email:'synthetic@example.invalid',role:'recruiter',workspaceId:org } } },
+      authenticate: async context => { context.auth = { method: 'session',sessionId:authSession,user:{ id:user,name:'synthetic',email:'synthetic@example.invalid',role:'recruiter',workspaceId:org } } },
       resolveEnv: async () => ({}), upstreamUrl: 'ws://127.0.0.1:' + upstream.address().port,
     })
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))

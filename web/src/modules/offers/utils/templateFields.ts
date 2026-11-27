@@ -1,9 +1,12 @@
+import { offerSalaryTiming } from '@smartrecruit-pro/contracts'
+export { offerSalaryTiming, probationDurationMonths } from '@smartrecruit-pro/contracts'
+
 export const offerTemplateFieldDefinitions = [
   { key: 'reportingTime', label: '报到时间', type: 'datetime', maxLength: 16 },
   { key: 'supervisorName', label: '直属上级姓名', type: 'text', maxLength: 100 },
   { key: 'supervisorTitle', label: '直属上级职务', type: 'text', maxLength: 100 },
   { key: 'probationDuration', label: '试用期时长', type: 'text', maxLength: 50 },
-  { key: 'formalSalaryStartMonth', label: '调薪起始月（入职第几个月）', type: 'number', maxLength: 2, min: 1, max: 13 },
+  { key: 'formalSalaryStartMonth', label: '正常月薪起始月', type: 'number', maxLength: 2, min: 1, max: 13 },
   { key: 'payday', label: '发薪日', type: 'number', maxLength: 2, min: 1, max: 31 },
 ] as const
 
@@ -20,22 +23,8 @@ export function restoreOfferTemplateFields(fields: OfferTemplateFields = {}, sta
   return restored
 }
 
-export const additionalOfferVariables = offerTemplateFieldDefinitions.map(field => ({ value: `{{${field.label}}}`, label: field.label }))
-
-export function probationDurationMonths(duration = ''): number | undefined {
-  const match = /^(\d{1,2})\s*(?:个?月)?$/u.exec(duration.trim())
-  if (!match || Number(match[1]) > 12) return undefined
-  return Number(match[1])
-}
-
-export function offerSalaryTiming(fields: OfferTemplateFields = {}) {
-  const months = probationDurationMonths(fields.probationDuration)
-  const formalSalaryStartMonth = fields.formalSalaryStartMonth?.trim() || (months === undefined ? '' : String(months + 1))
-  // An explicitly agreed earlier raise ends the initial salary period, not probation.
-  const probationSalaryMonths = fields.probationSalaryMonths?.trim() || (months === undefined ? ''
-    : String(formalSalaryStartMonth ? Math.min(months, Math.max(0, Number(formalSalaryStartMonth) - 1)) : months))
-  return { probationSalaryMonths, formalSalaryStartMonth }
-}
+export const additionalOfferVariables = [...offerTemplateFieldDefinitions.map(field => ({ value: `{{${field.label}}}`, label: field.label })),
+  ...['初期月薪', '正常月薪', '初期薪资适用月数', '薪资安排说明'].map(label => ({ value: `{{${label}}}`, label }))]
 
 export function offerTemplateFieldValues(fields: OfferTemplateFields = {}): Record<string, string> {
   const reportingTime = fields.reportingTime ?? ''
@@ -55,5 +44,6 @@ export function offerTemplateFieldValues(fields: OfferTemplateFields = {}): Reco
     ['probationSalaryMonths', timing.probationSalaryMonths],
     ['试用期薪资适用月数', timing.probationSalaryMonths],
     ['转正后薪资生效月份', timing.formalSalaryStartMonth],
+    ['调薪起始月（入职第几个月）', timing.formalSalaryStartMonth],
   ]))
 }

@@ -8,7 +8,8 @@ import { loadCompletionReview, loadRoleManifest, type CompletionReview } from '.
 import { correctedContentFingerprint, transcriptRoleReviewWarning, type CorrectedTranscriptTurn } from './transcript-postprocessing.js'
 import type { ManualTranscriptRole } from './manual-transcript-roles.js'
 
-import type { SemanticRoleReview } from './semantic-role-review.js'
+import { semanticRolePending, semanticRoleResolved, type SemanticRoleReview } from './semantic-role-review.js'
+import type { HistoricalRoleReview } from './live-semantic-role-review.js'
 function sessionNotFound() { return Object.assign(new Error('未找到该面试录音会话'), { code: 'LIVE_SESSION_NOT_FOUND', status: 404 }) }
 function segmentNotFound() { return Object.assign(new Error('未找到该面试发言分段'), { code: 'LIVE_SEGMENT_NOT_FOUND', status: 404 }) }
 export interface LiveSession { id: string; interviewId: string; status: string; externalStatus: string; startedAt: string; endedAt?: string; createdBy: string; currentQuestion: string }
@@ -94,6 +95,33 @@ export class LiveInterviewSessionRepository {
   }
   async addSegment(sessionId: string, input: { speakerId: string; role: InterviewRole; confidence: number; text: string; startMs: number; endMs: number; audioSource?: 'microphone' | 'meeting'; audioObjectKey?: string; transcriptComparison?: TranscriptComparison; roleReview?: SemanticRoleReview }, connection: Pick<Pool, 'query'> = this.pool): Promise<LiveSegment> { const result = await connection.query('INSERT INTO interview_live_segments (session_id, speaker_id, role, role_confidence, text, start_ms, end_ms, audio_object_key, audio_source, transcript_comparison, role_review) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) RETURNING *', [sessionId, input.speakerId, input.role, input.confidence, simplifyTranscript(input.text), input.startMs, input.endMs, input.audioObjectKey ?? null, input.audioSource ?? null, JSON.stringify(input.transcriptComparison ?? null), input.roleReview ? JSON.stringify(input.roleReview) : null]); return mapSegment(result.rows[0]) }
   async correctRole(segmentId: string, role: Exclude<InterviewRole, 'unknown'>): Promise<LiveSegment> { const result = await this.pool.query("UPDATE interview_live_segments SET role = $2, role_confidence = 1, speaker_confirmed = true WHERE id = $1::uuid RETURNING *", [segmentId, role]); if (!result.rows[0]) throw segmentNotFound(); return mapSegment(result.rows[0]) }
+  async applyAutomaticRoleReviews(sessionId: string, changes: HistoricalRoleReview[]): Promise<number> {
+    const resolved = changes.filter(({ before, after }) => before.sessionId === sessionId && before.speakerConfirmed !== true
+      && (before.role === 'unknown' || semanticRolePending(before)) && before.id === after.id && semanticRoleResolved(after))
+    if (!resolved.length) return 0
+    const client = await this.transactionClient()
+    try {
+      await client.query('BEGIN')
+      // Match publication's lock order; never invalidate an ended session's canonical transcript.
+      const session = await client.query('SELECT status,ended_at FROM interview_live_sessions WHERE id=$1::uuid FOR UPDATE', [sessionId])
+      if (!session.rows[0] || session.rows[0].ended_at || !['active', 'paused'].includes(String(session.rows[0].status))) {
+        await client.query('ROLLBACK'); return 0
+      }
+      let updated = 0
+      for (const { before, after } of resolved) {
+        const result = await client.query(`UPDATE interview_live_segments SET role=$3,role_confidence=$4,role_review=$5::jsonb
+          WHERE session_id=$1::uuid AND id=$2::uuid AND speaker_confirmed IS NOT TRUE
+            AND role=$6 AND role_confidence=$7 AND role_review IS NOT DISTINCT FROM $8::jsonb
+            AND text=$9 AND speaker_id=$10 AND start_ms=$11 AND end_ms=$12`,
+        [sessionId, before.id, after.role, after.confidence, JSON.stringify(after.roleReview), before.role, before.confidence,
+          before.roleReview ? JSON.stringify(before.roleReview) : null, before.text, before.speakerId, before.startMs, before.endMs])
+        updated += result.rowCount ?? 0
+      }
+      await client.query('COMMIT')
+      return updated
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
   private async selectUtterance(primarySegmentId: string, segmentIds: string[]): Promise<LiveSegment[]> {
     const result = await this.pool.query('SELECT * FROM interview_live_segments WHERE session_id = (SELECT session_id FROM interview_live_segments WHERE id = $1::uuid) ORDER BY start_ms, end_ms, id', [primarySegmentId])
     if (!result.rows.some(row => String(row.id) === primarySegmentId)) throw segmentNotFound()

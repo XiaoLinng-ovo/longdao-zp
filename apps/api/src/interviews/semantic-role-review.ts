@@ -2,10 +2,11 @@ import { createBillingFetch } from '@smartrecruit-pro/enterprise-ai'
 import { loadQuestionSheetGeneratorConfig } from './question-sheet-generator.js'
 import type { InterviewRole } from './role-mapper.js'
 
-export const SEMANTIC_ROLE_PROMPT_VERSION = 'interview-role-context-v4'
+export const SEMANTIC_ROLE_PROMPT_VERSION = 'interview-role-context-v6'
 export interface SemanticRoleReview {
   method: 'semantic_context'
   status: 'inferred' | 'uncertain' | 'mixed'
+  failure?: 'configuration' | 'timeout' | 'request' | 'response'
   confidence: number
   reason: string
   model: string
@@ -15,6 +16,8 @@ export interface SemanticRoleTurn {
   id: string; text: string; role: InterviewRole; confidence: number
   speakerId: string; startMs: number; endMs: number
   speakerConfirmed?: boolean
+  speakerVerified?: boolean
+  speakerMixed?: boolean
   audioSource?: 'microphone' | 'meeting'
   roleReview?: SemanticRoleReview
   reasons?: string[]
@@ -31,7 +34,13 @@ const SYSTEM = [
   '开场常有 HR 自我介绍、公司与岗位介绍、邀请候选人自我介绍，再由候选人介绍履历。先后顺序只是线索，不是固定规则；同属招聘方的 HR 和多位面试官均标 interviewer。',
   '面试官可能复述、概括或引用候选人的经历再追问，整段仍属 interviewer；引用中的我、项目和成绩不属于面试官自己的履历，也不是候选人新增回答。候选人反问与追问后的澄清仍属 candidate。',
   '根据问题与回答的承接、个人履历归属、招聘方与应聘方立场、上下文指代作判断。短答或技术术语本身不能确定角色。',
+  '转写分段不是说话轮次，一句话可能跨多个 turnId。必须先结合前后片段还原语义承接，再逐段判断角色；不得仅因片段语法不完整、以逗号结束或只有技术名称就判 unknown。后文可以反向解释前面的残句。',
+  '例如项目背景残句紧接本人职责说明，且时间、声音及上下文支持同一次发言，应联合归属；但面试官复述项目后交给候选人回答也可能相邻，不得仅因主题相同就合并角色。',
+  '嗯、啊、呃、额、哦等纯语气词没有独立角色含义。若可靠声学身份、相邻时间、同一音频来源及上下文共同支持其属于连续发言，可随该次发言判断；不得要求语气词本身提供履历或提问证据，也不得因候选人常会思考而一律归给 candidate。',
+  '若纯语气词可能是另一人的应答、存在换人或重叠、不同音频来源、混合声音或没有可靠连续性，则保留 unknown 并说明缺少说话人证据，不得编造说话人。',
   'speakerId 是声学线索，可能重复或混人，不代表角色。人工确认不可覆盖；原有自动角色可能错误。',
+  'speakerVerified=false 也可能只是断线后以流式文本恢复，或音频太短无法提取声纹，不等于检测到多人混说。可用同来源的前后语义复核角色，但不得据此声称声纹已验证，也不得擅自纠正原文或猜测单字含义。',
+  'speakerVerified=true 仅表示声学身份已验证，不等于角色或人工已确认；speakerMixed=true 表示混合声音，不能据此延续单人角色。缺少声学字段不得视为已验证；相同 speakerId、相邻顺序或已有自动标签都不能单独证明连续发言。',
   '上下文中的 roleReview 是此前自动复核记录，不是人工确认。mixed、uncertain 或低置信度不能作为确定角色的依据，也不能只因前一段自动标签而顺延角色。',
   '若一段含两人问答、引用与实际交接难以分开、证据冲突或不足，必须返回 unknown；混合发言 mixed=true。不得伪造分割时间或补写文本。',
   '只返回 JSON：{"turns":[{"turnId":"原id","role":"interviewer|candidate|unknown","confidence":0.0,"mixed":false,"reason":"简短中文依据"}]}。',
@@ -45,6 +54,7 @@ function rows(turns: SemanticRoleTurn[]) {
   return turns.map(turn => ({ turnId: turn.id, text: turn.text, previousRole: turn.role,
     speakerId: turn.speakerId, startMs: turn.startMs, endMs: turn.endMs,
     manuallyConfirmed: turn.speakerConfirmed === true, audioSource: turn.audioSource,
+    speakerVerified: turn.speakerVerified, speakerMixed: turn.speakerMixed,
     confidence: turn.confidence, roleReview: turn.roleReview }))
 }
 function chronological<T extends SemanticRoleTurn>(turns: T[]): T[] {
@@ -58,7 +68,7 @@ function locked(turn: SemanticRoleTurn): boolean {
 }
 export function semanticRoleResolved(turn: Pick<SemanticRoleTurn, 'role' | 'roleReview' | 'confidence'>): boolean {
   return turn.role !== 'unknown' && turn.confidence >= .85
-    && turn.roleReview?.status === 'inferred' && turn.roleReview.confidence >= .85
+    && turn.roleReview?.status === 'inferred' && !turn.roleReview.failure && turn.roleReview.confidence >= .85
 }
 
 export function semanticRolePending(turn: Pick<SemanticRoleTurn, 'role' | 'roleReview' | 'confidence' | 'speakerConfirmed'>): boolean {
@@ -74,7 +84,12 @@ export class SemanticRoleReviewer {
     if (!turns.length || turns.every(locked)) return { turns, warnings: [] }
     let config: ReturnType<typeof loadQuestionSheetGeneratorConfig>
     try { config = loadQuestionSheetGeneratorConfig(env) }
-    catch { return { turns, warnings: ['语义角色复核未执行：企业模型未配置，保留原有角色和待复核状态。'] } }
+    catch {
+      return { turns: turns.map(turn => locked(turn) ? turn : { ...turn, role: 'unknown', confidence: .35,
+        roleReview: { method: 'semantic_context', status: 'uncertain', confidence: 0, failure: 'configuration',
+          reason: '企业 AI 配置不可用，尚未执行角色识别', model: '', promptVersion: SEMANTIC_ROLE_PROMPT_VERSION } }),
+        warnings: ['语义角色复核未执行：企业模型配置不可用，已保留原文和待复核状态。'] }
+    }
     const output = turns.map(turn => ({ ...turn }))
     const ordered = chronological(output)
     const warnings: string[] = []
@@ -92,11 +107,13 @@ export class SemanticRoleReviewer {
         const pending = new Set([range, ...queue].flatMap(item => ordered.slice(item.offset, item.end).filter(turn => !locked(turn)).map(turn => turn.id)))
         for (const turn of output.filter(turn => pending.has(turn.id))) {
           turn.role = 'unknown'; turn.confidence = .35
-          turn.roleReview = { method: 'semantic_context', status: 'uncertain', confidence: 0, reason: '全场语义识别超时，已保留原文', model: config.model, promptVersion: SEMANTIC_ROLE_PROMPT_VERSION }
+          turn.roleReview = { method: 'semantic_context', status: 'uncertain', confidence: 0, failure: 'timeout', reason: '全场语义识别超时，已保留原文', model: config.model, promptVersion: SEMANTIC_ROLE_PROMPT_VERSION }
         }
         warnings.push('全场语义角色识别达到时间上限，未完成片段保留原文，不纳入评分证据。')
         break
       }
+      let failure: NonNullable<SemanticRoleReview['failure']> = 'request'
+      let failureReason = 'AI 角色识别服务连接失败，尚未完成判断'
       try {
         const response = await createBillingFetch(env, this.fetchImpl)(config.baseUrl.replace(/\/$/u, '') + '/chat/completions', {
           method: 'POST', redirect: 'error',
@@ -112,7 +129,12 @@ export class SemanticRoleReviewer {
                 turnsToReview: rows(batch), after: rows(ordered.slice(end, end + 6)) }) },
             ] }),
         })
-        if (!response.ok) throw new Error('模型请求失败（HTTP ' + response.status + '）')
+        if (!response.ok) {
+          failureReason = 'AI 角色识别请求失败（HTTP ' + response.status + '），尚未完成判断'
+          throw new Error('模型请求失败（HTTP ' + response.status + '）')
+        }
+        failure = 'response'
+        failureReason = 'AI 角色识别响应无效，尚未完成判断'
         const payload: unknown = await response.json()
         const choice = record(payload) && Array.isArray(payload.choices) ? payload.choices[0] : undefined
         const message = record(choice) && record(choice.message) ? choice.message : undefined
@@ -139,6 +161,9 @@ export class SemanticRoleReviewer {
           turn.roleReview = review
         }
       } catch (error) {
+        if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) {
+          failure = 'timeout'; failureReason = 'AI 角色识别请求超时，尚未完成判断'
+        }
         // Offline recovery is bounded; live requests keep their single-request latency budget.
         if (options.timeoutMs === undefined && end - offset > 1 && depth < 1) {
           const midpoint = offset + Math.ceil((end - offset) / 2)
@@ -150,7 +175,7 @@ export class SemanticRoleReviewer {
           + ' 段）：' + (error instanceof Error ? error.message : '模型响应无效') + '；已保留原文并标记待复核。')
         for (const turn of output.filter(turn => batch.some(row => row.id === turn.id))) {
           turn.roleReview = { method: 'semantic_context', status: 'uncertain', confidence: 0,
-            reason: '语义模型未完成复核', model: config.model, promptVersion: SEMANTIC_ROLE_PROMPT_VERSION }
+            failure, reason: failureReason, model: config.model, promptVersion: SEMANTIC_ROLE_PROMPT_VERSION }
           turn.role = 'unknown'; turn.confidence = .35
         }
       }

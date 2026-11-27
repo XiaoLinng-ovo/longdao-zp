@@ -43,6 +43,13 @@ test('does not relaunch when the upstream workaround is present or on non-Window
   }
 })
 
+test('retains caller audio defaults across the Windows relaunch', async () => {
+  const { chromium, calls } = fixture([[defaults], [merged]])
+  const result = await launchIsolatedBrowser(chromium, { ...options, ignoreDefaultArgs: ['--mute-audio'] }, 'win32')
+  assert.deepEqual(calls[1].options.ignoreDefaultArgs, ['--mute-audio', defaults])
+  await result.browser.close()
+})
+
 test('closes the isolated browser if command-line verification fails', async () => {
   const { chromium, calls } = fixture([[defaults], [defaults, merged]])
   await assert.rejects(launchIsolatedBrowser(chromium, options, 'win32'), /one Chromium/)

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 import { bindBillingEnv } from './billing.js'
 import { EnterpriseAiError } from './errors.js'
 export { EnterpriseAiError } from './errors.js'
@@ -157,6 +157,136 @@ function selfServiceRuntimeEnv(id, row, masterKey) {
 function platformView(row) {
   const { organizationId, ...view } = toView(null, row)
   return { ...view, scope: 'platform' }
+}
+
+const configurationDigest = row => createHash('sha256').update(JSON.stringify(row ?? null)).digest('hex')
+const configurationConflict = () => new EnterpriseAiError('AI_CONFIGURATION_CHANGED', '配置已变化或平台已有配置，请刷新后重新核对', 409)
+
+/** Explicit legacy promotion; never used as a runtime fallback. */
+export class PlatformAiMaintenance {
+  constructor(pool, masterKey = process.env.AI_CONFIG_ENCRYPTION_KEY) { this.pool = pool; this.masterKey = masterKey }
+  async source(organizationId, db = this.pool, lock = false) {
+    const id = scope(organizationId)
+    const org = (await db.query(`SELECT o.id,o.name,s.schema_name FROM public.organizations o
+      JOIN public.organization_schemas s ON s.organization_id=o.id AND s.status='ready'
+      WHERE o.id=$1 AND EXISTS (SELECT 1 FROM public.organization_members m
+        JOIN public.platform_operators p ON p.user_id=m.user_id AND p.is_active AND p.role='admin'
+        JOIN public.users u ON u.id=m.user_id AND u.is_active
+        WHERE m.organization_id=o.id AND m.is_active AND u.user_no=$2) ${lock ? 'FOR SHARE OF o,s' : ''}`, [id,process.env.SYSTEM_ADMIN_USER_NO ?? ''])).rows[0]
+    if (!org || !/^company_[a-f0-9]{32}$/.test(org.schema_name)) throw new EnterpriseAiError('AI_LEGACY_SOURCE_UNAVAILABLE', '请选择系统管理员企业中的历史平台配置', 409)
+    const row = (await db.query(`SELECT * FROM "${org.schema_name}".enterprise_ai_settings WHERE organization_id=$1 ${lock ? 'FOR UPDATE' : ''}`, [id])).rows[0]
+    if (!row || row.self_service_enabled) throw new EnterpriseAiError('AI_LEGACY_SOURCE_UNAVAILABLE', '历史配置不存在，或属于企业自备模型，不能提升为平台配置', 409)
+    return { org, row, digest: configurationDigest(row) }
+  }
+  async preview(organizationId, baseUrl) {
+    const { org, row, digest } = await this.source(organizationId)
+    const target = (await this.pool.query('SELECT * FROM public.platform_ai_settings WHERE singleton=true')).rows[0]
+    const affected = (await this.pool.query(`SELECT count(*)::int AS count FROM public.organizations
+      WHERE status='active' AND use_platform_ai AND ai_model_source='platform' AND platform_ai_source_organization_id IS NULL`)).rows[0]
+    let errorCode = null
+    const destination = baseUrl === undefined ? row.base_url : normalizeAiBaseUrl(baseUrl)
+    try { enterpriseRuntimeEnv(org.id, {...row,base_url:destination}, this.masterKey) } catch (error) { errorCode = error.code ?? 'AI_CONFIG_INVALID' }
+    return { sourceOrganizationId: org.id, sourceName: org.name, model: row.model, baseUrlHost: destination, originalBaseUrl: row.base_url,
+      ...(baseUrl === undefined ? {} : {baseUrl:destination}),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null, sourceDigest: digest, targetDigest: configurationDigest(target), platformExists: Boolean(target),
+      affectedOrganizationCount: affected.count, decryptable: errorCode === null, errorCode, canMigrate: !target && !errorCode }
+  }
+  async sourceEnv(organizationId, expectedDigest, baseUrl) {
+    const source = await this.source(organizationId)
+    if (source.digest !== expectedDigest) throw configurationConflict()
+    return enterpriseRuntimeEnv(source.org.id, {...source.row,...(baseUrl === undefined ? {} : {base_url:normalizeAiBaseUrl(baseUrl)})}, this.masterKey)
+  }
+  async assertOperator(db, actorId) {
+    const actor = (await db.query(`SELECT p.user_id FROM public.platform_operators p JOIN public.users u ON u.id=p.user_id
+      WHERE p.user_id=$1 AND p.is_active AND p.role='admin' AND u.is_active AND u.user_no=$2 FOR SHARE OF p,u`, [scope(actorId),process.env.SYSTEM_ADMIN_USER_NO ?? ''])).rows[0]
+    if (!actor) throw new EnterpriseAiError('FORBIDDEN', '仅系统管理员可以迁移平台配置', 403)
+  }
+  async effectiveEnv(organizationId) {
+    const db = await this.pool.connect()
+    try {
+      await db.query('BEGIN READ ONLY')
+      const row = (await db.query("SELECT schema_name FROM public.organization_schemas WHERE organization_id=$1 AND status='ready'",[scope(organizationId)])).rows[0]
+      if (!row || !/^company_[a-f0-9]{32}$/.test(row.schema_name)) throw new EnterpriseAiError('WORKSPACE_REQUIRED','企业不可用',409)
+      await db.query(`SET LOCAL search_path="${row.schema_name}",public`)
+      return await new EnterpriseAiStore(db,this.masterKey).runtimeEnv(organizationId)
+    } finally { try { await db.query('ROLLBACK') } finally { db.release() } }
+  }
+  async migrate(input, actorId, requestId) {
+    const db = await this.pool.connect()
+    try {
+      await db.query('BEGIN')
+      await this.assertOperator(db, actorId)
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('platform-ai-settings',0))")
+      const source = await this.source(input.sourceOrganizationId, db, true)
+      if (source.digest !== input.sourceDigest) throw configurationConflict()
+      const current = (await db.query('SELECT * FROM public.platform_ai_settings WHERE singleton=true FOR UPDATE')).rows[0]
+      // Retrying the same successful import is a no-op, but never hides later edits.
+      const previous = (await db.query(`SELECT metadata FROM public.platform_audit_logs WHERE action='admin.ai_settings.import'
+        AND metadata->>'sourceDigest'=$1 ORDER BY created_at DESC LIMIT 1`, [source.digest])).rows[0]?.metadata
+      if (current) {
+        if (previous?.sourceOrganizationId === source.org.id && previous.targetDigest === configurationDigest(current)
+          && previous.baseUrl === normalizeAiBaseUrl(input.baseUrl ?? source.row.base_url)) {
+          await db.query('COMMIT'); return { migrated: false, migrationId: previous.migrationId, targetDigest: previous.targetDigest }
+        }
+        throw configurationConflict()
+      }
+      if (configurationDigest(current) !== input.targetDigest) throw configurationConflict()
+      const env = enterpriseRuntimeEnv(source.org.id, {...source.row,...(input.baseUrl === undefined ? {} : {base_url:normalizeAiBaseUrl(input.baseUrl)})}, this.masterKey)
+      const row = (await db.query(`INSERT INTO public.platform_ai_settings(singleton,base_url,api_key_ciphertext,model,timeout_ms,updated_by)
+        VALUES(true,$1,$2,$3,$4,$5) RETURNING *`, [env.OPENAI_BASE_URL,
+        encryptSecret(env.OPENAI_API_KEY,'platform-ai:v1:default',this.masterKey),env.OPENAI_MODEL,Number(env.OPENAI_TIMEOUT_MS),actorId])).rows[0]
+      const receipt = { migrationId: randomUUID(), sourceOrganizationId: source.org.id, sourceDigest: source.digest,
+        baseUrl:env.OPENAI_BASE_URL, originalBaseUrl:source.row.base_url, targetDigest: configurationDigest(row) }
+      await db.query(`INSERT INTO public.platform_audit_logs(actor_user_id,action,request_id,metadata)
+        VALUES($1,'admin.ai_settings.import',$2,$3::jsonb)`, [actorId,requestId ?? null,JSON.stringify(receipt)])
+      await db.query('COMMIT')
+      return { migrated: true, ...receipt }
+    } catch (error) { await db.query('ROLLBACK'); throw error }
+    finally { db.release() }
+  }
+  async rollback(migrationId, actorId, requestId) {
+    const db = await this.pool.connect()
+    try {
+      await db.query('BEGIN')
+      await this.assertOperator(db,actorId)
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('platform-ai-settings',0))")
+      const receipt = (await db.query(`SELECT metadata FROM public.platform_audit_logs WHERE action='admin.ai_settings.import'
+        AND metadata->>'migrationId'=$1`, [scope(migrationId)])).rows[0]?.metadata
+      const current = (await db.query('SELECT * FROM public.platform_ai_settings WHERE singleton=true FOR UPDATE')).rows[0]
+      if (!receipt || !current || receipt.targetDigest !== configurationDigest(current)) throw configurationConflict()
+      await db.query('DELETE FROM public.platform_ai_settings WHERE singleton=true')
+      await db.query(`INSERT INTO public.platform_audit_logs(actor_user_id,action,request_id,metadata)
+        VALUES($1,'admin.ai_settings.import_rollback',$2,$3::jsonb)`, [actorId,requestId ?? null,JSON.stringify({migrationId})])
+      await db.query('COMMIT')
+      return { rolledBack: true }
+    } catch (error) { await db.query('ROLLBACK'); throw error }
+    finally { db.release() }
+  }
+  async diagnose(organizationId) {
+    const platform = await new PlatformAiStore(this.pool,this.masterKey).get()
+    const result = { platform, source: null, effective: false, decryptable: false, errorCode: null, candidates: [] }
+    const orgs = (await this.pool.query(`SELECT DISTINCT m.organization_id FROM public.organization_members m
+      JOIN public.platform_operators p ON p.user_id=m.user_id AND p.is_active AND p.role='admin'
+      JOIN public.users u ON u.id=m.user_id AND u.is_active WHERE m.is_active AND u.user_no=$1 ORDER BY m.organization_id`,[process.env.SYSTEM_ADMIN_USER_NO ?? ''])).rows
+    for (const org of orgs) {
+      try { result.candidates.push(await this.preview(org.organization_id)) }
+      catch (error) { if (error.code !== 'AI_LEGACY_SOURCE_UNAVAILABLE') throw error }
+    }
+    if (!organizationId) return result
+    const id = scope(organizationId), db = await this.pool.connect()
+    try {
+      await db.query('BEGIN READ ONLY')
+      const org = (await db.query(`SELECT o.ai_model_source,o.platform_ai_source_organization_id,s.schema_name
+        FROM public.organizations o JOIN public.organization_schemas s ON s.organization_id=o.id AND s.status='ready' WHERE o.id=$1`,[id])).rows[0]
+      if (!org || !/^company_[a-f0-9]{32}$/.test(org.schema_name)) throw new EnterpriseAiError('WORKSPACE_REQUIRED','企业不可用',409)
+      result.source = org.ai_model_source === 'platform' ? (org.platform_ai_source_organization_id ? 'legacy_enterprise' : 'platform') : 'enterprise'
+      await db.query(`SET LOCAL search_path="${org.schema_name}",public`)
+      const env = await new EnterpriseAiStore(db,this.masterKey).runtimeEnv(id)
+      result.effective = true; result.decryptable = true; result.model = env.OPENAI_MODEL
+    } catch (error) { result.errorCode = error.code ?? 'AI_CONFIG_INVALID' }
+    finally { try { await db.query('ROLLBACK') } finally { db.release() } }
+    return result
+  }
 }
 
 /** Global configuration is database-only, including when accessed through a tenant pool. */

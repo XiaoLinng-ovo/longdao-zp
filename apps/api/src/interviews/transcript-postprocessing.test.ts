@@ -21,9 +21,12 @@ describe('multi-route transcript consolidation', () => {
     startMs: 1000, endMs: 2000, audioSource: 'microphone', evidenceIds: ['live:1'], roleReasons: [], speakerConfirmed,
   })
 
-  it('requires manual speaker review on mixed audio even with high automatic confidence', () => {
+  it('excludes unreliable mixed turns without making manual review a summary prerequisite', () => {
     assert.match(transcriptRoleReviewWarning([mixed], [reviewedTurn()])!, /1 段.*暂不评分/u)
-    assert.match(transcriptRoleReviewWarning([{ ...mixed, sourceRole: 'candidate' }], [reviewedTurn()])!, /人工确认/u)
+    const warning = transcriptRoleReviewWarning([{ ...mixed, sourceRole: 'candidate' }], [reviewedTurn()])!
+    assert.match(warning, /总结继续依据可靠发言生成/u)
+    assert.match(warning, /选择是否调整角色/u)
+    assert.doesNotMatch(warning, /请.*人工确认/u)
   })
 
   it('treats legacy recordings without source metadata as needing review', () => {

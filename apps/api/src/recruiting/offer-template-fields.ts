@@ -1,3 +1,6 @@
+import { offerSalaryTiming } from '@smartrecruit-pro/contracts'
+export { offerSalaryTiming, probationDurationMonths } from '@smartrecruit-pro/contracts'
+
 export interface OfferTemplateFields {
   reportingTime?: string
   supervisorName?: string
@@ -34,21 +37,6 @@ export function normalizeOfferTemplateFields(value: unknown): OfferTemplateField
     result[key as keyof OfferTemplateFields] = text
   }
   return result
-}
-
-export function probationDurationMonths(duration = ''): number | undefined {
-  const match = /^(\d{1,2})\s*(?:个?月)?$/u.exec(duration.trim())
-  if (!match || Number(match[1]) > 12) return undefined
-  return Number(match[1])
-}
-
-export function offerSalaryTiming(fields: OfferTemplateFields = {}) {
-  const months = probationDurationMonths(fields.probationDuration)
-  const formalSalaryStartMonth = fields.formalSalaryStartMonth?.trim() || (months === undefined ? '' : String(months + 1))
-  // An explicitly agreed earlier raise ends the initial salary period, not probation.
-  const probationSalaryMonths = fields.probationSalaryMonths?.trim() || (months === undefined ? ''
-    : String(formalSalaryStartMonth ? Math.min(months, Math.max(0, Number(formalSalaryStartMonth) - 1)) : months))
-  return { probationSalaryMonths, formalSalaryStartMonth }
 }
 
 export function offerTemplateFieldValues(fields: OfferTemplateFields = {}): Record<string, string> {

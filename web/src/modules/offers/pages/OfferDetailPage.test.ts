@@ -40,6 +40,7 @@ beforeEach(() => {
   vi.mocked(previewOfferEmail).mockImplementation(async (_id, input) => ({ to: input.to!, subject: input.subject, html: input.html!, versionId: 'version-1' }))
   const version = {
     id: 'version-1', offerId: 'offer-1', version: 1, positionTitle: '算法工程师', departmentId: 'dept-1', employmentType: 'full_time', startDate: '2026-11-03',
+    templateFields: { probationDuration: '3个月', probationSalaryMonths: '1', formalSalaryStartMonth: '2' },
     compensation: { baseSalary: { amount: 8000, currency: 'CNY' }, probationSalary: { amount: 5000, currency: 'CNY' } }, benefits: [], materials: [],
     content: '# 定制 Offer\n\n模板正文标记：saved-offer-template\n\n候选人：{{candidateName}}', createdAt: '2026-11-03T00:00:00Z',
   }
@@ -58,6 +59,26 @@ beforeEach(() => {
 afterEach(() => { app?.unmount(); root?.remove() })
 
 describe('Offer email composition', () => {
+  it('requires salary review without overwriting custom body text', async () => {
+    const detail = await getOffer('offer-1')
+    const content = '<p>人工约定：首月薪资八千，之后一万元。其他补充条款保留。</p>'
+    const version = { ...detail.version!, content }
+    vi.mocked(getOffer).mockResolvedValue({ ...detail, version, offer: { ...detail.offer, versions: [version] } })
+    await mountDetail()
+    await click('编辑')
+    await inputByLabel('正常月薪（元/月）', '12000')
+    await click('保存修订')
+    expect(updateOffer).not.toHaveBeenCalled()
+    expect(root.textContent).toContain('请核对正文中的薪资安排后再保存')
+    expect(root.querySelector('.offer-revise-dialog .rich-text-content')?.textContent).toContain('其他补充条款保留')
+    const review = root.querySelector<HTMLInputElement>('.salary-body-review input')!
+    expect(review).toBeTruthy()
+    review.click(); await flush()
+    await click('保存修订')
+    expect(updateOffer).toHaveBeenCalledWith('offer-1', expect.objectContaining({ content: expect.stringContaining('人工约定：首月薪资八千') }), 1)
+    expect(updateOffer).toHaveBeenCalledWith('offer-1', expect.objectContaining({ content: expect.stringContaining('其他补充条款保留') }), 1)
+  })
+
   it('uses the latest selected template without old contacts and sends exactly the previewed revision', async () => {
     const detail = await getOffer('offer-1')
     const version = { ...detail.version!, invoiceTitle: '123', taxNumber: '123456',
@@ -142,7 +163,7 @@ describe('Offer email composition', () => {
     await mountDetail(); await click('编辑')
     expect(root.querySelector<HTMLInputElement>('#offer-reporting-date')?.value).toBe('2026-11-03')
     expect(root.querySelector<HTMLInputElement>('#offer-reporting-time')?.value).toBe('09:30')
-    for (const [key, value] of Object.entries(version.templateFields).filter(([key]) => key !== 'reportingTime')) {
+    for (const [key, value] of Object.entries(version.templateFields).filter(([key]) => !['reportingTime', 'formalSalaryStartMonth'].includes(key))) {
       expect(root.querySelector<HTMLInputElement>('#offer-' + key)?.value).toBe(value)
     }
     expect(root.querySelector<HTMLInputElement>('input[placeholder="请输入发票抬头"]')?.value).toBe('测试公司')
@@ -222,7 +243,9 @@ describe('Offer email composition', () => {
     await click('发送 Offer')
     await click('编辑', root.querySelector('.offer-email-dialog')!)
     await inputByLabel('报到地点', '修订后地址')
-    await inputByLabel('转正期工资（元/月）', '18000')
+    await inputByLabel('正常月薪（元/月）', '18000')
+    const review = root.querySelector<HTMLInputElement>('.salary-body-review input')
+    if (review) { review.click(); await flush() }
     await click('保存修订')
     expect(updateOffer).toHaveBeenCalledWith('offer-1', expect.objectContaining({
       baseSalary: { amount: 18000, currency: 'CNY' },
@@ -382,7 +405,7 @@ describe('Offer email composition', () => {
     vi.mocked(getOffer).mockResolvedValue({ ...detail, offer: accepted, version })
     vi.mocked(sendOfferEmail).mockResolvedValue(accepted)
     await mountDetail()
-    const salaryMonthRow = [...root.querySelectorAll('.info-list div')].find(row => row.querySelector('dt')?.textContent === '调薪起始月（入职第几个月）')
+    const salaryMonthRow = [...root.querySelectorAll('.info-list div')].find(row => row.querySelector('dt')?.textContent === '正常月薪起始月')
     expect(salaryMonthRow?.querySelector('dd')?.textContent).toBe(startMonth)
     await click('重新发送')
     await click('预览邮件')
@@ -430,7 +453,7 @@ describe('Offer email composition', () => {
 
   it('updates bound fields while preserving custom prose when saving an accepted revision', async () => {
     const detail = await getOffer('offer-1')
-    const version = { ...detail.version!, reportingLocation: '旧地址', templateFields: { reportingTime: '2026-11-20T09:00' }, content: '<p>手工约定不得覆盖。</p><p>{{报到日期}} {{报到时间}} {{报到地点}}</p>' }
+    const version = { ...detail.version!, reportingLocation: '旧地址', templateFields: { ...detail.version!.templateFields, reportingTime: '2026-11-20T09:00' }, content: '<p>手工约定不得覆盖。</p><p>{{报到日期}} {{报到时间}} {{报到地点}}</p>' }
     vi.mocked(getOffer).mockResolvedValue({ ...detail, offer: { ...detail.offer, status: 'accepted' }, version })
     vi.mocked(updateOffer).mockResolvedValue(detail.offer)
     root = document.createElement('div'); document.body.appendChild(root)

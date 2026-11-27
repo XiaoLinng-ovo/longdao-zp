@@ -61,7 +61,10 @@ export function reconcileTranscript(segments: SpeakerSegment[], checkpoint: Tran
   const recovery = (text: string, startMs: number, endMs: number, index = 0): SpeakerSegment => ({
     id: `stream:${offsetMs}:${index}`, speakerId: `stream_${offsetMs}`, text,
     // Bounds come from the audio chunk or adjacent acoustic turns, never guessed word times.
-    startMs, endMs, speakerVerified: false, speakerMixed: true,
+    startMs, endMs, speakerVerified: false,
+    // Unverified recovery is not evidence of overlapping voices. Keep actual conflicts explicit.
+    ...(ordered.some(row => row.speakerMixed) || new Set(ordered.filter(row => row.speakerVerified).map(row => row.speakerId)).size > 1
+      ? { speakerMixed: true } : {}),
   })
   const withComparison = (rows: SpeakerSegment[], selectedSource: 'streaming' | 'offline') => {
     if (!offline || offline === streamed || !rows.length) return rows

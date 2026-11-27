@@ -9,6 +9,9 @@ import ApplicationResumeButton from '../../candidates/components/ApplicationResu
 import RichTextEditor from '../components/RichTextEditor.vue'
 import OfferMaterialsField from '../components/OfferMaterialsField.vue'
 import OfferTemplateFields from '../components/OfferTemplateFields.vue'
+import OfferSalaryFields from '../components/OfferSalaryFields.vue'
+import { salaryFormError, salaryPayload } from '../utils/salary'
+import { offerSalarySummary, offerSalaryTiming } from '@smartrecruit-pro/contracts'
 import { additionalOfferVariables, offerTemplateFieldDefinitions, offerTemplateFieldValues, restoreOfferTemplateFields, type OfferTemplateFields as TemplateFields } from '../utils/templateFields'
 import WorkflowEventTable from '../../../shared/components/workflow/WorkflowEventTable.vue'
 import { describeApiFailure } from '../../../shared/utils/errorMessage'
@@ -74,8 +77,8 @@ const templateVariables = [
   { value: '{{发票抬头}}', label: '发票抬头' },
   { value: '{{企业税号}}', label: '企业税号' },
   { value: '{{employmentType}}', label: '用工类型' },
-  { value: '{{probationSalary}}', label: '试用期工资' },
-  { value: '{{formalSalary}}', label: '转正后工资' },
+  { value: '{{probationSalary}}', label: '初期月薪（兼容旧模板）' },
+  { value: '{{formalSalary}}', label: '正常月薪' },
   { value: '{{benefits}}', label: '福利' },
 ]
 const emailPreview = ref<{ to: string; subject: string; html: string; versionId: string } | null>(null)
@@ -130,7 +133,7 @@ const reviseValues = computed(() => {
     positionTitle: form.positionTitle, departmentId: form.departmentId, employmentType: form.employmentType,
     startDate: reportingDate(form.templateFields, form.startDate), reportingLocation: form.reportingLocation,
     invoiceTitle: form.invoiceTitle, taxNumber: form.taxNumber, templateFields: form.templateFields,
-    compensation: { baseSalary: { amount: form.baseSalaryAmount, currency: 'CNY' }, probationSalary: form.employmentType === 'full_time' ? { amount: form.probationSalaryAmount, currency: 'CNY' } : undefined, bonus: form.bonusAmount > 0 ? { amount: form.bonusAmount, currency: 'CNY' } : undefined, equity: form.equity },
+    compensation: { baseSalary: { amount: form.baseSalaryAmount, currency: 'CNY' }, probationSalary: form.employmentType === 'full_time' && offerSalaryTiming(form.templateFields).probationSalaryMonths !== '0' ? { amount: form.probationSalaryAmount, currency: 'CNY' } : undefined, bonus: form.bonusAmount > 0 ? { amount: form.bonusAmount, currency: 'CNY' } : undefined, equity: form.equity },
     benefits: splitList(form.benefitsText), materials: form.materials,
   }, candidateName.value, departmentOptions.value.find(item => item.id === form.departmentId)?.name ?? departmentName.value)
 })
@@ -141,6 +144,12 @@ const legacyWarnings = computed(() => {
   const bound = new Set([...doc.querySelectorAll<HTMLElement>('[data-offer-variable]')].map(span => span.dataset.offerVariable))
   doc.querySelectorAll('[data-offer-variable]').forEach(span => span.remove())
   return Object.entries(original).filter(([key, value]) => canonicalOfferVariable(key) === key && value.length >= 2 && reviseValues.value[key] !== value && !bound.has(key) && doc.body.textContent?.includes(value)).map(([key]) => templateVariables.find(item => canonicalOfferVariable(item.value.slice(2, -2)) === key)?.label ?? key)
+})
+const salaryBodyReviewRequired = computed(() => {
+  if (!showRevise.value || !currentVersion.value) return false
+  const original = offerContentValues(currentVersion.value)
+  const changed = ['probationDuration', 'probationSalaryMonths', 'formalSalaryStartMonth', 'baseSalary', 'probationSalary'].some(key => original[key] !== reviseValues.value[key])
+  return changed && !reviseForm.value.content.includes('data-offer-variable="salaryArrangement"')
 })
 watch(reviseValues, values => {
   if (!showRevise.value) return
@@ -227,7 +236,7 @@ function money(value?: { amount: number; currency: string }): string {
 }
 
 function salaryLabel(employmentType: string): string {
-  return employmentType === 'full_time' ? '转正期工资' : '实习工资'
+  return employmentType === 'full_time' ? '正常月薪' : '实习工资'
 }
 
 function date(value?: string): string {
@@ -251,7 +260,7 @@ function run(action: OfferAction) {
 function defaultEmailTemplate(): string {
   const fullTime = currentVersion.value?.employmentType === 'full_time'
   const compensation = fullTime
-    ? '<li>试用期工资：{{probationSalary}} 元/月</li><li>转正期工资：{{formalSalary}} 元/月</li>'
+    ? '<li>薪资安排：{{薪资安排说明}}</li>'
     : '<li>实习工资：{{formalSalary}} 元/月</li>'
   return `<p>{{candidateName}}，您好：</p><h1>Offer 录用通知</h1><p>很高兴通知您，您已通过本次招聘流程，现诚邀您加入我们。</p><ul><li>职位：{{positionTitle}}</li><li>用工类型：{{employmentType}}</li><li>预计入职日期：{{startDate}}</li>${compensation}</ul><p>请查收附件中的 Offer 文件，并回复本邮件确认。</p><p>祝好！</p>`
 }
@@ -535,9 +544,14 @@ async function submitRevise(): Promise<boolean> {
   if (!offer.value || revising.value) return false
   const form = reviseForm.value
   if (!form.positionTitle.trim() || !form.departmentId.trim()) { error.value = '请填写职位名称与部门'; return false }
-  if (form.employmentType === 'full_time' && !(form.probationSalaryAmount > 0)) { error.value = '请填写试用期工资'; return false }
-  if (!(form.baseSalaryAmount > 0)) { error.value = form.employmentType === 'full_time' ? '请填写转正期工资' : '请填写实习工资'; return false }
+  const original = currentVersion.value
+  const salaryUnchanged = original && original.employmentType === form.employmentType
+    && original.compensation.baseSalary.amount === form.baseSalaryAmount && (original.compensation.probationSalary?.amount ?? 0) === form.probationSalaryAmount
+    && ['probationDuration', 'probationSalaryMonths', 'formalSalaryStartMonth'].every(key => (original.templateFields?.[key as keyof TemplateFields] ?? '') === (form.templateFields[key as keyof TemplateFields] ?? ''))
+  const salaryError = salaryUnchanged ? '' : salaryFormError(form.employmentType, form.templateFields, form.baseSalaryAmount, form.probationSalaryAmount)
+  if (salaryError) { error.value = salaryError; return false }
   if (legacyWarnings.value.length && !bodyReviewed.value) { error.value = '请核对正文中未绑定引用的旧信息'; return false }
+  if (salaryBodyReviewRequired.value && !bodyReviewed.value) { error.value = '请核对正文中的薪资安排后再保存'; return false }
   if (!form.content.trim()) { error.value = '请填写 Offer 内容'; return false }
   if (form.materials.some((item) => item === 'other' || (item.startsWith('other:') && !item.slice(6).trim()))) { error.value = '请填写其他入职材料的名称'; return false }
   revising.value = true
@@ -551,8 +565,7 @@ async function submitRevise(): Promise<boolean> {
       reportingLocation: form.reportingLocation.trim(),
       invoiceTitle: form.invoiceTitle.trim(),
       taxNumber: form.taxNumber.trim(),
-      templateFields: form.templateFields,
-      probationSalary: form.employmentType === 'full_time' ? { amount: form.probationSalaryAmount, currency: 'CNY' } : undefined,
+      ...(salaryUnchanged ? { templateFields: form.templateFields } : salaryPayload(form.employmentType, form.templateFields, form.probationSalaryAmount)),
       baseSalary: { amount: form.baseSalaryAmount, currency: 'CNY' },
       bonus: form.bonusAmount > 0 ? { amount: form.bonusAmount, currency: 'CNY' } : undefined,
       equity: form.equity.trim() || undefined,
@@ -669,7 +682,8 @@ onMounted(load)
           <template v-for="field in offerTemplateFieldDefinitions" :key="field.key">
             <div v-if="currentTemplateFields[field.key]"><dt>{{ field.label }}</dt><dd>{{ field.key === 'reportingTime' ? currentTemplateFields[field.key]?.replace('T', ' ') : currentTemplateFields[field.key] }}</dd></div>
           </template>
-          <div v-if="currentVersion.employmentType === 'full_time'"><dt>试用期工资</dt><dd>{{ money(currentVersion.compensation.probationSalary) }}</dd></div>
+          <div v-if="currentVersion.employmentType === 'full_time' && offerSalaryTiming(currentVersion.templateFields).probationSalaryMonths !== '0'"><dt>初期月薪</dt><dd>{{ money(currentVersion.compensation.probationSalary) }}</dd></div>
+          <div v-if="currentVersion.employmentType === 'full_time'" style="grid-column:1 / -1"><dt>薪资安排</dt><dd>{{ offerSalarySummary(currentVersion.templateFields ?? {}, currentVersion.compensation.baseSalary.amount, currentVersion.compensation.probationSalary?.amount) }}</dd></div>
           <div><dt>{{ salaryLabel(currentVersion.employmentType) }}</dt><dd>{{ money(currentVersion.compensation.baseSalary) }}</dd></div>
           <div><dt>奖金</dt><dd>{{ money(currentVersion.compensation.bonus) }}</dd></div>
           <div><dt>股权</dt><dd>{{ currentVersion.compensation.equity || '—' }}</dd></div>
@@ -785,6 +799,7 @@ onMounted(load)
       <header class="offer-revise-header"><h3 id="offer-revise-title">{{ reviseIntent === 'send' ? '重新发送 Offer 邮件' : '修订 Offer' }}</h3></header>
       <div class="offer-revise-body">
         <div v-if="legacyWarnings.length" class="feedback error" role="alert">正文中的{{ legacyWarnings.join('、') }}未绑定引用，请核对后再保存。<label><input v-model="bodyReviewed" type="checkbox" />已核对正文与本次修改一致</label></div>
+        <label v-if="salaryBodyReviewRequired && !legacyWarnings.length" class="salary-body-review"><input v-model="bodyReviewed" type="checkbox" />已核对正文中的薪资安排与本次填写一致</label>
         <p v-if="error" class="feedback error" role="alert">{{ error }}</p>
         <div class="form-grid">
           <template v-if="reviseIntent === 'send'">
@@ -792,6 +807,7 @@ onMounted(load)
             <div class="form-field" style="grid-column:1 / -1"><label for="offer-email-subject">邮件主题</label><input id="offer-email-subject" v-model="emailForm.subject" maxlength="200" /></div>
             <div v-if="offer?.status !== 'accepted'" class="form-field" style="grid-column:1 / -1"><label for="offer-email-expiry">有效期至（北京时间，可选）</label><input id="offer-email-expiry" v-model="emailForm.expiresAt" type="datetime-local" /></div>
           </template>
+          <h4 class="offer-form-heading">录用信息</h4>
           <div class="form-field">
             <label>岗位</label>
             <select :value="reviseForm.jobId" @change="applyJobSelection(($event.target as HTMLSelectElement).value)">
@@ -810,12 +826,13 @@ onMounted(load)
             <label>用工类型</label>
             <select v-model="reviseForm.employmentType"><option value="full_time">全职</option><option value="internship">实习</option></select>
           </div>
+          <h4 class="offer-form-heading">报到安排</h4>
           <OfferTemplateFields v-model="reviseForm.templateFields" :employment-type="reviseForm.employmentType" />
           <div class="form-field"><label>报到地点</label><input v-model="reviseForm.reportingLocation" maxlength="300" placeholder="请输入候选人报到地点" /></div>
       <div class="form-field"><label>发票抬头</label><input v-model="reviseForm.invoiceTitle" maxlength="200" placeholder="请输入发票抬头" /></div>
       <div class="form-field"><label>企业税号</label><input v-model="reviseForm.taxNumber" maxlength="100" placeholder="请输入企业税号" /></div>
-          <div v-if="reviseForm.employmentType === 'full_time'" class="form-field"><label>试用期工资（元/月）</label><input v-model.number="reviseForm.probationSalaryAmount" type="number" min="0" /></div>
-          <div class="form-field"><label>{{ reviseForm.employmentType === 'full_time' ? '转正期工资（元/月）' : '实习工资（元/月）' }}</label><input v-model.number="reviseForm.baseSalaryAmount" type="number" min="0" /></div>
+          <OfferSalaryFields v-model:fields="reviseForm.templateFields" v-model:base-salary="reviseForm.baseSalaryAmount" v-model:initial-salary="reviseForm.probationSalaryAmount" :employment-type="reviseForm.employmentType" />
+          <h4 class="offer-form-heading">福利与材料</h4>
           <div class="form-field"><label>奖金（元，可选）</label><input v-model.number="reviseForm.bonusAmount" type="number" min="0" /></div>
           <div class="form-field"><label>股权（可选）</label><input v-model="reviseForm.equity" /></div>
           <div class="form-field" style="grid-column:1 / -1"><label>福利（逗号分隔）</label><input v-model="reviseForm.benefitsText" /></div>
@@ -845,6 +862,9 @@ onMounted(load)
 </template>
 
 <style scoped>
+.offer-form-heading{grid-column:1 / -1;margin:12px 0 0;padding-bottom:8px;border-bottom:1px solid var(--border,#dbe3ef);font-size:14px}
+.salary-body-review{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6;color:#a34c15}
+.salary-body-review input{width:16px;height:16px;flex:none;margin-top:3px}
 :global(html:has(.offer-scroll-lock)) { overflow: hidden; }
 :global(html:has(.offer-scroll-gutter)) { scrollbar-gutter: stable; }
 .revision-template-controls { display: flex; flex-wrap: wrap; gap: 8px; }

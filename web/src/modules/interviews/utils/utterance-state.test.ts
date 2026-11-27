@@ -1,8 +1,62 @@
 import { describe, expect, it } from 'vitest'
-import { analysisMatchesUtterance, analysisSourceKey, analysisSourceSegments, buildUtterances, priorUtteranceContext } from './utterance-state'
+import { analysisMatchesUtterance, analysisSourceKey, analysisSourceSegments, buildUtterances, mergePolledLiveSegments, priorUtteranceContext, speakerRoleReviewLabel, speakerRoleReviewReason } from './utterance-state'
 import type { LiveAnswerAnalysis } from '../api'
 
 describe('live interview utterance state', () => {
+  it('merges automatic updates without duplicates, deletion, cross-session changes or overwriting manual roles', () => {
+    const row = { id: 'a', sessionId: 's', speakerId: 'voice_1', role: 'unknown' as const, confidence: .35,
+      text: '原始发言', startMs: 0, endMs: 1000, status: 'transcribed' }
+    const manual = { ...row, id: 'manual', role: 'interviewer' as const, confidence: 1, speakerConfirmed: true }
+    const unsynced = { ...row, id: 'not-yet-returned' }
+    const update = { ...row, role: 'candidate' as const, confidence: .95 }
+    const incoming = [update, { ...manual, role: 'unknown' as const, speakerConfirmed: false },
+      { ...row, id: 'new' }, { ...row, sessionId: 'other', role: 'interviewer' as const }]
+    const result = mergePolledLiveSegments([row, manual, unsynced], incoming)
+    expect(result).toHaveLength(5)
+    expect(result[0]?.role).toBe('candidate')
+    expect(result[1]).toEqual(manual)
+    expect(result[2]).toEqual(unsynced)
+    expect(result[4]?.sessionId).toBe('other')
+    expect(row.role).toBe('unknown')
+  })
+  it('distinguishes failed AI calls, genuine uncertainty and successful automatic identification', () => {
+    const row = { id: 'a', sessionId: 's', speakerId: 'same', role: 'unknown' as const, confidence: .35,
+      text: '好的，', startMs: 0, endMs: 1000, status: 'transcribed', roleReview: {
+        method: 'semantic_context' as const, status: 'uncertain' as const, confidence: .4,
+        reason: '仅有简短应答，无法判断角色', model: 'test', promptVersion: 'test' } }
+    expect(speakerRoleReviewLabel(row)).toBe('上下文不足，角色待确认')
+    expect(speakerRoleReviewReason(row)).toBe(row.roleReview.reason)
+    const failed = { ...row, roleReview: { ...row.roleReview, failure: 'timeout' as const, reason: 'AI 角色识别请求超时，尚未完成判断' } }
+    expect(speakerRoleReviewLabel(failed)).toBe('AI 识别未完成')
+    expect(speakerRoleReviewReason(failed)).toContain('超时')
+    const legacy = { ...row, roleReview: { ...row.roleReview, reason: '语义模型未完成复核' } }
+    expect(speakerRoleReviewLabel(legacy)).toBe('AI 识别未完成')
+    expect(speakerRoleReviewReason(legacy)).toContain('调用未完成')
+    const resolved = { ...row, role: 'candidate' as const, confidence: .95, roleReview: { ...row.roleReview, status: 'inferred' as const, confidence: .95 } }
+    expect(speakerRoleReviewLabel(resolved)).toBe('AI 已识别')
+    expect(speakerRoleReviewReason(resolved)).toBe('')
+    expect(speakerRoleReviewLabel({ ...failed, speakerConfirmed: true })).toBe('')
+    expect(speakerRoleReviewReason({ ...failed, speakerConfirmed: true })).toBe('')
+  })
+  it('refreshes context-resolved filler and fragments into one answer while preserving original evidence', () => {
+    const pending = ['呃，额，啊，哦，嗯，', '就是客服 Agent 的时候，', '我负责项目需求分析、开发和上线。'].map((text, index) => ({
+      id: String(index), sessionId: 's', speakerId: 'voice_1', audioSource: 'microphone' as const,
+      role: 'unknown' as const, confidence: .35, text, startMs: index * 1000, endMs: index * 1000 + 900,
+      status: 'transcribed', roleReview: { method: 'semantic_context' as const, status: 'uncertain' as const,
+        confidence: .4, reason: '等待后续上下文', model: 'test', promptVersion: 'v5' },
+    }))
+    expect(buildUtterances(pending, 10000, 1600)).toHaveLength(3)
+    const updated = pending.map(row => ({ ...row, role: 'candidate' as const, confidence: .95,
+      roleReview: { ...row.roleReview, status: 'inferred' as const, confidence: .95, reason: '连续回答的前后文明确归属' } }))
+    const result = buildUtterances(mergePolledLiveSegments(pending, updated), 10000, 1600)
+    expect(result).toHaveLength(1)
+    expect(result[0]?.text).toBe(pending.map(row => row.text).join(''))
+    expect(result[0]?.sourceIds).toEqual(['0', '1', '2'])
+    expect(result[0]?.sourceSegments.map(row => row.text)).toEqual(pending.map(row => row.text))
+    expect(result[0]?.speakerConfirmed).toBe(false)
+    expect(speakerRoleReviewLabel(result[0]!)).toBe('AI 已识别')
+    expect(pending.every(row => row.role === 'unknown')).toBe(true)
+  })
   for (const status of ['mixed', 'uncertain', 'inferred'] as const) {
     it('keeps unresolved ' + status + ' speech separate and invalidates old analysis', () => {
       const roleReview = { method: 'semantic_context' as const, status, confidence: status === 'inferred' ? .7 : .95,

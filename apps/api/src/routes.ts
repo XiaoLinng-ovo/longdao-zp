@@ -1,4 +1,5 @@
 import { BillingSandboxService } from './platform/billing-sandbox.js';
+import { offerSalaryVariables } from '@smartrecruit-pro/contracts';
 import { assertPlatformWriteSecurity } from './platform/access.js';
 import { AiUsageService, usageKey } from './platform/ai-usage.js';
 import { parseUsageFilters } from './platform/ai-usage-diagnostics.js';
@@ -1194,6 +1195,22 @@ const routeMiddleware: Middleware = async (context, next) => {
       }, env));
       return;
     }
+    if (path === '/api/v1/admin/ai-diagnostics' && method === 'GET') {
+      requireSystemAdministrator(auth); context.res.setHeader('cache-control','private, no-store');
+      sendSuccess(context,await adminService.diagnoseAi(auth.user.workspaceId)); return;
+    }
+    if (path === '/api/v1/admin/ai-generation-test' && method === 'POST') {
+      requireSystemAdministrator(auth); context.res.setHeader('cache-control','private, no-store');
+      sendSuccess(context,await adminService.testPersistedAiGeneration(auth.user.workspaceId)); return;
+    }
+    if (path === '/api/v1/admin/ai-legacy-import' && method === 'POST') {
+      requireSystemAdministrator(auth); context.res.setHeader('cache-control','private, no-store');
+      sendSuccess(context,await adminService.importLegacyAi(await readJson(context),auth.user.id,context.requestId)); return;
+    }
+    if (path === '/api/v1/admin/ai-legacy-preview' && method === 'POST') {
+      requireSystemAdministrator(auth); context.res.setHeader('cache-control','private, no-store');
+      sendSuccess(context,await adminService.previewLegacyAi(await readJson(context))); return;
+    }
     if (path === '/api/v1/admin/ai-settings' && method === 'GET') { requireSystemAdministrator(auth); context.res.setHeader('cache-control', 'no-store'); sendSuccess(context, await adminService.getAiSettings()); return; }
     if (path === '/api/v1/admin/ai-settings' && method === 'PATCH') {
       requireSystemAdministrator(auth);
@@ -1364,6 +1381,7 @@ const routeMiddleware: Middleware = async (context, next) => {
         const bankName = bankCard ? bankCard.slice('bank_card:'.length).trim() : ''
         const values: Record<string, string> = {
           ...offerTemplateFieldValues(offerContext.templateFields),
+          ...offerSalaryVariables(offerContext.templateFields ?? {}, offerContext.baseSalary, offerContext.probationSalary),
           candidateName: offerContext.candidateName, '候选人姓名': offerContext.candidateName, '称谓': '您好', candidateEmail: offerContext.candidateEmail,
           positionTitle: offerContext.positionTitle, jobTitle: offerContext.positionTitle, '岗位名称': offerContext.positionTitle, offerCode: offerContext.offerCode,
           department: offerContext.department,

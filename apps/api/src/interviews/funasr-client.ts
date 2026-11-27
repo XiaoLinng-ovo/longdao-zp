@@ -3,7 +3,7 @@ import { parseSpeakerSegments } from './asr-segments.js'
 import { runtimeFetch } from '@smartrecruit-pro/runtime-lifecycle'
 
 export interface FunAsrConfig { baseUrl: string; token?: string; timeoutMs: number }
-export class FunAsrError extends Error { constructor(public readonly code: 'NOT_CONFIGURED' | 'UPSTREAM' | 'TIMEOUT' | 'INVALID_RESPONSE', message: string, public readonly cause?: unknown) { super(message); this.name = 'FunAsrError' } }
+export class FunAsrError extends Error { constructor(public readonly code: 'NOT_CONFIGURED' | 'UPSTREAM' | 'ASR_HTTP_ERROR' | 'TIMEOUT' | 'INVALID_RESPONSE', message: string, public readonly cause?: unknown) { super(message); this.name = 'FunAsrError' } }
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 export function loadFunAsrConfig(env: NodeJS.ProcessEnv = process.env): FunAsrConfig {
@@ -22,7 +22,7 @@ export function createFunAsrClient(config: FunAsrConfig, fetchImpl: FetchLike = 
       if (signal.aborted) throw new FunAsrError('TIMEOUT', '语音转写服务响应超时，请稍后重试。', error)
       throw new FunAsrError('UPSTREAM', '无法连接语音转写服务，请检查服务后重试。', error)
     }
-    if (!response.ok) throw new FunAsrError('UPSTREAM', '语音转写服务返回 HTTP ' + response.status + '，请稍后重试。')
+    if (!response.ok) throw new FunAsrError('ASR_HTTP_ERROR', '语音转写服务返回 HTTP ' + response.status + '，请稍后重试。')
     let payload: unknown
     try { payload = await response.json() } catch (error) {
       if (signal.aborted) throw new FunAsrError('TIMEOUT', '读取语音转写结果超时，请稍后重试。', error)

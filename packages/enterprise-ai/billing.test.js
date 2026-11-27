@@ -25,7 +25,7 @@ test('模型请求使用平台输入输出限制，超限不调用服务商',asy
  await assert.rejects(request('https://fixture.invalid',{body:JSON.stringify({messages:[{content:'x'.repeat(101)}]})}),{code:'BILLING_INPUT_LIMIT'});assert.equal(calls,1)
 })
 test('明确拒绝退额，未知结果保留预占，结算失败不重复派发',async()=>{
- for(const [code,expected] of [['MODEL_HTTP_ERROR','released'],['OCR_HTTP_ERROR','released'],['BILLING_INPUT_LIMIT','released'],['NETWORK','uncertain'],['MODEL_RESPONSE_INVALID','uncertain']]){
+ for(const [code,expected] of [['MODEL_HTTP_ERROR','released'],['OCR_HTTP_ERROR','released'],['ASR_HTTP_ERROR','released'],['BILLING_INPUT_LIMIT','released'],['NETWORK','uncertain'],['MODEL_RESPONSE_INVALID','uncertain']]){
   const store=new BillingStore({});let state;store.reserve=async()=>({id:'id',config:config()});store.finish=async(_id,s)=>{state=s};await assert.rejects(store.execute({},async()=>{throw Object.assign(new Error('fixture'),{code})}));assert.equal(state,expected)
  }
  const store=new BillingStore({});let states=[];store.reserve=async()=>({id:'id',config:config()});store.finish=async(_id,s)=>{states.push(s);if(s==='settled')throw Error('db lost')};await assert.rejects(store.execute({},async()=>true));assert.deepEqual(states,['settled','uncertain'])

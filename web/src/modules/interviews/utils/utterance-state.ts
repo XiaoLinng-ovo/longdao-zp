@@ -8,9 +8,35 @@ export interface LiveUtterance extends LiveInterviewSegment {
   overlapping?: boolean
 }
 
+export function mergePolledLiveSegments(current: LiveInterviewSegment[], incoming: LiveInterviewSegment[]): LiveInterviewSegment[] {
+  const key = (row: LiveInterviewSegment) => `${row.sessionId}:${row.id}`
+  const updates = new Map(incoming.map(row => [key(row), row]))
+  const merged = current.map(row => {
+    const updated = updates.get(key(row))
+    updates.delete(key(row))
+    if (!updated || row.speakerConfirmed === true || row.speakerId.startsWith('manual_')) return row
+    return { ...row, ...updated }
+  })
+  return [...merged, ...updates.values()]
+}
+
 function semanticRolePending(row: LiveInterviewSegment): boolean {
   return row.speakerConfirmed !== true && !!row.roleReview
-    && (row.roleReview.status !== 'inferred' || row.roleReview.confidence < .85 || row.confidence < .85)
+    && (!!row.roleReview.failure || row.roleReview.status !== 'inferred' || row.roleReview.confidence < .85 || row.confidence < .85)
+}
+
+export function speakerRoleReviewLabel(row: LiveInterviewSegment): string {
+  if (!row.roleReview || row.speakerConfirmed) return ''
+  const review = row.roleReview
+  if (review.failure || review.reason === '语义模型未完成复核') return 'AI 识别未完成'
+  if (review.status === 'mixed') return '混合发言，待复核'
+  return semanticRolePending(row) || row.role === 'unknown' ? '上下文不足，角色待确认' : 'AI 已识别'
+}
+
+export function speakerRoleReviewReason(row: LiveInterviewSegment): string {
+  if (!row.roleReview || row.speakerConfirmed || !semanticRolePending(row) && row.role !== 'unknown') return ''
+  return row.roleReview.reason === '语义模型未完成复核'
+    ? '此前 AI 识别调用未完成，尚未得到角色判断。' : row.roleReview.reason
 }
 
 export function analysisSourceSegments(row: LiveUtterance): AnalysisSourceSegment[] {

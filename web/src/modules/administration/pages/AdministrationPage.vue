@@ -10,6 +10,7 @@ import ChannelIntegrationSettings from '../components/ChannelIntegrationSettings
 import DocumentGenerationSkills from '../components/DocumentGenerationSkills.vue'
 import ResumeScoringSkills from '../components/ResumeScoringSkills.vue'
 import AiModelSelector from '../components/AiModelSelector.vue'
+import AiConfigurationDiagnostics from '../components/AiConfigurationDiagnostics.vue'
 import AccountCreation from '../components/AccountCreation.vue'
 import SmtpSettings from '../components/SmtpSettings.vue'
 import OperationalRecoveryPanel from '../components/OperationalRecoveryPanel.vue'
@@ -30,7 +31,7 @@ const activeModule = computed<AdministrationModuleKey>(() => {
   const value = Array.isArray(routeQuery.value.module) ? routeQuery.value.module[0] : routeQuery.value.module
   return isAdministrationModuleKey(value) && platformAdministrationModules.some(item => item.key === value) ? value : 'users'
 })
-const activeModuleLabel = computed(() => administrationModules.find((module) => module.key === activeModule.value)?.label ?? '用户与账号类型')
+const activeModuleLabel = computed(() => administrationModules.find((module) => module.key === activeModule.value)?.label ?? '用户管理')
 
 function selectModule(value: string) {
   if (!isAdministrationModuleKey(value)) return
@@ -306,7 +307,7 @@ async function clearAiApiKey() {
 
 async function saveUser(user: AdminUser) {
   savingUser.value = user.id; error.value = ''
-  try { const saved = await updateAdminUser(user.id, { displayName: user.displayName, isActive: user.isActive, role: user.role, departmentCode: user.departmentCode }); users.value = users.value.map((item) => item.id === user.id ? saved : item) }
+  try { const saved = await updateAdminUser(user.id, { displayName: user.displayName, isActive: user.isActive, departmentCode: user.departmentCode }); users.value = users.value.map((item) => item.id === user.id ? saved : item) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : '保存用户失败' }
   finally { savingUser.value = null }
 }
@@ -460,10 +461,10 @@ onMounted(refresh)
   <div v-else>
     <div v-if="error" class="error-note" role="alert">{{ error }} <button class="btn btn-ghost" type="button" @click="refresh">重试</button></div>
     <section v-if="activeModule === 'users'" class="section">
-      <h3 class="section-title">用户与账号类型</h3>
+      <h3 class="section-title">用户管理</h3>
       <div class="table-wrap">
-        <table><thead><tr><th>用户</th><th>账号类型</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><select v-model="user.role" aria-label="用户账号类型"><option v-for="role in roles" :key="role.id" :value="role.code">{{ role.name }}</option></select></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
+        <table><thead><tr><th>用户</th><th>部门</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          <tr v-for="user in users" :key="user.id"><td><strong>{{ user.displayName }}</strong><br><small>{{ user.email }}</small></td><td><select v-model="user.departmentCode" aria-label="用户部门"><option :value="null">未分配</option><option v-for="department in departments" :key="department.id" :value="department.code">{{ department.name }}</option></select></td><td><label><input v-model="user.isActive" type="checkbox" /> 启用</label></td><td><button class="btn btn-primary" type="button" :disabled="savingUser === user.id" @click="saveUser(user)">{{ savingUser === user.id ? '保存中...' : '保存' }}</button></td></tr>
           <tr v-if="!users.length"><td colspan="5" class="table-empty">暂无用户</td></tr>
         </tbody></table>
       </div>
@@ -551,7 +552,7 @@ onMounted(refresh)
         </div>
       </div>
       <div v-if="aiSettings" class="form-panel">
-        <p v-if="!aiSettings.configured" class="muted">平台尚未完成 AI 配置。请填写接口地址、密钥和模型，保存后所有企业即可使用。</p>
+        <p v-if="!aiSettings.configured" class="muted">平台统一配置缺失或不完整，请先核对下方历史配置；保存后仅已获平台授权的企业可以使用。</p>
         <div class="form-grid ai-grid">
           <div class="form-field"><label for="ai-base-url">接口地址</label><input id="ai-base-url" v-model="aiDraft.baseUrl" placeholder="https://api.deepseek.com/v1" /><small class="muted">填写 OpenAI 兼容 API 基础地址；仅填域名时会补上 /v1，自定义路径会保留。测试连接只验证模型列表，生成能力仍需实际验证。</small></div>
           <div class="form-field">
@@ -580,6 +581,7 @@ onMounted(refresh)
           <span class="switch-label">{{ aiSharingSettings.enabled ? '已开启' : '已关闭' }}</span>
         </label>
       </div>
+    <AiConfigurationDiagnostics :refresh-key="JSON.stringify(aiSettings)" @migrated="refresh" />
     <DocumentGenerationSkills :refresh-key="loading" />
     <ResumeScoringSkills :refresh-key="loading" />
     </section>

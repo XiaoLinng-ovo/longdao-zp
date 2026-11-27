@@ -5,7 +5,7 @@
  * 读取接口只返回掩码，绝不回显密钥原文。
  */
 
-import { normalizeAiBaseUrl } from '@smartrecruit-pro/enterprise-ai'
+import { assertAiEndpointAllowed, normalizeAiBaseUrl } from '@smartrecruit-pro/enterprise-ai'
 import { readModelJsonResponse } from '../ai/model-http-error.js'
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -37,6 +37,30 @@ export interface AiConnectionTestInput {
   baseUrl?: string
   apiKey?: string
   timeoutMs?: number
+}
+
+export interface AiGenerationTestResult { ok: boolean; code: string | null; status?: number; model: string; latencyMs: number }
+
+/** No draft credentials or provider response text is ever returned or logged. */
+export async function testAiGeneration(env: NodeJS.ProcessEnv, fetchImpl: FetchLike = fetch): Promise<AiGenerationTestResult> {
+  const started = Date.now(), model = env.OPENAI_MODEL ?? ''
+  const result = (ok: boolean, code: string | null, status?: number): AiGenerationTestResult => ({ok,code,model,latencyMs:Date.now()-started,...(status ? {status} : {})})
+  if (!readAiSettings(env).configured) return result(false,'PLATFORM_AI_NOT_CONFIGURED')
+  try {
+    assertAiEndpointAllowed(env.OPENAI_BASE_URL ?? '')
+    const response = await fetchImpl(normalizeAiBaseUrl(env.OPENAI_BASE_URL) + '/chat/completions', {
+      method:'POST', redirect:'error', signal:AbortSignal.timeout(Math.min(120000,Number(env.OPENAI_TIMEOUT_MS)||120000)),
+      headers:{Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json'},
+      body:JSON.stringify({model,messages:[{role:'user',content:'Reply with OK.'}],max_tokens:1024,stream:false}),
+    })
+    if (!response.ok) { await response.body?.cancel(); return result(false,'AI_PROVIDER_HTTP_ERROR',response.status) }
+    const payload = await readModelJsonResponse(response) as {choices?: Array<{message?:{content?:unknown}}>}
+    if (typeof payload?.choices?.[0]?.message?.content !== 'string' || !payload.choices[0].message.content.trim()) return result(false,'AI_PROVIDER_INVALID_RESPONSE',response.status)
+    return result(true,null,response.status)
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+    return result(false, /^AI_(ENDPOINT|SECRET|ENCRYPTION)/.test(code) ? code : 'AI_PROVIDER_UNAVAILABLE')
+  }
 }
 
 export interface AiSettingsResponse extends AiSettingsView {

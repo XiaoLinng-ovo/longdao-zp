@@ -59,7 +59,7 @@ describe('streaming transcript preservation', () => {
     const rows = reconcileTranscript([{ ...sentence('好。'), speakerVerified: false }], checkpoint, 15000)
     assert.equal(rows[0]?.text, checkpoint.text)
     assert.equal(rows[0]?.speakerVerified, false)
-    assert.equal(rows[0]?.speakerMixed, true)
+    assert.equal(rows[0]?.speakerMixed, undefined)
     assert.deepEqual([rows[0]?.startMs, rows[0]?.endMs], [0, 15000])
   })
   it('also preserves missing clauses when offline output is not empty', () => {
@@ -68,7 +68,7 @@ describe('streaming transcript preservation', () => {
     assert.equal(rows[0], original)
     assert.equal(rows.map(row => row.text.replace(/[，。]/gu, '')).join(''), checkpoint.text.replace(/[，。]/gu, ''))
     assert.equal(rows[1]?.speakerVerified, false)
-    assert.equal(rows[1]?.speakerMixed, true)
+    assert.equal(rows[1]?.speakerMixed, undefined)
   })
   it('retains both acoustic speakers and appends only the missing streaming tail', () => {
     const rows = [sentence('请介绍项目。'), { ...sentence('我负责开发。', 1000), speakerId: 'voice_2' }]
@@ -123,7 +123,7 @@ describe('streaming transcript preservation', () => {
     assert.deepEqual(sorted.map(row => [row.startMs, row.endMs]), [[0, 3000], [3000, 4000], [4000, 9000], [9000, 10000], [10000, 15000]])
     assert.equal(result[1], first)
     assert.equal(result[3], second)
-    assert.ok(result.filter(row => row !== first && row !== second).every(row => row.speakerMixed && !row.speakerVerified))
+    assert.ok(result.filter(row => row !== first && row !== second).every(row => !row.speakerVerified && !row.speakerMixed))
   })
 
   it('retains conflicting unfinished stream words as an alternative without discarding offline speech', () => {
@@ -142,7 +142,7 @@ describe('streaming transcript preservation', () => {
     assert.equal(result.length, 1)
     assert.equal(result[0]?.text, '前半段离线识别文本。\n后半段离线识别文本。')
     assert.deepEqual([result[0]?.startMs, result[0]?.endMs], [0, 15000])
-    assert.equal(result[0]?.speakerMixed, true)
+    assert.equal(result[0]?.speakerMixed, undefined)
     assert.equal(result[0]?.transcriptComparison?.selectedSource, 'offline')
   })
 
@@ -173,5 +173,12 @@ describe('streaming transcript preservation', () => {
     const text = '请介绍项目。我负责开发。'
     const result = reconcileTranscript([sentence('请介绍项目。'), { ...sentence(text), endMs: 15000, speakerMixed: true }], { text, endMs: 15000, complete: true }, 0)
     assert.deepEqual(result.map(row => row.text), [text])
+  })
+
+  it('retains actual mixed-voice evidence when recovery cannot preserve speaker boundaries', () => {
+    const rows = [{ ...sentence('好。'), speakerMixed: true }]
+    const result = reconcileTranscript(rows, checkpoint, 15000)
+    assert.equal(result[0]?.speakerVerified, false)
+    assert.equal(result[0]?.speakerMixed, true)
   })
 })

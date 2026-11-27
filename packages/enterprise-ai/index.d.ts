@@ -16,6 +16,26 @@ export interface EnterpriseAiView {
   env: Record<'OPENAI_BASE_URL' | 'OPENAI_API_KEY' | 'OPENAI_MODEL' | 'OPENAI_TIMEOUT_MS', { value: string; configured: boolean; masked: boolean }>
 }
 export type PlatformAiView = Omit<EnterpriseAiView, 'organizationId' | 'scope'> & { scope: 'platform' }
+export interface AiMigrationPreview {
+  sourceOrganizationId: string; sourceName: string; sourceDigest: string; targetDigest: string;
+  model: string; baseUrlHost: string; originalBaseUrl: string; baseUrl?: string; updatedAt: string | null; platformExists: boolean;
+  affectedOrganizationCount: number; decryptable: boolean; errorCode: string | null; canMigrate: boolean
+}
+export interface AiMigrationInput { sourceOrganizationId: string; sourceDigest: string; targetDigest: string; baseUrl?: string }
+export interface AiMigrationReceipt { migrated: boolean; migrationId: string; targetDigest: string }
+export interface AiConfigurationDiagnosis {
+  platform: PlatformAiView; source: 'platform' | 'enterprise' | 'legacy_enterprise' | null;
+  effective: boolean; decryptable: boolean; errorCode: string | null; model?: string; candidates: AiMigrationPreview[]
+}
+export class PlatformAiMaintenance {
+  constructor(pool: DatabasePool, masterKey?: string)
+  preview(organizationId: string, baseUrl?: string): Promise<AiMigrationPreview>
+  sourceEnv(organizationId: string, expectedDigest: string, baseUrl?: string): Promise<Record<string,string>>
+  effectiveEnv(organizationId: string): Promise<Record<string,string>>
+  migrate(input: AiMigrationInput, actorId: string, requestId?: string): Promise<AiMigrationReceipt>
+  rollback(migrationId: string, actorId: string, requestId?: string): Promise<{rolledBack: boolean}>
+  diagnose(organizationId?: string): Promise<AiConfigurationDiagnosis>
+}
 export class PlatformAiStore {
   constructor(pool: DatabasePool, masterKey?: string)
   get(): Promise<PlatformAiView>
